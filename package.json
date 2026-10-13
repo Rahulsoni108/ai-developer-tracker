@@ -17,6 +17,14 @@
     "configuration": {
       "title": "AI Developer Tracker Diff Capture",
       "properties": {
+        "ai-developer-tracker.codex.enabled": {
+          "type": "boolean", "default": true, "scope": "machine", "restricted": true,
+          "description": "Discover local Codex session metadata during recording. Association always requires confirmation. Reload the extension to apply changes."
+        },
+        "ai-developer-tracker.codex.sessionsDirectory": {
+          "type": "string", "default": "", "scope": "machine", "restricted": true,
+          "description": "Absolute local Codex sessions directory for testing or custom installations. Empty uses ~/.codex/sessions. Workspace settings cannot redirect discovery. Reload the extension to apply changes."
+        },
         "ai-developer-tracker.diff.maxFileBytes": {
           "type": "integer", "default": 262144, "minimum": 1, "maximum": 1048576,
           "description": "Maximum UTF-8 file size to capture. Larger files produce reconstruction gaps. Reload the extension to apply changes."
@@ -51,6 +59,10 @@
       {
         "command": "ai-developer-tracker.stopRecording",
         "title": "AI Developer Tracker: Stop Recording"
+      },
+      {
+        "command": "ai-developer-tracker.reviewCodexSessions",
+        "title": "AI Developer Tracker: Review Codex Sessions"
       }
     ]
   },

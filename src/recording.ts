@@ -16,13 +16,15 @@ export interface RecordingLifecycle {
 export class RecordingController {
 	private recording = false;
 	private recordingSessionId: string | undefined;
+	private recordingStartedAt: string | undefined;
 	private pendingConsent: object | undefined;
 	private disposed = false;
 	private readonly lifecycle = new Set<RecordingLifecycle>();
 
 	constructor(
 		private readonly statusBar: RecordingStatusBar,
-		private readonly requestConsent: (isCurrentRequest: () => boolean) => PromiseLike<boolean>
+		private readonly requestConsent: (isCurrentRequest: () => boolean) => PromiseLike<boolean>,
+		private readonly now: () => Date = () => new Date()
 	) {
 		this.updateStatusBar();
 		this.statusBar.show();
@@ -34,6 +36,10 @@ export class RecordingController {
 
 	get sessionId(): string | undefined {
 		return this.recordingSessionId;
+	}
+
+	get startedAt(): string | undefined {
+		return this.recordingStartedAt;
 	}
 
 	addLifecycleListener(listener: RecordingLifecycle): { dispose(): void } {
@@ -61,6 +67,7 @@ export class RecordingController {
 					}
 				}
 				this.recordingSessionId = preparedSessionId;
+				this.recordingStartedAt = this.now().toISOString();
 				this.recording = true;
 				this.updateStatusBar();
 				for (const listener of this.lifecycle) {
@@ -87,6 +94,7 @@ export class RecordingController {
 		const sessionId = this.recordingSessionId!;
 		this.recording = false;
 		this.recordingSessionId = undefined;
+		this.recordingStartedAt = undefined;
 		this.updateStatusBar();
 		for (const listener of this.lifecycle) {
 			listener.stopped(sessionId);
@@ -102,6 +110,7 @@ export class RecordingController {
 		this.pendingConsent = undefined;
 		this.recording = false;
 		this.recordingSessionId = undefined;
+		this.recordingStartedAt = undefined;
 		this.statusBar.dispose();
 	}
 

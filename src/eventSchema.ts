@@ -70,7 +70,49 @@ export interface GapEvent extends CommonEvent<'file.gap', GapPayload> {
 	attribution: 'unknown';
 }
 export type CodeChangeEvent = DiffEvent | BaselineEvent | GapEvent;
-export type TrackerEvent = FileActivityEvent | CodeChangeEvent;
+export type CodexEventType = 'ai.prompt.submitted' | 'ai.response.completed'
+	| 'ai.tool.started' | 'ai.tool.completed' | 'ai.tool.failed' | 'ai.tool.incomplete';
+export const MAX_CODEX_CONTENT_BYTES = 262144;
+export interface CodexSourceRecord {
+	sourceFileReference: string;
+	recordIndex: number;
+	generation: number;
+	byteOffset: number;
+	byteLength: number;
+	recordType: 'response_item' | 'event_msg';
+}
+export interface CodexMessagePayload {
+	text: string;
+	sourceRecord: CodexSourceRecord;
+	partLengths?: number[];
+	messageId?: string;
+	phase?: 'commentary' | 'final_answer';
+}
+export interface CodexToolPayload {
+	toolName: string;
+	sourceRecord: CodexSourceRecord;
+	callId?: string;
+	input?: string;
+	output?: string;
+	status: 'running' | 'succeeded' | 'failed' | 'unknown' | 'incomplete';
+	matched: boolean;
+	startedEventId?: string;
+	exitCode?: number;
+	contentOmitted?: 'privacy_filter';
+	statusUpdate?: boolean;
+	incompleteReason?: 'recording_stopped' | 'capture_disposed' | 'turn_aborted' | 'stream_reset' | 'capacity_limit';
+}
+export type CodexActivityEvent = (
+	CommonEvent<'ai.prompt.submitted' | 'ai.response.completed', CodexMessagePayload>
+	| CommonEvent<'ai.tool.started' | 'ai.tool.completed' | 'ai.tool.failed' | 'ai.tool.incomplete', CodexToolPayload>
+) & { source: 'codex'; sourceSessionId: string; workspaceId: string };
+export type TrackerEvent = FileActivityEvent | CodeChangeEvent | CodexActivityEvent;
+
+export function createCodexEvent(input: Omit<CodexActivityEvent, 'schemaVersion' | 'eventId' | 'timestamp' | 'source'>
+	& { timestamp?: Date }): CodexActivityEvent {
+	return { ...input, schemaVersion: SCHEMA_VERSION, eventId: randomUUID(), source: 'codex',
+		timestamp: (input.timestamp ?? new Date()).toISOString() } as CodexActivityEvent;
+}
 
 export function createChangeEvent(input: (
 	Omit<DiffEvent, 'schemaVersion' | 'eventId' | 'timestamp' | 'source' | 'attribution'>
@@ -104,6 +146,8 @@ const fields = new Set([
 	'workspaceId', 'payload', 'sourceSessionId', 'correlationId', 'attribution'
 ]);
 const eventTypes = new Set<string>(['file.created', 'file.modified', 'file.saved', 'file.deleted', 'file.diff', 'file.baseline', 'file.gap']);
+const codexEventTypes = new Set<string>(['ai.prompt.submitted', 'ai.response.completed',
+	'ai.tool.started', 'ai.tool.completed', 'ai.tool.failed', 'ai.tool.incomplete']);
 const changeReasons = new Set<ChangeReason>(['edit', 'save', 'external', 'create', 'delete']);
 
 function isHash(value: unknown): value is string {
@@ -159,7 +203,54 @@ function isRelativePath(value: unknown): value is string {
 		&& value.split('/').every(segment => segment !== '' && segment !== '.' && segment !== '..');
 }
 
-/** Contents are allowed only as bounded unified patches in explicit code-change events. */
+function validCodexPayload(type: string, payload: Record<string, unknown>): boolean {
+	const sourceRecord = dataObject(payload.sourceRecord);
+	if (!sourceRecord || Object.keys(sourceRecord).some(key => !['sourceFileReference', 'recordIndex', 'generation', 'byteOffset', 'byteLength', 'recordType'].includes(key))
+		|| typeof sourceRecord.sourceFileReference !== 'string' || !/^codex-file:[a-f0-9]{64}$/.test(sourceRecord.sourceFileReference)
+		|| !['response_item', 'event_msg'].includes(sourceRecord.recordType as string)
+		|| !Number.isSafeInteger(sourceRecord.recordIndex) || (sourceRecord.recordIndex as number) < 1
+		|| !Number.isSafeInteger(sourceRecord.generation) || (sourceRecord.generation as number) < 0
+		|| !Number.isSafeInteger(sourceRecord.byteOffset) || (sourceRecord.byteOffset as number) < 0
+		|| !Number.isSafeInteger(sourceRecord.byteLength) || (sourceRecord.byteLength as number) < 1) { return false; }
+	payload.sourceRecord = sourceRecord;
+	const boundedText = (value: unknown) => typeof value === 'string' && Buffer.byteLength(value) <= MAX_CODEX_CONTENT_BYTES;
+	if (type === 'ai.prompt.submitted' || type === 'ai.response.completed') {
+		if (Object.keys(payload).some(key => !['text', 'partLengths', 'messageId', 'phase', 'sourceRecord'].includes(key))
+			|| !boundedText(payload.text) || !(payload.text as string).trim()
+			|| (payload.messageId !== undefined && !isIdentifier(payload.messageId))
+			|| (payload.phase !== undefined && !['commentary', 'final_answer'].includes(payload.phase as string))) { return false; }
+		if (payload.partLengths !== undefined) {
+			if (!Array.isArray(payload.partLengths) || !payload.partLengths.length || payload.partLengths.length > 1024) { return false; }
+			const lengths: number[] = [];
+			for (let index = 0; index < payload.partLengths.length; index++) {
+				const descriptor = Object.getOwnPropertyDescriptor(payload.partLengths, String(index));
+				if (!descriptor || !Object.hasOwn(descriptor, 'value') || !Number.isSafeInteger(descriptor.value) || descriptor.value < 0) { return false; }
+				lengths.push(descriptor.value);
+			}
+			if (lengths.reduce((sum, length) => sum + length, lengths.length - 1) !== (payload.text as string).length) { return false; }
+			payload.partLengths = lengths;
+		}
+		return true;
+	}
+	if (Object.keys(payload).some(key => !['toolName', 'sourceRecord', 'callId', 'input', 'output', 'status', 'matched',
+		'startedEventId', 'exitCode', 'contentOmitted', 'statusUpdate', 'incompleteReason'].includes(key))
+		|| !isIdentifier(payload.toolName) || typeof payload.matched !== 'boolean'
+		|| (payload.callId !== undefined && !isIdentifier(payload.callId))
+		|| (payload.input !== undefined && !boundedText(payload.input))
+		|| (payload.output !== undefined && !boundedText(payload.output))
+		|| (payload.startedEventId !== undefined && !isUuid(payload.startedEventId))
+		|| (payload.exitCode !== undefined && !Number.isSafeInteger(payload.exitCode))
+		|| (payload.statusUpdate !== undefined && typeof payload.statusUpdate !== 'boolean')
+		|| (payload.contentOmitted !== undefined && payload.contentOmitted !== 'privacy_filter')
+		|| (payload.contentOmitted !== undefined && (payload.input !== undefined || payload.output !== undefined))) { return false; }
+	const statuses = type === 'ai.tool.started' ? ['running', 'unknown']
+		: type === 'ai.tool.failed' ? ['failed'] : type === 'ai.tool.incomplete' ? ['incomplete'] : ['succeeded', 'unknown'];
+	return statuses.includes(payload.status as string)
+		&& (type !== 'ai.tool.incomplete' ? payload.incompleteReason === undefined
+			: ['recording_stopped', 'capture_disposed', 'turn_aborted', 'stream_reset', 'capacity_limit'].includes(payload.incompleteReason as string));
+}
+
+/** Sensitive content is allowed only in explicitly defined, bounded event payloads. */
 export function validateEvent(value: unknown): EventValidationResult {
 	try {
 		const input = dataObject(value);
@@ -185,7 +276,8 @@ export function validateEvent(value: unknown): EventValidationResult {
 		if (!['vscode', 'codex', 'claude'].includes(input.source as string)) {
 			errors.push('Unsupported or missing source');
 		}
-		if (!eventTypes.has(input.eventType as FileEventType)) {
+		const isCodex = codexEventTypes.has(input.eventType as string);
+		if (!eventTypes.has(input.eventType as FileEventType) && !isCodex) {
 			errors.push('Unsupported or missing eventType');
 		}
 		if (!isIdentifier(input.workspaceId)) {
@@ -196,7 +288,11 @@ export function validateEvent(value: unknown): EventValidationResult {
 		const allowedPayloadFields = input.eventType === 'file.gap'
 			? ['relativePath', 'reason', 'changeReason', 'beforeHash', 'afterHash']
 			: isChange ? ['relativePath', 'diff', 'changeReason', 'beforeHash', 'afterHash'] : ['relativePath'];
-		if (!payload || Object.keys(payload).some(key => !allowedPayloadFields.includes(key)) || !isRelativePath(payload.relativePath)) {
+		if (isCodex) {
+			if (input.source !== 'codex' || !isIdentifier(input.sourceSessionId) || !payload || !validCodexPayload(input.eventType as string, payload)) {
+				errors.push('Invalid Codex event source, sourceSessionId, or payload');
+			}
+		} else if (!payload || Object.keys(payload).some(key => !allowedPayloadFields.includes(key)) || !isRelativePath(payload.relativePath)) {
 			errors.push('Invalid file payload fields or relativePath');
 		} else if (isChange) {
 			if (input.source !== 'vscode' || input.attribution !== 'unknown') {

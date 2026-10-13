@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { constants } from 'node:fs';
-import { open } from 'node:fs/promises';
+import { open, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { createTwoFilesPatch } from 'diff';
 import { FileTracker, type TrackedFile } from './fileTracker';
@@ -37,6 +37,7 @@ interface PendingEdit {
 	file: TrackedFile;
 	snapshot: Promise<Snapshot>;
 	timestamp: Date;
+	guard: (() => Promise<boolean>) | undefined;
 	idle: ReturnType<typeof setTimeout>;
 	maximum: ReturnType<typeof setTimeout>;
 }
@@ -82,6 +83,8 @@ export class DiffTracker implements vscode.Disposable, RecordingLifecycle {
 			}
 		}
 		if (this.options.maxDiffBytes > MAX_SCHEMA_DIFF_BYTES || this.options.maxFileBytes > 1024 * 1024
+			|| this.options.maxMemoryBytes > 128 * 1024 * 1024 || this.options.diffTimeoutMs > 250
+			|| this.options.debounceMs > 2000 || this.options.maxCheckpointMs > 10000
 			|| this.options.maxCheckpointMs < this.options.debounceMs) {
 			throw new Error('Unsupported diff limits or checkpoint intervals.');
 		}
@@ -189,7 +192,7 @@ export class DiffTracker implements vscode.Disposable, RecordingLifecycle {
 		}
 	}
 
-	private async readDisk(file: TrackedFile): Promise<Snapshot | undefined> {
+	private async readDisk(file: TrackedFile, capturedAt?: Date): Promise<Snapshot | undefined> {
 		const guard = this.files.getReadGuard(file.uri);
 		try {
 			if (!guard || !await guard()) {
@@ -201,12 +204,20 @@ export class DiffTracker implements vscode.Disposable, RecordingLifecycle {
 				if (!before.isFile()) {
 					return undefined;
 				}
+				if (capturedAt && before.mtimeMs > capturedAt.getTime() + 1) {
+					// The notified version was overwritten before it could be sampled.
+					return { exists: true, gap: 'read_race' };
+				}
 				if (before.size > this.options.maxFileBytes) {
 					return { exists: true, gap: 'file_size_limit' };
 				}
 				// Recheck the canonical scope after opening and before reading any bytes.
 				if (!await guard()) {
 					return undefined;
+				}
+				const current = await stat(file.uri.fsPath);
+				if (current.dev !== before.dev || current.ino !== before.ino) {
+					return { exists: true, gap: 'read_race' };
 				}
 				const buffer = Buffer.alloc(this.options.maxFileBytes + 1);
 				let length = 0;
@@ -246,6 +257,7 @@ export class DiffTracker implements vscode.Disposable, RecordingLifecycle {
 			return;
 		}
 		const timestamp = this.now();
+		const guard = this.files.getReadGuard(file.uri);
 		const known = session.states.has(key(file));
 		const snapshot = this.queued >= MAX_PENDING || (!session.edits.has(key(file)) && session.edits.size >= MAX_PENDING)
 			? Promise.resolve<Snapshot>({ exists: true, gap: 'checkpoint_overflow' })
@@ -253,7 +265,7 @@ export class DiffTracker implements vscode.Disposable, RecordingLifecycle {
 		const captured = snapshot.then(sample => sample ?? { exists: true, gap: 'read_error' } as Snapshot);
 		if (!session.startedAt || reason === 'save') {
 			this.removeEdit(session, key(file));
-			this.checkpoint(session, file, captured, reason, timestamp);
+			this.checkpoint(session, file, captured, reason, timestamp, guard);
 			return;
 		}
 		const existing = session.edits.get(key(file));
@@ -261,7 +273,7 @@ export class DiffTracker implements vscode.Disposable, RecordingLifecycle {
 			clearTimeout(existing.idle);
 		}
 		const drain = () => this.drainEdit(session, key(file));
-		session.edits.set(key(file), { file, snapshot: captured, timestamp,
+		session.edits.set(key(file), { file, snapshot: captured, timestamp, guard,
 			idle: setTimeout(drain, this.options.debounceMs),
 			maximum: existing?.maximum ?? setTimeout(drain, this.options.maxCheckpointMs) });
 	}
@@ -284,7 +296,7 @@ export class DiffTracker implements vscode.Disposable, RecordingLifecycle {
 		}
 		this.drainEdit(session, key(file));
 		const snapshot = this.queued >= MAX_PENDING
-			? Promise.resolve<Snapshot>({ exists: true, gap: 'checkpoint_overflow' }) : this.readDisk(file);
+			? Promise.resolve<Snapshot>({ exists: true, gap: 'checkpoint_overflow' }) : this.readDisk(file, timestamp);
 		this.checkpoint(session, file, snapshot, reason, timestamp);
 		if (reason === 'create') {
 			const initial = !session.startedAt;
@@ -293,7 +305,7 @@ export class DiffTracker implements vscode.Disposable, RecordingLifecycle {
 				await this.files.flush();
 				for (const child of this.files.getEligibleFiles()) {
 					if (child.workspaceId === workspaceId && child.relativePath.startsWith(file.relativePath + '/')) {
-						const sample = await this.readDisk(child);
+						const sample = await this.readDisk(child, timestamp);
 						if (sample) {
 							if (initial) {
 								this.store(session, child, sample, true);
@@ -307,9 +319,9 @@ export class DiffTracker implements vscode.Disposable, RecordingLifecycle {
 		}
 	}
 
-	private checkpoint(session: Session, file: TrackedFile, snapshot: Promise<Snapshot | undefined>, reason: ChangeReason, timestamp: Date): void {
+	private checkpoint(session: Session, file: TrackedFile, snapshot: Promise<Snapshot | undefined>, reason: ChangeReason, timestamp: Date,
+		guard = this.files.getReadGuard(file.uri)): void {
 		const initial = !session.startedAt;
-		const guard = this.files.getReadGuard(file.uri);
 		this.enqueue(async () => {
 			const sample = await snapshot;
 			if (!sample) {
@@ -425,7 +437,7 @@ export class DiffTracker implements vscode.Disposable, RecordingLifecycle {
 	private drainEdit(session: Session, fileKey: string): void {
 		const edit = this.removeEdit(session, fileKey);
 		if (edit) {
-			this.checkpoint(session, edit.file, edit.snapshot, 'edit', edit.timestamp);
+			this.checkpoint(session, edit.file, edit.snapshot, 'edit', edit.timestamp, edit.guard);
 		}
 	}
 	private drainEdits(session: Session): void {

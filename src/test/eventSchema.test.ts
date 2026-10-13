@@ -1,5 +1,5 @@
 import * as assert from 'assert';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,6 +9,8 @@ import {
 	type EventSource, type FileEventType
 } from '../eventSchema';
 import { JsonlWriter } from '../jsonlWriter';
+import { createChangeEvent, MAX_SCHEMA_DIFF_BYTES } from '../eventSchema';
+import { createTwoFilesPatch } from 'diff';
 
 function event() {
 	return createFileEvent({
@@ -19,6 +21,23 @@ function event() {
 }
 
 suite('Common event schema', () => {
+	test('validates explicit diff, baseline and gap payloads while rejecting arbitrary source-code fields', () => {
+		const payload = { relativePath: 'src/app.ts', diff: createTwoFilesPatch('before', 'after', 'old\n', 'new\n'),
+			beforeHash: createHash('sha256').update('old\n').digest('hex'), afterHash: createHash('sha256').update('new\n').digest('hex'), changeReason: 'external' as const };
+		const diff = createChangeEvent({ eventType: 'file.diff', sessionId: randomUUID(), workspaceId: 'workspace-id', payload });
+		assert.strictEqual(validateEvent(diff).valid, true);
+		assert.strictEqual(validateEvent({ ...diff, eventType: 'file.baseline' }).valid, true);
+		const gap = createChangeEvent({ eventType: 'file.gap', sessionId: randomUUID(), workspaceId: 'workspace-id',
+			payload: { relativePath: 'src/app.ts', reason: 'read_race', changeReason: 'external' } });
+		assert.strictEqual(validateEvent(gap).valid, true);
+		for (const extra of [{ diff: 'invalid patch' }, { beforeHash: 'invalid' }, { afterHash: '' },
+			{ changeReason: 'ai' }, { contents: 'private' }, { diff: 'x'.repeat(MAX_SCHEMA_DIFF_BYTES + 1) }]) {
+			assert.strictEqual(validateEvent({ ...diff, payload: { ...payload, ...extra } }).valid, false);
+		}
+		assert.strictEqual(validateEvent({ ...diff, attribution: 'ai_confirmed' }).valid, false);
+		assert.strictEqual(validateEvent({ ...diff, source: 'codex' }).valid, false);
+		assert.strictEqual(validateEvent({ ...gap, payload: { ...gap.payload, reason: 'unknown' } }).valid, false);
+	});
 	test('generates a versioned event with a UUID and UTC timestamp', () => {
 		const created = event();
 		assert.strictEqual(created.schemaVersion, SCHEMA_VERSION);

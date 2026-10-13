@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
-import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { applyPatch } from 'diff';
@@ -341,6 +341,32 @@ suite('Diff tracking', () => {
 		assert.deepStrictEqual(reconstruct(await events()), [initial, 'last checkpoint\n']);
 	});
 
+	test('preserves a debounced checkpoint when VS Code removes its owning workspace folder', async () => {
+		await start();
+		edit(editor(), 'last approved change\n');
+		folders = []; // workspace.getWorkspaceFolder now returns undefined, as in the real removal event.
+		recording.stop(); files.clearWorkspace();
+		assert.deepStrictEqual(reconstruct(await events()), [initial, 'last approved change\n']);
+	});
+
+	test('marks a timeout as an explicit gap without writing a partial patch', async () => {
+		configure({ diffTimeoutMs: 1 });
+		const old = Array.from({ length: 500 }, (_, i) => `original unique line ${i}`).join('\n');
+		const replacement = Array.from({ length: 500 }, (_, i) => `replacement unique line ${i}`).join('\n');
+		await writeFile(uri('app.ts').fsPath, old); await start();
+		edit(editor(), replacement);
+		assert.ok((await events()).some(event => event.eventType === 'file.gap' && event.payload.reason === 'diff_timeout'));
+	});
+
+	test('records a read-error gap and recovers with a new baseline after a missed deletion notification', async () => {
+		await start(); await rm(uri('app.ts').fsPath); disk('external');
+		const missed = await events();
+		assert.ok(missed.some(event => event.eventType === 'file.gap' && event.payload.reason === 'read_error'));
+		await writeFile(uri('app.ts').fsPath, 'recovered\n'); disk('create');
+		const recovered = (await events()).at(-1)!;
+		assert.strictEqual(recovered.eventType, 'file.baseline');
+	});
+
 	test('keeps a consistent patch chain across edit, save, external edit and deletion', async () => {
 		await start();
 		edit(editor(), 'edit version\n'); await diffs.flush();
@@ -352,5 +378,71 @@ suite('Diff tracking', () => {
 		assert.deepStrictEqual(reconstruct(captured), [initial, 'edit version\n', 'save version\n', 'external version\n', '']);
 		assert.strictEqual(new Set(captured.map(event => event.eventId)).size, captured.length);
 		assert.deepStrictEqual(errors, []);
+	});
+
+	test('does not capture later post-Stop disk content when an external checkpoint read is delayed', async () => {
+		await start();
+		let release!: () => void;
+		const waiting = new Promise<void>(resolve => { release = resolve; });
+		const original = files.getReadGuard.bind(files);
+		files.getReadGuard = file => {
+			const guard = original(file);
+			return async () => { await waiting; return await guard?.() ?? false; };
+		};
+		await writeFile(uri('app.ts').fsPath, 'active external version\n'); disk('external');
+		recording.stop(); await wait(10);
+		await writeFile(uri('app.ts').fsPath, 'private post-stop content\n'); release();
+		const captured = await events();
+		assert.ok(captured.some(event => event.eventType === 'file.gap' && event.payload.reason === 'read_race'));
+		assert.ok(!(await readFile(jsonl.filePath, 'utf8')).includes('private post-stop content'));
+	});
+
+	test('captures folder create/delete checkpoints without overlapping child duplicates', async () => {
+		await start();
+		await mkdir(uri('new-folder').fsPath);
+		await writeFile(uri('new-folder/code.ts').fsPath, 'folder code\n');
+		await writeFile(uri('new-folder/.env').fsPath, 'private');
+		disk('create', uri('new-folder')); disk('create', uri('new-folder/code.ts'));
+		await diffs.flush(); await files.flush();
+		await rm(uri('new-folder').fsPath, { recursive: true });
+		disk('delete', uri('new-folder')); disk('delete', uri('new-folder/code.ts'));
+		const captured = (await events()).filter(event => event.payload.relativePath.startsWith('new-folder/'));
+		assert.deepStrictEqual(reconstruct(captured, 'new-folder/code.ts'), ['folder code\n', '']);
+		assert.strictEqual(captured.length, 2);
+	});
+
+	test('tracks all approved roots and assigns nested-root changes to a single watcher', async () => {
+		const nested = { uri: uri('nested'), name: 'nested', index: 1 };
+		folders.push(nested); await mkdir(nested.uri.fsPath);
+		const child = vscode.Uri.joinPath(nested.uri, 'child.ts');
+		await writeFile(child.fsPath, 'child baseline\n');
+		await files.selectWorkspaces(folders); await start();
+		await writeFile(child.fsPath, 'child modified\n'); disk('external', child); disk('external', child);
+		const captured = await events();
+		assert.strictEqual(captured.filter(event => event.eventType === 'file.baseline').length, 2);
+		const childEvents = captured.filter(event => event.payload.relativePath === 'child.ts');
+		assert.deepStrictEqual(reconstruct(childEvents, 'child.ts'), ['child baseline\n', 'child modified\n']);
+		assert.notStrictEqual(childEvents[0].workspaceId, captured.find(event => event.payload.relativePath === 'app.ts')!.workspaceId);
+		assert.strictEqual(childEvents.length, 2);
+	});
+
+	test('skips oversized unsaved documents before copying their text', async () => {
+		configure({ maxFileBytes: 64 }); await start();
+		const document = editor(); edit(document, 'large private source'.repeat(100));
+		assert.strictEqual(document.reads, 0);
+		assert.ok((await events()).some(event => event.eventType === 'file.gap' && event.payload.reason === 'file_size_limit'));
+	});
+
+	test('tightens existing log permissions before writing code and rejects log-file symlinks', async function () {
+		if (process.platform === 'win32') { this.skip(); }
+		await mkdir(dirname(jsonl.filePath), { recursive: true });
+		await writeFile(jsonl.filePath, ''); await chmod(jsonl.filePath, 0o644);
+		await start();
+		assert.strictEqual((await stat(jsonl.filePath)).mode & 0o777, 0o600);
+		const source = uri('untouched.ts'); await writeFile(source.fsPath, 'do not modify');
+		const link = join(temporary, 'linked-log.jsonl'); await symlink(source.fsPath, link);
+		const event = captured.find(event => event.eventType === 'file.baseline')!;
+		await assert.rejects(new JsonlWriter(link).write(event));
+		assert.strictEqual(await readFile(source.fsPath, 'utf8'), 'do not modify');
 	});
 });
