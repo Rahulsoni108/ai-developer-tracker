@@ -1,0 +1,82 @@
+{
+  "name": "ai-developer-tracker",
+  "displayName": "AI Developer Tracker",
+  "description": "Track developer coding activity, AI interactions, and code changes during AI-assisted coding sessions.",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.140.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "AI Developer Tracker Diff Capture",
+      "properties": {
+        "ai-developer-tracker.diff.maxFileBytes": {
+          "type": "integer", "default": 262144, "minimum": 1, "maximum": 1048576,
+          "description": "Maximum UTF-8 file size to capture. Larger files produce reconstruction gaps. Reload the extension to apply changes."
+        },
+        "ai-developer-tracker.diff.maxDiffBytes": {
+          "type": "integer", "default": 524288, "minimum": 1, "maximum": 2097152,
+          "description": "Maximum unified patch size in bytes. Reload the extension to apply changes."
+        },
+        "ai-developer-tracker.diff.maxMemoryBytes": {
+          "type": "integer", "default": 33554432, "minimum": 1, "maximum": 134217728,
+          "description": "Maximum retained baseline content in memory. Reload the extension to apply changes."
+        },
+        "ai-developer-tracker.diff.debounceMs": {
+          "type": "integer", "default": 300, "minimum": 1, "maximum": 2000,
+          "description": "Idle delay before an editor diff checkpoint. Reload the extension to apply changes."
+        },
+        "ai-developer-tracker.diff.maxCheckpointMs": {
+          "type": "integer", "default": 2000, "minimum": 2000, "maximum": 10000,
+          "description": "Maximum grouping interval during continuous typing. Reload the extension to apply changes."
+        },
+        "ai-developer-tracker.diff.diffTimeoutMs": {
+          "type": "integer", "default": 100, "minimum": 1, "maximum": 250,
+          "description": "Computation time budget per asynchronous diff. Reload the extension to apply changes."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "ai-developer-tracker.startRecording",
+        "title": "AI Developer Tracker: Start Recording"
+      },
+      {
+        "command": "ai-developer-tracker.stopRecording",
+        "title": "AI Developer Tracker: Stop Recording"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "24.x",
+    "@types/vscode": "^1.140.0",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.0.0",
+    "eslint": "^10.5.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.61.1"
+  },
+  "overrides": {
+    "diff": "^8.0.4",
+    "serialize-javascript": "^7.0.6"
+  },
+  "dependencies": {
+    "diff": "^8.0.4"
+  }
+}
