@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { createCodexEvent, MAX_CODEX_CONTENT_BYTES, validateEvent, type CodexActivityEvent,
 	type CodexMessagePayload, type CodexSourceRecord, type CodexToolPayload } from './eventSchema';
+import { extractToolFileEvidence, relativeToolPath } from './toolFileEvidence';
 import type { CodexRecordContext } from './codexJsonlReader';
 import type { CodexSessionDiscovery, CodexSessionRegistration } from './codexSessionDiscovery';
 import type { ActivityWriter } from './jsonlWriter';
@@ -14,6 +15,7 @@ export interface CodexParserOptions {
 	maxOpenCalls?: number;
 	maxSources?: number;
 	onDiagnostic?: (reason: CodexParserDiagnostic) => void;
+	resolveToolPath?: (path: string, context: CodexRecordContext) => string | undefined;
 }
 interface Mirror { origin: string; index: number; timestamp: number; turnId?: string; paired: boolean; }
 interface Call {
@@ -286,8 +288,22 @@ export class CodexEventParser implements RecordingLifecycle {
 		const name = identifier(payload.name) ? payload.name
 			: (payload.type as string).startsWith('exec_command_') ? 'exec_command'
 				: (payload.type as string).startsWith('patch_apply_') ? 'apply_patch' : call?.name ?? 'unknown';
+		const fileEvidence = (applied: boolean) => extractToolFileEvidence(payload, raw => {
+			if (this.options.resolveToolPath) { return this.options.resolveToolPath(raw, context); }
+			const cwd = this.discovery.getRegistry().find(entry => entry.sourceFileId === context.sourceFileId)?.workspaceRelativeCwd;
+			return relativeToolPath(raw, cwd);
+		}, this.options.isExcludedPath ?? (() => false), applied);
 		if (start) {
-			if (call?.startedEventId) { return; }
+			if (call?.startedEventId) {
+				const effects = fileEvidence(false);
+				if (effects.length) {
+					const metadata: CodexToolPayload = { toolName: call.name, status: 'running', matched: !!callId, sourceRecord: reference,
+						fileEvidence: effects, timestampOrigin: context.timestamp ? 'source' : 'capture', statusUpdate: true,
+						startedEventId: call.startedEventId, ...(callId ? { callId } : {}) };
+					this.write(run, this.event(context, 'ai.tool.started', metadata, callId));
+				}
+				return;
+			}
 			let input = typeof payload.arguments === 'string' ? payload.arguments : typeof payload.input === 'string' ? payload.input : undefined;
 			if (payload.type === 'exec_command_begin') { input = commandInput(payload.command); }
 			const blocked = this.privacyFiltered(input) || this.privacyFiltered(typeof payload.cwd === 'string' ? payload.cwd : undefined)
@@ -295,6 +311,7 @@ export class CodexEventParser implements RecordingLifecycle {
 			if (input !== undefined && Buffer.byteLength(input) > MAX_CODEX_CONTENT_BYTES) { this.diagnostic('content_limit'); input = undefined; }
 			if (blocked) { this.diagnostic('privacy_filtered'); }
 			const normalized: CodexToolPayload = { toolName: name, status: 'running', matched: !!callId, sourceRecord: reference,
+				fileEvidence: fileEvidence(false), timestampOrigin: context.timestamp ? 'source' : 'capture',
 				...(callId ? { callId } : {}), ...(blocked ? { contentOmitted: 'privacy_filter' } : input !== undefined ? { input } : {}) };
 			const event = this.event(context, 'ai.tool.started', normalized, callId);
 			this.write(run, event);
@@ -323,10 +340,12 @@ export class CodexEventParser implements RecordingLifecycle {
 				|| ['failed', 'declined', 'error', 'cancelled'].includes((payload.status ?? outputStatus?.status) as string) || (exitCode !== undefined && exitCode !== 0)
 				? 'failed' : payload.success === true || outputStatus?.success === true || payload.status === 'completed' || exitCode === 0 ? 'succeeded' : 'unknown';
 			const outputHash = output !== undefined ? hash(output) : undefined;
-			if (call?.closed && (call.status === status || (status === 'unknown' && call.status !== 'unknown'))) { return; }
+			const effects = fileEvidence(status === 'succeeded');
+			if (call?.closed && !effects.length && (call.status === status || (status === 'unknown' && call.status !== 'unknown'))) { return; }
 			const update = !!call?.closed;
 			const normalized: CodexToolPayload = {
 				toolName: call?.name ?? name, sourceRecord: reference, status, matched: !!call?.startedEventId,
+				fileEvidence: effects, timestampOrigin: context.timestamp ? 'source' : 'capture',
 				...(callId ? { callId } : {}), ...(call?.startedEventId ? { startedEventId: call.startedEventId } : {}),
 				...(exitCode !== undefined ? { exitCode } : {}),
 				...(blocked ? { contentOmitted: 'privacy_filter' } : output !== undefined && (!update || call?.outputHash !== outputHash) ? { output } : {}),

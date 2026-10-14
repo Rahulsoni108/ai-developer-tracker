@@ -17,6 +17,10 @@
     "configuration": {
       "title": "AI Developer Tracker Diff Capture",
       "properties": {
+        "ai-developer-tracker.queue.maxSizeMB": {
+          "type": "integer", "default": 100, "minimum": 1, "maximum": 10240, "scope": "machine", "restricted": true,
+          "description": "Maximum SQLite queue storage in MB (1 MB = 1048576 bytes), including journal sidecars. Warns at 80%; stops collection when an event cannot safely fit. Existing events are never automatically deleted. Reload the extension to apply changes."
+        },
         "ai-developer-tracker.codex.enabled": {
           "type": "boolean", "default": true, "scope": "machine", "restricted": true,
           "description": "Discover local Codex session metadata during recording. Association always requires confirmation. Reload the extension to apply changes."
@@ -52,6 +56,10 @@
       }
     },
     "commands": [
+      {
+        "command": "ai-developer-tracker.showQueueHealth",
+        "title": "AI Developer Tracker: Show Local Queue Health"
+      },
       {
         "command": "ai-developer-tracker.startRecording",
         "title": "AI Developer Tracker: Start Recording"

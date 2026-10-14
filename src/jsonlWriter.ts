@@ -10,8 +10,14 @@ export interface ActivityWriter {
 
 export class JsonlWriter implements ActivityWriter {
 	private pending: Promise<void> = Promise.resolve();
+	private readonly listeners = new Set<(event: Readonly<TrackerEvent>) => void>();
 
 	constructor(readonly filePath: string) {}
+	/** Synchronous notifications after successful persistence. Listeners must queue async work. */
+	onDidWrite(listener: (event: Readonly<TrackerEvent>) => void): { dispose(): void } {
+		this.listeners.add(listener);
+		return { dispose: () => { this.listeners.delete(listener); } };
+	}
 
 	write(event: unknown): Promise<void> {
 		const validation = validateEvent(event);
@@ -28,6 +34,9 @@ export class JsonlWriter implements ActivityWriter {
 				await handle.writeFile(line, { encoding: 'utf8' });
 			} finally {
 				await handle.close();
+			}
+			for (const listener of this.listeners) {
+				try { listener(JSON.parse(line) as TrackerEvent); } catch { /* Observer failures cannot invalidate a successful append. */ }
 			}
 		});
 		// A failed append must not prevent later writes; the caller receives the error.
