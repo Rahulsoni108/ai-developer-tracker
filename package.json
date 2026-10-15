@@ -17,6 +17,15 @@
     "configuration": {
       "title": "AI Developer Tracker Diff Capture",
       "properties": {
+        "ai-developer-tracker.upload.endpoint": {"type": "string", "default": "", "description": "HTTPS event endpoint. Empty disables uploads. Only user settings are used; changes revoke upload consent. Credentials, query strings and fragments are prohibited.", "scope": "machine", "restricted": true},
+        "ai-developer-tracker.upload.enabled": {"type": "boolean", "default": false, "description": "Upload status mirror. Settings cannot authorize uploads. Use Enable Uploads for separate explicit consent; reload always disables uploads. Set false to revoke consent.", "scope": "machine", "restricted": true},
+        "ai-developer-tracker.upload.maxEvents": {"type": "integer", "default": 100, "minimum": 1, "maximum": 1000, "description": "Maximum events per upload batch. Changes disable uploads and require fresh consent.", "scope": "machine", "restricted": true},
+        "ai-developer-tracker.upload.maxBytes": {"type": "integer", "default": 1048576, "minimum": 1024, "maximum": 4194304, "description": "Maximum serialized upload request bytes. Changes disable uploads and require fresh consent.", "scope": "machine", "restricted": true},
+        "ai-developer-tracker.upload.timeoutMs": {"type": "integer", "default": 30000, "minimum": 10, "maximum": 120000, "description": "Upload operation timeout in milliseconds. Changes disable uploads and require fresh consent.", "scope": "machine", "restricted": true},
+        "ai-developer-tracker.retention.days": {
+          "type": "integer", "default": 30, "minimum": 0, "maximum": 3650, "scope": "machine", "restricted": true,
+          "description": "Days to retain closed, fully acknowledged recording sessions and metadata-only diagnostics. Pending evidence and historical plaintext logs are never automatically deleted. Set 0 to disable expiration. Only user settings are used."
+        },
         "ai-developer-tracker.queue.maxSizeMB": {
           "type": "integer", "default": 100, "minimum": 1, "maximum": 10240, "scope": "machine", "restricted": true,
           "description": "Maximum SQLite queue storage in MB (1 MB = 1048576 bytes), including journal sidecars. Warns at 80%; stops collection when an event cannot safely fit. Existing events are never automatically deleted. Reload the extension to apply changes."
@@ -56,6 +65,19 @@
       }
     },
     "commands": [
+      {"command": "ai-developer-tracker.configureUploadEndpoint", "title": "AI Developer Tracker: Configure Upload Endpoint"},
+      {"command": "ai-developer-tracker.configureUploadAuthentication", "title": "AI Developer Tracker: Configure Upload Authentication"},
+      {"command": "ai-developer-tracker.enableUploads", "title": "AI Developer Tracker: Enable Uploads"},
+      {"command": "ai-developer-tracker.disableUploads", "title": "AI Developer Tracker: Disable Uploads"},
+      {"command": "ai-developer-tracker.showUploadStatus", "title": "AI Developer Tracker: Show Upload Status"},
+      {
+        "command": "ai-developer-tracker.deleteLocalEvidence",
+        "title": "AI Developer Tracker: Delete Local Assessment Evidence"
+      },
+      {
+        "command": "ai-developer-tracker.cleanupLegacyEvidence",
+        "title": "AI Developer Tracker: Clean Up Historical Plaintext Evidence"
+      },
       {
         "command": "ai-developer-tracker.showQueueHealth",
         "title": "AI Developer Tracker: Show Local Queue Health"

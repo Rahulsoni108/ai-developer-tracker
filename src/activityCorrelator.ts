@@ -59,6 +59,11 @@ function remove<K>(map: Map<K, Set<string>>, key: K, id: string): void {
 
 /** Incremental, metadata-only relationships. Never reads files or mutates attribution. */
 export class ActivityCorrelator implements RecordingLifecycle {
+	async clearStoppedEvidence(): Promise<void> {
+		await this.flush();
+		if (this.recording.isRecording || this.recording.isStarting) { throw new Error('Cannot clear active evidence.'); }
+		this.runs.clear(); this.queuedIds.clear();
+	}
 	private readonly lifecycle: { dispose(): void };
 	private readonly runs = new Map<string, Run>();
 	private readonly queuedIds = new Set<string>();

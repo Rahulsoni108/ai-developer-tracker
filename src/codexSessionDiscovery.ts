@@ -127,6 +127,10 @@ export class CodexSessionDiscovery implements RecordingLifecycle, Disposable {
 	}
 
 	getRegistry(): CodexSessionRegistration[] { return [...this.registry.values()].map(entry => ({ ...entry })); }
+	clearStoppedRegistry(): void {
+		if (this.recording.isRecording || this.recording.isStarting) { throw new Error('Cannot clear active session associations.'); }
+		this.registry.clear();
+	}
 	getConfirmationCandidates(): CodexSessionRegistration[] {
 		return this.getRegistry().filter(entry => entry.recordingSessionId === this.recording.sessionId
 			&& (entry.reason === 'recent_workspace_match' || entry.reason === 'multiple_matches'));

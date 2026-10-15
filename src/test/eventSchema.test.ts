@@ -147,7 +147,8 @@ suite('Common event schema', () => {
 			const writing = writer.write(created);
 			created.payload.relativePath = 'different.ts';
 			await writing;
-			assert.strictEqual(JSON.parse(await readFile(writer.filePath, 'utf8')).payload.relativePath, 'src/app.ts');
+			assert.strictEqual(JSON.parse(await readFile(writer.filePath, 'utf8')).eventType, created.eventType);
+			assert.ok(!('payload' in JSON.parse(await readFile(writer.filePath, 'utf8'))));
 		} finally {
 			await rm(temporary, { recursive: true, force: true });
 		}
@@ -165,7 +166,7 @@ suite('Common event schema', () => {
 			await assert.rejects(writer.write(legacy), EventValidationError);
 			await writer.write(event());
 			assert.strictEqual(await readFile(legacyPath, 'utf8'), legacyLine);
-			assert.strictEqual(JSON.parse(await readFile(writer.filePath, 'utf8')).schemaVersion, SCHEMA_VERSION);
+			assert.strictEqual(JSON.parse(await readFile(writer.filePath, 'utf8')).diagnosticVersion, 1);
 		} finally {
 			await rm(temporary, { recursive: true, force: true });
 		}

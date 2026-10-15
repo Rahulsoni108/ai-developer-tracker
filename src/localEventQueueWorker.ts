@@ -1,6 +1,10 @@
+import type { UploadPauseReason } from './uploadState';
 import { parentPort, workerData } from 'node:worker_threads';
-import { LocalEventQueue, safeQueueError, type QueueHealth } from './localEventQueue';
-import type { QueueReply, QueueRequest } from './asyncLocalEventQueue';
+import { LocalEventQueue, safeQueueError, type QueueHealth, type CleanupScope, type CleanupResult } from './localEventQueue';
+import { LocalDiagnosticFiles } from './localDiagnosticFiles';
+import type { KeySupplyReply, QueueReply, QueueRequest } from './asyncLocalEventQueue';
+import type { PrivacyReasonCode } from './privacyFilter';
+import { EvidenceEncryptionError, type EncryptionKeys, type EncryptionRequirements } from './evidenceEncryption';
 
 /** Private storage thread. Its messages never include filesystem/SQLite error details. */
 async function run(): Promise<void> {
@@ -8,8 +12,31 @@ async function run(): Promise<void> {
 	if (!port) { return; }
 	let queue: LocalEventQueue;
 	let health: QueueHealth;
-	try { queue = await LocalEventQueue.open(workerData.storage, workerData.folders, workerData.options); health = await queue.getHealth(); }
+	const keyProvider = (requirements: EncryptionRequirements) => new Promise<EncryptionKeys>((resolve, reject) => {
+		const timeout = setTimeout(() => { port.off('message', supplied); reject(new EvidenceEncryptionError('key_storage_unavailable')); }, 15000);
+		const supplied = (reply: KeySupplyReply) => {
+			if (reply.type !== 'keys_supplied' && reply.type !== 'keys_failed') { return; }
+			clearTimeout(timeout); port.off('message', supplied);
+			if (reply.type === 'keys_supplied') {
+				// SecretStorage can await while another worker starts; use fresh host ownership information.
+				options.liveOwnerIds = reply.liveOwnerIds; resolve(reply.keys);
+			}
+			else { reject(new EvidenceEncryptionError(['key_missing', 'key_invalid'].includes(reply.code) ? reply.code as 'key_missing' | 'key_invalid' : 'key_storage_unavailable')); }
+		};
+		port.on('message', supplied); port.postMessage({ type: 'keys_required', requirements } satisfies QueueReply);
+	});
+	const options = { ...workerData.options, keyProvider };
+	try { queue = await LocalEventQueue.open(workerData.storage, workerData.folders, options); health = await queue.getHealth(); }
 	catch (error) { port.postMessage({ type: 'failed', code: safeQueueError(error).code } satisfies QueueReply); port.close(); return; }
+	const files = workerData.diagnosticDirectories ? new LocalDiagnosticFiles(workerData.diagnosticDirectories, workerData.folders) : undefined;
+	const removeFiles = async (databaseResult: CleanupResult, mode: 'legacy' | 'all' | 'expired', cutoff?: string) => {
+		await queue.assertMaintenanceHeld();
+		let deletedFiles = 0; let filesFailed = false; let storageFailed = false;
+		try { deletedFiles = await files?.remove(mode, cutoff) ?? 0; }
+		catch { filesFailed = true; } // Some unlink operations may already have completed.
+		if (databaseResult.deletedRecords > 0 || databaseResult.deletedSessions > 0) { try { await queue.compactMaintenance(); } catch { storageFailed = true; } }
+		return { ...databaseResult, deletedFiles, filesFailed, storageFailed };
+	};
 	let pending = Promise.resolve();
 	let lastHealth = health;
 	let lastUpdate = Date.now();
@@ -28,6 +55,26 @@ async function run(): Promise<void> {
 			try {
 				let value: unknown;
 				switch (request.operation) {
+					case 'getUploadRetryState': value = await queue.getUploadRetryState(); break;
+					case 'configureUpload': await queue.configureUpload(request.argument as string); break;
+					case 'claimUploadAttempt': {
+						const args = request.argument as { endpointHash: string; now: number; recoveryAt: number };
+						value = await queue.claimUploadAttempt(args.endpointHash, args.now, args.recoveryAt); break;
+					}
+					case 'finishUploadAttempt': {
+						const args = request.argument as { nextAttemptAt: number; pauseReason: UploadPauseReason | null; resetAttempts: boolean };
+						await queue.finishUploadAttempt(args.nextAttemptAt, args.pauseReason, args.resetAttempts); break;
+					}
+					case 'prepareBatch': {
+						const args = request.argument as { maxEvents: number; maxBytes: number };
+						value = await queue.prepareBatch(args.maxEvents, args.maxBytes); break;
+					}
+					case 'markDelivered': {
+						const args = request.argument as { batchId: string; acknowledgedEventIds: string[] };
+						await queue.markDelivered(args.batchId, args.acknowledgedEventIds); break;
+					}
+					case 'releaseBatch': await queue.releaseBatch(request.argument as string); break;
+					case 'getDeliveryStatus': value = await queue.getDeliveryStatus(); break;
 					case 'enqueue': await queue.enqueue(request.argument); break;
 					case 'getPending': value = await queue.getPending(request.argument as number); break;
 					case 'markAcknowledged': await queue.markAcknowledged(request.argument as string[]); break;
@@ -39,6 +86,16 @@ async function run(): Promise<void> {
 						await queue.finishSession(argument.sessionId, argument.status); break;
 					}
 					case 'getRecordingSessions': value = await queue.getRecordingSessions(request.argument as number); break;
+					case 'recordPrivacyRejection': {
+						const argument = request.argument as { sessionId: string; reasons: PrivacyReasonCode[] };
+						await queue.recordPrivacyRejection(argument.sessionId, argument.reasons); break;
+					}
+					case 'getPrivacyHealth': value = await queue.getPrivacyHealth(request.argument as string); break;
+					case 'getLocalDataSummary': value = { ...await queue.getLocalDataSummary(), ...await files?.summary() ?? { legacyLogCount: 0, diagnosticFileCount: 0 } }; break;
+					case 'acquireMaintenance': await queue.acquireMaintenance(); break;
+					case 'releaseMaintenance': await queue.releaseMaintenance(); break;
+					case 'deleteEvidence': value = await removeFiles(await queue.deleteEvidence(request.argument as CleanupScope), request.argument as CleanupScope); break;
+					case 'expireAcknowledged': value = await removeFiles(await queue.expireAcknowledged(request.argument as string), 'expired', request.argument as string); break;
 					case 'close': await queue.close(); break;
 					default: throw new Error('Unsupported queue operation.');
 				}

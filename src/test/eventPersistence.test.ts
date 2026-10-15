@@ -1,3 +1,5 @@
+import { eventDiagnostic, type SafeEventDiagnostic } from '../jsonlWriter';
+import { openTestQueue } from './queueTestKeys';
 import * as assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -9,7 +11,9 @@ import { createFileEvent, type TrackerEvent } from '../eventSchema';
 import { JsonlWriter } from '../jsonlWriter';
 import { LocalEventQueue } from '../localEventQueue';
 
-const event = () => createFileEvent({ sessionId: randomUUID(), workspaceId: 'workspace', source: 'vscode',
+const sessionId = randomUUID();
+const privacy = { context: () => ({ recordingActive: true, sessionId, approvedWorkspaceIds: ['workspace'], confirmedCodexSessions: [], codexContentConsent: false }) };
+const event = () => createFileEvent({ sessionId, workspaceId: 'workspace', source: 'vscode',
 	eventType: 'file.modified', payload: { relativePath: 'app.ts' } });
 
 suite('Queue-first event persistence', () => {
@@ -21,10 +25,10 @@ suite('Queue-first event persistence', () => {
 	const storage = () => ({ scheme: 'file', fsPath: join(root, 'global-storage') });
 	setup(async () => {
 		root = await mkdtemp(join(tmpdir(), 'ai-persistence-'));
-		queue = await LocalEventQueue.open(storage(), []);
+		queue = await openTestQueue(storage(), []);
 		jsonl = new JsonlWriter(join(root, 'logs', 'events.v1.jsonl'));
 		issues = [];
-		writer = new EventPersistence(queue, jsonl, reason => issues.push(reason));
+		writer = new EventPersistence(queue, jsonl, reason => issues.push(reason), privacy);
 	});
 	teardown(async () => {
 		await writer.close(); await queue.close();
@@ -35,7 +39,7 @@ suite('Queue-first event persistence', () => {
 		const input = event();
 		await writer.write(input);
 		assert.deepEqual(await queue.getPending(10), [input]);
-		assert.deepEqual(JSON.parse((await readFile(jsonl.filePath, 'utf8')).trim()), input);
+		assert.deepEqual(JSON.parse((await readFile(jsonl.filePath, 'utf8')).trim()), eventDiagnostic(input));
 		assert.deepEqual(issues, []);
 	});
 
@@ -44,7 +48,7 @@ suite('Queue-first event persistence', () => {
 		const gate = new Promise<void>(resolve => { release = resolve; });
 		const order: string[] = [];
 		writer = new EventPersistence({ enqueue: async input => { order.push('enqueue'); await gate; await queue.enqueue(input); order.push('commit'); },
-			close: () => queue.close() }, { write: async input => { order.push('jsonl'); await jsonl.write(input); }, flush: () => jsonl.flush() });
+			close: () => queue.close() }, { write: async input => { order.push('jsonl'); await jsonl.write(input); }, flush: () => jsonl.flush() }, undefined, privacy);
 		writer.onDidWrite(() => { order.push('notify'); });
 		const input = event(); let resolved = false;
 		const writing = writer.write(input).then(() => { resolved = true; });
@@ -67,7 +71,7 @@ suite('Queue-first event persistence', () => {
 
 	test('JSONL failure resolves durable capture, notifies observers and cannot duplicate SQLite events', async () => {
 		const blocked = join(root, 'blocked'); await writeFile(blocked, 'blocked');
-		writer = new EventPersistence(queue, new JsonlWriter(join(blocked, 'events.jsonl')), reason => issues.push(reason));
+		writer = new EventPersistence(queue, new JsonlWriter(join(blocked, 'events.jsonl')), reason => issues.push(reason), privacy);
 		const input = event(); const seen: TrackerEvent[] = [];
 		writer.onDidWrite(value => { seen.push(value as TrackerEvent); });
 		await writer.write(input); await writer.write(input); await writer.flush();
@@ -79,7 +83,7 @@ suite('Queue-first event persistence', () => {
 		let fail = true; let notified = 0;
 		writer = new EventPersistence({ enqueue: async input => {
 			if (fail) { throw new Error('PRIVATE_SQL_VALUES_AND_PATH'); } await queue.enqueue(input);
-		}, close: () => queue.close() }, jsonl, reason => issues.push(reason));
+		}, close: () => queue.close() }, jsonl, reason => issues.push(reason), privacy);
 		writer.onDidWrite(() => { notified++; }); const input = event();
 		await assert.rejects(writer.write(input), error => {
 			assert.ok(error instanceof EventPersistenceError); assert.equal(error.cause, undefined);
@@ -98,7 +102,7 @@ suite('Queue-first event persistence', () => {
 		const closing = writer.close(); assert.equal(writer.close(), closing);
 		await assert.rejects(writer.write(event()), EventPersistenceError);
 		await Promise.all([...writing, closing]);
-		queue = await LocalEventQueue.open(storage(), []);
+		queue = await openTestQueue(storage(), []);
 		assert.deepEqual(await queue.getPending(10), inputs);
 	});
 
@@ -106,8 +110,8 @@ suite('Queue-first event persistence', () => {
 		const inputs = [event(), event()];
 		await Promise.all(inputs.map(input => writer.write(input)));
 		await queue.markAcknowledged([inputs[0].eventId]); await writer.close();
-		queue = await LocalEventQueue.open(storage(), []);
-		writer = new EventPersistence(queue, jsonl);
+		queue = await openTestQueue(storage(), []);
+		writer = new EventPersistence(queue, jsonl, undefined, privacy);
 		assert.deepEqual(await queue.getPending(10), [inputs[1]]);
 		await writer.write(inputs[0]); await writer.write(inputs[1]);
 		assert.deepEqual(await queue.getPending(10), [inputs[1]]);
@@ -131,11 +135,11 @@ suite('Queue-first event persistence', () => {
 
 	test('hides JSONL flush and close exceptions and isolates diagnostic callback failures', async () => {
 		writer = new EventPersistence({ enqueue: input => queue.enqueue(input), close: async () => { await queue.close(); throw new Error('PRIVATE_CLOSE'); } },
-			{ write: async () => {}, flush: async () => { throw new Error('PRIVATE_FLUSH'); } }, reason => { issues.push(reason); throw new Error('PRIVATE_DIAGNOSTIC'); });
+			{ write: async () => {}, flush: async () => { throw new Error('PRIVATE_FLUSH'); } }, reason => { issues.push(reason); throw new Error('PRIVATE_DIAGNOSTIC'); }, privacy);
 		await writer.write(event()); await writer.flush();
 		await assert.rejects(writer.close(), EventPersistenceError);
 		assert.deepEqual(issues, ['jsonl_failed', 'jsonl_failed', 'queue_failed']);
 		// Replace the intentionally failing instance for teardown.
-		queue = await LocalEventQueue.open(storage(), []); writer = new EventPersistence(queue, jsonl);
+		queue = await openTestQueue(storage(), []); writer = new EventPersistence(queue, jsonl, undefined, privacy);
 	});
 });

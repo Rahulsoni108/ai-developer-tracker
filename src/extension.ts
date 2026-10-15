@@ -1,8 +1,13 @@
+import { EventUploader } from './eventUploader';
+import { EventBatchManager } from './eventBatchManager';
+import { UploadController, CONFIGURE_UPLOAD_ENDPOINT_COMMAND, CONFIGURE_UPLOAD_AUTHENTICATION_COMMAND,
+	ENABLE_UPLOADS_COMMAND, DISABLE_UPLOADS_COMMAND, SHOW_UPLOAD_STATUS_COMMAND, type UploadNotice } from './uploadController';
+import { validatedUploadEndpoint } from './httpsEventTransport';
+import { UPLOAD_TOKEN_SECRET } from './eventUploader';
 import * as vscode from 'vscode';
 import { RecordingController, START_RECORDING_COMMAND, STOP_RECORDING_COMMAND } from './recording';
 import { FileTracker, isExcludedPath } from './fileTracker';
 import { JsonlWriter } from './jsonlWriter';
-import { EVENT_LOG_FILENAME, LEGACY_EVENT_LOG_FILENAME } from './eventSchema';
 import { DiffTracker, DEFAULT_DIFF_OPTIONS } from './diffTracker';
 import { CodexSessionDiscovery, type DiscoveryDiagnostic } from './codexSessionDiscovery';
 import { CodexDiscoveryUi, REVIEW_CODEX_SESSIONS_COMMAND } from './codexDiscoveryUi';
@@ -10,11 +15,14 @@ import { createHash } from 'node:crypto';
 import { CodexJsonlReader } from './codexJsonlReader';
 import { CodexEventParser } from './codexEventParser';
 import { ActivityCorrelator } from './activityCorrelator';
-import { isAbsolute } from 'node:path';
+import { isAbsolute, relative } from 'node:path';
 import { DEFAULT_QUEUE_STORAGE_BYTES, LocalEventQueue, safeQueueError, type QueueFailureCode, type QueueHealth } from './localEventQueue';
 import { AsyncLocalEventQueue } from './asyncLocalEventQueue';
 import { EventPersistence, EventPersistenceError, type PersistenceDiagnostic } from './eventPersistence';
+import { LocalDataController, DEFAULT_RETENTION_DAYS, DELETE_LOCAL_EVIDENCE_COMMAND, CLEANUP_LEGACY_EVIDENCE_COMMAND, type LocalDataNotice } from './localDataController';
+import { DIAGNOSTIC_LOG_PREFIX } from './jsonlWriter';
 
+let activeUploads: UploadController | undefined;
 let activeTracker: FileTracker | undefined;
 let activeDiffTracker: DiffTracker | undefined;
 let activeDiscovery: CodexSessionDiscovery | undefined;
@@ -23,6 +31,7 @@ let activeCodexParser: CodexEventParser | undefined;
 let activeCorrelator: ActivityCorrelator | undefined;
 let activePersistence: EventPersistence | undefined;
 let activeRecording: RecordingController | undefined;
+let activeLocalData: LocalDataController | undefined;
 export const QUEUE_HEALTH_COMMAND = 'ai-developer-tracker.showQueueHealth';
 
 export async function activate(context: vscode.ExtensionContext) {
@@ -32,7 +41,8 @@ export async function activate(context: vscode.ExtensionContext) {
 		&& !context.globalStorageUri.authority && vscode.env.uiKind === vscode.UIKind.Desktop && !vscode.env.remoteName
 		? vscode.Uri.file(context.globalStorageUri.fsPath) : context.globalStorageUri;
 	const storageDirectory = context.storageUri?.scheme === 'file' ? context.storageUri : context.globalStorageUri;
-	const logUri = vscode.Uri.joinPath(storageDirectory, EVENT_LOG_FILENAME);
+	const diagnosticsDirectory = vscode.Uri.joinPath(queueStorageUri, 'diagnostics');
+	const legacyDirectories = [...new Set([queueStorageUri.fsPath, storageDirectory.fsPath])];
 	const output = vscode.window.createOutputChannel('AI Developer Tracker');
 	const queueConfiguration = vscode.workspace.getConfiguration('ai-developer-tracker.queue');
 	const configuredMiB = queueConfiguration.inspect<number>('maxSizeMB')?.globalValue ?? 100;
@@ -41,8 +51,9 @@ export async function activate(context: vscode.ExtensionContext) {
 	let queue: AsyncLocalEventQueue | undefined;
 	let startupFailure: QueueFailureCode | undefined;
 	try { queue = await AsyncLocalEventQueue.open(queueStorageUri, vscode.workspace.workspaceFolders ?? [], {
-		maxStorageBytes: validLimit ? configuredMiB * 1024 * 1024 : DEFAULT_QUEUE_STORAGE_BYTES
-	}); }
+		maxStorageBytes: validLimit ? configuredMiB * 1024 * 1024 : DEFAULT_QUEUE_STORAGE_BYTES,
+		diagnosticDirectories: { legacy: legacyDirectories, diagnostics: diagnosticsDirectory.fsPath }
+	}, context.secrets); }
 	catch (error) { startupFailure = safeQueueError(error).code; }
 	const queueStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left);
 	queueStatus.name = 'AI Developer Tracker queue health';
@@ -51,11 +62,13 @@ export async function activate(context: vscode.ExtensionContext) {
 	degradation.name = 'AI Developer Tracker persistence';
 	let queueDegraded = !queue;
 	const warnings = new Set<PersistenceDiagnostic>();
-	output.appendLine(`Local activity log: ${logUri.fsPath}`);
-	output.appendLine(`Unversioned ${LEGACY_EVENT_LOG_FILENAME} records are legacy schema v0 and remain unchanged. New records use schema v1 in ${EVENT_LOG_FILENAME}.`);
+	output.appendLine('SQLite is the authoritative encrypted event store. JSONL diagnostics contain safe metadata only.');
 	const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left);
 	statusBar.name = 'AI Developer Tracker';
 	const recording = new RecordingController(statusBar, async isCurrentRequest => {
+		if (activeLocalData?.busy) {
+			void vscode.window.showWarningMessage('Local data maintenance is in progress. Retry Start Recording afterward.'); return false;
+		}
 		if (queueDegraded) {
 			void vscode.window.showErrorMessage('AI Developer Tracker cannot record because its local event queue is unavailable. Resolve the storage problem and reload the extension.');
 			return false;
@@ -72,7 +85,7 @@ export async function activate(context: vscode.ExtensionContext) {
 		}
 		const consent = await vscode.window.showInformationMessage(
 			'Start recording file activity in all workspace folders?',
-			{ modal: true, detail: `Folders: ${folders.map(folder => folder.name).join(', ')}\n\nFile activity metadata, initial code baselines, and incremental source-code diffs are saved locally. Captured code is sensitive and may include secrets within otherwise eligible files. Sensitive/generated paths and configured size limits are excluded. Nothing is sent externally.\n\nWhen enabled, local Codex session metadata is discovered only during recording. Associations require separate confirmation. Conversation and tool content is captured only after a separate explicit consent dialog.\n\nLog: ${logUri.fsPath}` },
+			{ modal: true, detail: `Folders: ${folders.map(folder => folder.name).join(', ')}\n\nFile activity metadata, initial code baselines, and incremental source-code diffs are saved locally in encrypted SQLite after privacy filtering. Captured code is sensitive. JSONL diagnostics contain safe metadata only. Sensitive/generated paths and configured size limits are excluded. Recording consent does not authorize uploads. Transmitting sanitized evidence requires separate endpoint-scoped upload consent.\n\nWhen enabled, local Codex session metadata is discovered only during recording. Associations require separate confirmation. Conversation and tool content is captured only after a separate explicit consent dialog.` },
 			'Start Recording'
 		);
 		if (consent !== 'Start Recording' || !isCurrentRequest()) {
@@ -89,15 +102,28 @@ export async function activate(context: vscode.ExtensionContext) {
 		}
 	});
 	activeRecording = recording;
+	let privacyDiscovery: CodexSessionDiscovery | undefined;
+	let privacyParser: CodexEventParser | undefined;
 	const reportPersistence = (reason: PersistenceDiagnostic, code?: QueueFailureCode) => {
+		if (code === 'maintenance_active') {
+			void vscode.window.showWarningMessage('Local data maintenance is in progress in another window. Retry Start Recording afterward.'); return;
+		}
 		if (reason === 'queue_failed') { queueDegraded = true; recording.stop(); }
-		degradation.text = queueDegraded ? '$(warning) Recording degraded' : '$(warning) JSONL degraded';
+		const privacyDegraded = reason === 'privacy_rejected' || reason === 'privacy_gap' || warnings.has('privacy_rejected') || warnings.has('privacy_gap');
+		degradation.text = queueDegraded || privacyDegraded ? '$(warning) Recording degraded' : '$(warning) JSONL degraded';
 		degradation.tooltip = queueDegraded ? 'Local event queue failed. Recording stopped; resolve storage and reload.'
-			: 'Events are safely queued in SQLite, but the JSONL debug mirror is unavailable.';
+			: privacyDegraded ? 'Privacy filtering omitted evidence. Rejection counts are stored in recording health; filtered code changes are reconstruction gaps.'
+				: 'Events are safely queued in SQLite, but metadata-only JSONL diagnostics are unavailable.';
 		degradation.show();
 		if (warnings.has(reason)) { return; }
 		warnings.add(reason);
 		const failures: Record<QueueFailureCode, string> = {
+			maintenance_active: 'local data maintenance is active',
+			recording_active: 'another recording is active',
+			key_storage_unavailable: 'secure local evidence key storage is unavailable',
+			key_missing: 'a required local evidence encryption key is missing',
+			key_invalid: 'the local evidence encryption key is invalid',
+			authentication_failed: 'local evidence authentication failed',
 			corrupt: 'the local event queue failed its integrity check',
 			disk_full: 'the storage device is full',
 			permission_denied: 'local event storage permission was denied',
@@ -108,7 +134,9 @@ export async function activate(context: vscode.ExtensionContext) {
 		};
 		const message = reason === 'queue_failed'
 			? `AI Developer Tracker stopped recording because ${failures[code ?? 'operation_failed']}. Existing events are preserved. Resolve the storage problem or increase the queue limit, then reload the extension.`
-			: 'AI Developer Tracker JSONL output failed. Recording continues safely in the local SQLite queue.';
+			: reason === 'privacy_rejected' ? 'AI Developer Tracker privacy filtering rejected evidence. Recording is degraded; only safe counts and reason codes are stored for rejected events.'
+				: reason === 'privacy_gap' ? 'AI Developer Tracker privacy filtering omitted code patches containing sensitive values. These changes are recorded as reconstruction gaps.'
+					: 'AI Developer Tracker JSONL output failed. Recording continues safely in the local SQLite queue.';
 		output.appendLine(message);
 		void vscode.window.showWarningMessage(message);
 	};
@@ -120,9 +148,25 @@ export async function activate(context: vscode.ExtensionContext) {
 	};
 	const writer = new EventPersistence(queue ?? {
 		enqueue: async () => { throw new EventPersistenceError(); }, close: async () => {}
-	}, new JsonlWriter(logUri.fsPath), reportPersistence);
+	}, new JsonlWriter(() => vscode.Uri.joinPath(diagnosticsDirectory, DIAGNOSTIC_LOG_PREFIX + new Date().toISOString().slice(0, 10) + '.jsonl').fsPath), reportPersistence);
 	activePersistence = writer;
-	context.subscriptions.push(writer.attachRecording(recording));
+	context.subscriptions.push(writer.attachRecording(recording, sessionId => {
+		const folders = tracker.getApprovedFolders().map(folder => ({ uri: folder.uri,
+			workspaceId: createHash('sha256').update(folder.uri.toString()).digest('hex') }));
+		return {
+			approvedWorkspaceIds: folders.map(folder => folder.workspaceId),
+			confirmedCodexSessions: (privacyDiscovery?.getRegistry() ?? []).filter(entry => entry.recordingSessionId === sessionId
+				&& entry.status === 'confirmed' && entry.reason === 'user_confirmed' && entry.sourceSessionId && entry.workspaceId)
+				.map(entry => ({ sourceSessionId: entry.sourceSessionId!, workspaceId: entry.workspaceId! })),
+			codexContentConsent: privacyParser?.hasAdmittedContentConsent(sessionId) ?? false,
+			resolveToolPath: (path, workspaceId) => {
+				const folder = folders.find(folder => folder.workspaceId === workspaceId);
+				if (!folder || folder.uri.scheme !== 'file' || !isAbsolute(path)) { return undefined; }
+				const resolved = relative(folder.uri.fsPath, path).replace(/\\/g, '/');
+				return resolved && resolved !== '..' && !resolved.startsWith('../') && !isAbsolute(resolved) ? resolved : undefined;
+			}
+		};
+	}));
 	if (!queue) { reportPersistence('queue_failed', startupFailure); }
 	let warnedStorage = false;
 	const renderHealth = (health: QueueHealth) => {
@@ -202,28 +246,166 @@ export async function activate(context: vscode.ExtensionContext) {
 			},
 			onDiagnostic: reason => output.appendLine('Codex capture diagnostic: ' + reason)
 		});
+		privacyDiscovery = discovery; privacyParser = parser;
 		ui = new CodexDiscoveryUi(recording, discovery, undefined, {
 			hasConsent: sessionId => parser.hasContentConsent(sessionId),
 			grant: sessionId => parser.grantContentConsent(sessionId),
 			request: async () => (await vscode.window.showWarningMessage(
 				'Allow local capture of Codex conversation content for this recording?',
-				{ modal: true, detail: 'User prompts, visible assistant responses, tool inputs, and tool outputs from sessions you explicitly confirm will be saved in the local assessment log. These may include source code, credentials, or other sensitive text. System/developer instructions and private reasoning are excluded. Path exclusions do not redact every secret inside ordinary messages. Nothing is uploaded. Consent expires when recording stops.' },
+				{ modal: true, detail: 'User prompts, visible assistant responses, tool inputs, and tool outputs from sessions you explicitly confirm will be saved in the encrypted local SQLite assessment queue after privacy filtering. These may include source code, credentials, or other sensitive text. System/developer instructions and private reasoning are excluded. Path exclusions do not redact every secret inside ordinary messages. This content-capture consent does not authorize uploads. Upload consent is separate. Content-capture consent expires when recording stops.' },
 				'Allow Content Capture'
 			)) === 'Allow Content Capture'
 		});
 		activeDiscovery = discovery;
 		activeCodexParser = parser;
 		const reader = new CodexJsonlReader(recording, discovery, {
-			onRecord: metadata => output.appendLine('Codex record metadata: ' + JSON.stringify(metadata)),
+			// Source identifiers are untrusted strings; debug output needs only fixed kinds and indexes.
+			onRecord: metadata => output.appendLine('Codex record metadata: ' + JSON.stringify({ recordIndex: metadata.recordIndex,
+				eventType: metadata.eventType, payloadType: metadata.payloadType, timestamp: metadata.timestamp })),
 			canCaptureContent: registration => parser.canCapture(registration),
 			onSourceRecord: (record, context) => parser.handle(record, context),
-			onDiagnostic: diagnostic => output.appendLine('Codex reader diagnostic: ' + JSON.stringify(diagnostic))
+			onDiagnostic: diagnostic => output.appendLine('Codex reader diagnostic: ' + JSON.stringify({
+				reason: diagnostic.reason, recordIndex: diagnostic.recordIndex }))
 		});
 		activeCodexReader = reader;
 		context.subscriptions.push(discovery, parser, reader, ui, vscode.commands.registerCommand(REVIEW_CODEX_SESSIONS_COMMAND, () => ui.review()));
 	} else {
 		context.subscriptions.push(vscode.commands.registerCommand(REVIEW_CODEX_SESSIONS_COMMAND, () =>
 			vscode.window.showInformationMessage('Codex session discovery is disabled in AI Developer Tracker settings.')));
+	}
+
+	if (queue) {
+		const notices: Record<LocalDataNotice, string> = {
+			recording_active: 'Stop all recordings before cleaning local assessment data.',
+			maintenance_active: 'Local data maintenance is already in progress. Retry afterward.',
+			cancelled: 'Local assessment cleanup cancelled. Existing data was preserved.',
+			cleanup_complete: 'Selected local assessment evidence was deleted. Encryption keys were retained. Deletion does not guarantee erasure from storage media or backups.',
+			cleanup_partial: 'Cleanup partially completed. SQLite deletion committed, but diagnostic deletion or storage compaction could not complete. Review local data counts and retry. Deletion does not guarantee secure erasure.',
+			cleanup_failed: 'Local assessment cleanup failed. Some operations may have completed; review local data counts before retrying.',
+			retention_failed: 'Local retention could not complete. Existing pending evidence is preserved; review local data counts.'
+		};
+		const readRetentionDays = () => {
+			const days = vscode.workspace.getConfiguration('ai-developer-tracker.retention').inspect<number>('days')?.globalValue ?? DEFAULT_RETENTION_DAYS;
+			return Number.isSafeInteger(days) && days >= 0 && days <= 3650 ? days : DEFAULT_RETENTION_DAYS;
+		};
+		activeLocalData = new LocalDataController(recording, queue, {
+			retentionDays: readRetentionDays,
+			guard: async () => {
+				for (const path of [...legacyDirectories, diagnosticsDirectory.fsPath]) {
+					await LocalEventQueue.assertStorageOutsideWorkspaces(vscode.Uri.file(path), vscode.workspace.workspaceFolders ?? []);
+				}
+			},
+			drain: async () => { await diffs.flush(); await tracker.flush(); await activeCodexReader?.flush(); await activeCodexParser?.flush(); await correlator.flush(); await writer.flush(); },
+			cleared: async () => {
+				await diffs.clearStoppedEvidence(); await correlator.clearStoppedEvidence(); activeDiscovery?.clearStoppedRegistry(); writer.resetAfterCleanup();
+				const health = await queue!.getHealth(); renderHealth(health);
+				if (health.status !== 'full') { queueDegraded = false; warnings.delete('queue_failed'); degradation.hide(); }
+			},
+			confirm: async (scope, summary) => {
+				const pending = scope === 'all' ? summary.pendingCount : summary.legacyPendingDeletionCount;
+				const detail = scope === 'all'
+					? `Delete every SQLite event, including ${pending} pending events, recording-session and correlation evidence, privacy-health history, known historical assessment JSONL logs, and metadata diagnostics in this extension's current local storage?`
+					: `Delete historical plaintext assessment JSONL logs (${summary.legacyLogCount} detected), plus whole SQLite recording sessions containing plaintext events (${summary.legacySqliteCount} detected)? This also deletes encrypted events and correlation evidence in those same sessions, including ${pending} pending events.`;
+				return (await vscode.window.showWarningMessage('Delete selected local assessment evidence?', { modal: true,
+					detail: detail + '\n\nPending evidence in this scope will be permanently lost from the queue. Workspace source files, original Codex session files, other storage profiles/workspace logs, and encryption keys are not deleted. Deleting rows/files may not securely erase bytes from backups or storage media.' }, 'Delete Evidence')) === 'Delete Evidence';
+			},
+			notice: reason => { output.appendLine(notices[reason]); if (reason !== 'cancelled') { void vscode.window.showWarningMessage(notices[reason]); } }
+		});
+		const data = activeLocalData;
+		context.subscriptions.push(
+			vscode.commands.registerCommand(DELETE_LOCAL_EVIDENCE_COMMAND, () => data.cleanup('all')),
+			vscode.commands.registerCommand(CLEANUP_LEGACY_EVIDENCE_COMMAND, () => data.cleanup('legacy'))
+		);
+		try {
+			const historical = await queue.getLocalDataSummary();
+			if (historical.legacyLogCount || historical.legacySqliteCount) {
+				const message = `Historical plaintext assessment data detected: ${historical.legacyLogCount} log files and ${historical.legacySqliteCount} SQLite events. Nothing was automatically deleted. Use AI Developer Tracker: Clean Up Historical Plaintext Evidence to review cleanup.`;
+				output.appendLine(message); void vscode.window.showWarningMessage(message);
+			}
+		} catch { output.appendLine('Historical plaintext detection could not complete. Existing data was preserved.'); }
+		await data.automaticRetention();
+		const timer = setInterval(() => { void data.automaticRetention(); }, 86400000);
+		context.subscriptions.push({ dispose: () => { clearInterval(timer); data.dispose(); } });
+	} else {
+		output.appendLine('Historical plaintext detection and cleanup are unavailable until local storage and its required keys can be opened. Existing data was preserved.');
+		for (const command of [DELETE_LOCAL_EVIDENCE_COMMAND, CLEANUP_LEGACY_EVIDENCE_COMMAND]) {
+			context.subscriptions.push(vscode.commands.registerCommand(command, () => vscode.window.showWarningMessage('Local assessment storage is unavailable. Cleanup is disabled to preserve existing data.')));
+		}
+	}
+
+	if (queue) {
+		const configuration = () => vscode.workspace.getConfiguration('ai-developer-tracker.upload');
+		const readSettings = () => {
+			const settings = configuration();
+			// Workspace/repository settings must never redirect evidence or enable uploads.
+			return { endpoint: settings.inspect<string>('endpoint')?.globalValue ?? '',
+				enabled: settings.inspect<boolean>('enabled')?.globalValue ?? false,
+				maxEvents: settings.inspect<number>('maxEvents')?.globalValue ?? 100,
+				maxBytes: settings.inspect<number>('maxBytes')?.globalValue ?? 1048576,
+				timeoutMs: settings.inspect<number>('timeoutMs')?.globalValue ?? 30000 };
+		};
+		const messages: Record<UploadNotice, string> = {
+			disabled: 'Uploads disabled. Pending evidence remains in the encrypted local queue.',
+			waiting: 'Uploads enabled; waiting for the next eligible attempt.',
+			empty: 'Upload queue has no available pending events.',
+			delivered: 'The destination explicitly acknowledged delivery of an event batch.',
+			retry: 'Event upload will retry. Undelivered evidence remains pending.',
+			cancelled: 'Event upload cancelled. Undelivered evidence remains pending.',
+			authentication: 'Uploads paused: configure valid authentication, then explicitly enable uploads again.',
+			configuration: 'Upload configuration is invalid or unavailable. Verify HTTPS endpoint and bounds; pending evidence is preserved.',
+			protocol: 'Uploads paused: the destination did not provide verifiable event acknowledgments. Pending evidence is preserved.',
+			privacy: 'Uploads paused: a queued event lacks sufficient capture-time approval or fails current privacy checks. Historical events without approval remain blocked.',
+			storage: 'Uploads stopped or paused because local delivery storage is unavailable. Pending evidence is preserved.',
+			token_configured: 'Upload authentication stored securely. Use Enable Uploads to approve transmission.',
+			token_removed: 'Upload authentication removed; uploads disabled. Pending evidence is preserved.',
+			endpoint_configured: 'Upload endpoint updated; uploads disabled. New destination consent is required.',
+			consent_cancelled: 'Upload consent cancelled. Uploads remain disabled.',
+			consent_required: 'Upload settings cannot grant consent. Use Enable Uploads to review the destination and approve transmission.'
+		};
+		const uploads = new UploadController(queue, context.secrets, {
+			readSettings,
+			writeEnabled: async enabled => { await configuration().update('enabled', enabled, vscode.ConfigurationTarget.Global); },
+			writeEndpoint: async endpoint => { await configuration().update('endpoint', endpoint, vscode.ConfigurationTarget.Global); },
+			requestEndpoint: async current => vscode.window.showInputBox({ title: 'Configure Upload Endpoint', value: current,
+				prompt: 'HTTPS event endpoint. Leave empty to disable configuration. Do not include credentials, queries or fragments.', ignoreFocusOut: true,
+				validateInput: value => { if (!value) { return undefined; } try { validatedUploadEndpoint(value); return undefined; } catch { return 'Enter an HTTPS endpoint without credentials, queries or fragments.'; } } }),
+			requestAuthenticationAction: async () => {
+				const choice = await vscode.window.showQuickPick([{ label: 'Configure Token', action: 'configure' as const },
+					{ label: 'Remove Token', action: 'remove' as const }], { title: 'Configure Upload Authentication', ignoreFocusOut: true });
+				return choice?.action;
+			},
+			requestToken: async () => vscode.window.showInputBox({ title: 'Configure Upload Authentication', password: true,
+				prompt: 'Enter the upload bearer token. Stored only in VS Code SecretStorage; never in settings or diagnostics.', ignoreFocusOut: true,
+				validateInput: token => /^[\x21-\x7e]{1,8192}$/.test(token) ? undefined : 'Enter a non-empty token without whitespace or control characters.' }),
+			confirmUpload: async hostname => (await vscode.window.showWarningMessage(`Enable assessment uploads to ${hostname}?`, { modal: true,
+				detail: `Destination hostname: ${hostname}\n\nSanitized source code, diffs, AI prompts, responses and tool activity from verified local recording events may be transmitted over HTTPS. Filtering cannot guarantee removal of every sensitive value. Recording consent does not authorize transmission. Historical events without sufficient approval evidence remain blocked.\n\nUpload approval is scoped to this exact configured endpoint and expires on reload, endpoint or batch-setting changes, or explicit revocation. Use Disable Uploads to revoke it; pending events stay local. No real assessment backend is included.` }, 'Enable Uploads')) === 'Enable Uploads',
+			notice: reason => {
+				output.appendLine(messages[reason]);
+				if (['authentication', 'configuration', 'protocol', 'privacy', 'storage', 'consent_required'].includes(reason)) { void vscode.window.showWarningMessage(messages[reason]); }
+			}
+		}, (settings, hooks) => new EventUploader(new EventBatchManager(queue), queue, context.secrets, {
+			...settings, ...hooks, privacyContext: event => writer.getUploadPrivacyContext(event)
+		}));
+		activeUploads = uploads;
+		await uploads.initialize();
+		context.subscriptions.push(
+			{ dispose: () => { void uploads.dispose(); } },
+			vscode.commands.registerCommand(CONFIGURE_UPLOAD_ENDPOINT_COMMAND, () => uploads.configureEndpoint()),
+			vscode.commands.registerCommand(CONFIGURE_UPLOAD_AUTHENTICATION_COMMAND, () => uploads.configureAuthentication()),
+			vscode.commands.registerCommand(ENABLE_UPLOADS_COMMAND, () => uploads.enable()),
+			vscode.commands.registerCommand(DISABLE_UPLOADS_COMMAND, async () => { await uploads.disable(); void vscode.window.showInformationMessage(messages.disabled); }),
+			vscode.commands.registerCommand(SHOW_UPLOAD_STATUS_COMMAND, async () => {
+				const status = await uploads.showStatus();
+				void vscode.window.showInformationMessage(`Uploads: ${status.enabled ? 'enabled with consent' : 'disabled'}; destination hostname: ${status.hostname ?? 'not configured'}; authentication: ${status.authenticationConfigured ? 'configured' : 'missing'}; status: ${status.pauseReason ?? status.outcome}; pending events: ${status.pendingEvents ?? 'unavailable'}.`);
+				return status;
+			}),
+			vscode.workspace.onDidChangeConfiguration(event => { if (event.affectsConfiguration('ai-developer-tracker.upload')) { void uploads.settingsChanged(); } }),
+			context.secrets.onDidChange(event => { if (event.key === UPLOAD_TOKEN_SECRET) { void uploads.disable(); } })
+		);
+	} else {
+		for (const command of [CONFIGURE_UPLOAD_ENDPOINT_COMMAND, CONFIGURE_UPLOAD_AUTHENTICATION_COMMAND, ENABLE_UPLOADS_COMMAND, DISABLE_UPLOADS_COMMAND, SHOW_UPLOAD_STATUS_COMMAND]) {
+			context.subscriptions.push(vscode.commands.registerCommand(command, () => vscode.window.showWarningMessage('Uploads are unavailable while local event storage is unavailable. Existing evidence is preserved.')));
+		}
 	}
 
 	context.subscriptions.push(
@@ -277,6 +459,7 @@ export async function activate(context: vscode.ExtensionContext) {
 			await correlator.finishSession(stoppedSession);
 			await writer.flush();
 			await writer.completeSession(stoppedSession);
+			await activeLocalData?.automaticRetention();
 			if (queue) { try { renderHealth(await queue.getHealth()); } catch (error) { reportPersistence('queue_failed', safeQueueError(error).code); } }
 		})
 	);
@@ -284,8 +467,10 @@ export async function activate(context: vscode.ExtensionContext) {
 
 // VS Code disposes the commands and controller in context.subscriptions.
 export async function deactivate(): Promise<void> {
+	await activeUploads?.dispose(); activeUploads = undefined;
 	const stoppedSession = activeRecording?.sessionId;
 	activeRecording?.stop();
+	activeLocalData?.dispose(); await activeLocalData?.flush(); activeLocalData = undefined;
 	try {
 		activeCodexReader?.dispose();
 		await activeCodexReader?.flush();

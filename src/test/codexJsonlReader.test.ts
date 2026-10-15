@@ -1,3 +1,4 @@
+import { MemoryEventJournal } from './memoryEventJournal';
 import * as assert from 'node:assert/strict';
 import { appendFile, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile, type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -425,7 +426,7 @@ suite('Incremental Codex JSONL reader', () => {
 	});
 
 	test('integrates confirmed discovery, incremental reading and normalized local capture with byte references', async () => {
-		const log = new JsonlWriter(join(temporary, 'events.v1.jsonl'));
+		const log = new MemoryEventJournal(join(temporary, 'events.v1.jsonl'));
 		capture = new CodexEventParser(recording, discovery, log);
 		capture.grantContentConsent(recording.sessionId!);
 		await configure({ canCaptureContent: entry => capture!.canCapture(entry), onSourceRecord: (value, reference) => capture!.handle(value, reference) });
@@ -437,17 +438,17 @@ suite('Incremental Codex JSONL reader', () => {
 		const file = await session(prompt + mirror);
 		await reader.readNow(); await appendFile(file.path, response); await reader.readNow();
 		await capture.flush();
-		const stored = (await readFile(log.filePath, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+		const stored = log.captured;
 		assert.deepEqual(stored.map(event => event.eventType), ['ai.prompt.submitted', 'ai.response.completed']);
 		assert.ok(stored.every(event => validateEvent(event).valid));
-		assert.equal(stored[0].payload.sourceRecord.byteOffset, Buffer.byteLength(file.header));
-		assert.equal(stored[0].payload.sourceRecord.byteLength, Buffer.byteLength(prompt));
-		assert.equal(stored[1].payload.sourceRecord.byteOffset, Buffer.byteLength(file.header + prompt + mirror));
+		assert.equal((stored[0].payload as CodexMessagePayload).sourceRecord.byteOffset, Buffer.byteLength(file.header));
+		assert.equal((stored[0].payload as CodexMessagePayload).sourceRecord.byteLength, Buffer.byteLength(prompt));
+		assert.equal((stored[1].payload as CodexMessagePayload).sourceRecord.byteOffset, Buffer.byteLength(file.header + prompt + mirror));
 		assert.ok(!JSON.stringify(records).includes('Dummy assessment'));
 	});
 
 	test('does not deliver raw records or create a conversation log without content consent', async () => {
-		const log = new JsonlWriter(join(temporary, 'events.v1.jsonl'));
+		const log = new MemoryEventJournal(join(temporary, 'events.v1.jsonl'));
 		capture = new CodexEventParser(recording, discovery, log);
 		let delivered = 0;
 		await configure({ canCaptureContent: entry => capture!.canCapture(entry), onSourceRecord: async (value, reference) => {
@@ -459,12 +460,12 @@ suite('Incremental Codex JSONL reader', () => {
 		capture.grantContentConsent(recording.sessionId!);
 		await appendFile(file.path, record()); await reader.readNow();
 		assert.equal(delivered, 1);
-		const stored = JSON.parse(await readFile(log.filePath, 'utf8'));
+		const stored = log.captured[0];
 		assert.equal(stored.eventType, 'ai.prompt.submitted'); assert.equal(stored.payload.sourceRecord.recordIndex, 3);
 	});
 
 	test('awaits content persistence and prevents a later record from being admitted after Stop', async () => {
-		const log = new JsonlWriter(join(temporary, 'events.v1.jsonl'));
+		const log = new MemoryEventJournal(join(temporary, 'events.v1.jsonl'));
 		let release!: () => void; let reached!: () => void;
 		const gate = new Promise<void>(done => { release = done; });
 		const writing = new Promise<void>(done => { reached = done; });
@@ -477,7 +478,7 @@ suite('Incremental Codex JSONL reader', () => {
 		await session(record() + record('event_msg', 'agent_message'));
 		const reading = reader.readNow();
 		await writing; recording.stop(); release(); await reading; await capture.flush();
-		const stored = (await readFile(log.filePath, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+		const stored = log.captured;
 		assert.equal(stored.length, 1); assert.equal((stored[0].payload as CodexMessagePayload).text, privateText);
 		assert.equal(capture.hasContentConsent(stored[0].sessionId), false);
 	});

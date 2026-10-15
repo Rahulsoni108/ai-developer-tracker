@@ -303,7 +303,7 @@ suite('Codex conversation and tool parser', () => {
 			await parser.handle(message('assistant', 'Dummy response'), context());
 			const stored = (await readFile(log.filePath, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
 			assert.deepEqual(stored.map(event => event.eventType), ['ai.prompt.submitted', 'ai.response.completed']);
-			assert.ok(stored.every(event => validateEvent(event).valid));
+			assert.ok(stored.every(event => event.diagnosticVersion === 1 && !('payload' in event)));
 			if (process.platform !== 'win32') { assert.equal((await stat(log.filePath)).mode & 0o777, 0o600); }
 		} finally { await rm(directory, { recursive: true, force: true }); }
 	});

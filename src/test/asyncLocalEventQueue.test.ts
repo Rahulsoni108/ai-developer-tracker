@@ -1,3 +1,4 @@
+import { openTestQueue, openTestWorkerQueue } from './queueTestKeys';
 import * as assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -17,7 +18,7 @@ suite('Async SQLite storage thread', () => {
 	let root: string;
 	let queue: AsyncLocalEventQueue;
 	const storage = () => ({ scheme: 'file', fsPath: root });
-	setup(async () => { root = await mkdtemp(join(tmpdir(), 'ai-queue-thread-')); queue = await AsyncLocalEventQueue.open(storage(), []); });
+	setup(async () => { root = await mkdtemp(join(tmpdir(), 'ai-queue-thread-')); queue = await openTestWorkerQueue(storage(), []); });
 	teardown(async () => { await queue.close(); await rm(root, { recursive: true, force: true }); });
 
 	test('reuses SQLite insertion, FIFO, deduplication, acknowledgment and reopening', async () => {
@@ -25,14 +26,14 @@ suite('Async SQLite storage thread', () => {
 		await Promise.all([queue.enqueue(inputs[0]), queue.enqueue(inputs[1]), queue.enqueue(inputs[0])]);
 		assert.deepEqual(await queue.getPending(10), inputs); assert.equal(await queue.getPendingCount(), 2);
 		await queue.markAcknowledged([inputs[0].eventId]); await queue.close();
-		queue = await AsyncLocalEventQueue.open(storage(), []); await queue.enqueue(inputs[0]);
+		queue = await openTestWorkerQueue(storage(), []); await queue.enqueue(inputs[0]);
 		assert.deepEqual(await queue.getPending(10), [inputs[1]]);
 	});
 
 	test('drains accepted requests before closing and rejects subsequent writes', async () => {
 		const input = event(); const writing = queue.enqueue(input); const closing = queue.close();
 		assert.equal(queue.close(), closing); await assert.rejects(queue.enqueue(event()), LocalEventQueueError);
-		await Promise.all([writing, closing]); queue = await AsyncLocalEventQueue.open(storage(), []);
+		await Promise.all([writing, closing]); queue = await openTestWorkerQueue(storage(), []);
 		assert.deepEqual(await queue.getPending(10), [input]);
 	});
 
@@ -51,7 +52,7 @@ suite('Async SQLite storage thread', () => {
 			assert.ok(error instanceof LocalEventQueueError); assert.equal(error.cause, undefined);
 			assert.equal(error.message, 'Local event queue operation failed.'); return true;
 		});
-		await assert.rejects(AsyncLocalEventQueue.open(storage(), [{ uri: storage() }]), /Unable to open local event queue/);
+		await assert.rejects(openTestWorkerQueue(storage(), [{ uri: storage() }]), /Unable to open local event queue/);
 		await queue.enqueue(event()); assert.equal(await queue.getPendingCount(), 1);
 	});
 
@@ -59,6 +60,6 @@ suite('Async SQLite storage thread', () => {
 		// Inject thread failure, without adding a production fault-injection API.
 		await (queue as unknown as { worker: Worker }).worker.terminate();
 		await assert.rejects(queue.enqueue(event()), /unavailable/); await queue.close();
-		queue = await AsyncLocalEventQueue.open(storage(), []); assert.equal(await queue.getPendingCount(), 0);
+		queue = await openTestWorkerQueue(storage(), []); assert.equal(await queue.getPendingCount(), 0);
 	});
 });

@@ -1,3 +1,4 @@
+import { openTestQueue, openTestWorkerQueue } from './queueTestKeys';
 import * as assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
@@ -24,7 +25,7 @@ suite('Queue storage limits and health', () => {
 	let queue: LocalEventQueue;
 	const storage = () => ({ scheme: 'file', fsPath: root });
 	const database = () => (queue as unknown as { database: DatabaseSync }).database;
-	setup(async () => { root = await mkdtemp(join(tmpdir(), 'ai-queue-limits-')); queue = await LocalEventQueue.open(storage(), []); });
+	setup(async () => { root = await mkdtemp(join(tmpdir(), 'ai-queue-limits-')); queue = await openTestQueue(storage(), []); });
 	teardown(async () => { await queue.close(); await rm(root, { recursive: true, force: true }); });
 
 	test('defaults to 100 MB and reports actual database/sidecar bytes and pending count', async () => {
@@ -36,7 +37,7 @@ suite('Queue storage limits and health', () => {
 	});
 
 	test('warns at 80%, stops admission at capacity and never deletes or acknowledges pending records', async function () {
-		this.timeout(15000); await queue.close(); queue = await LocalEventQueue.open(storage(), [], { maxStorageBytes: 2 * 1024 * 1024 });
+		this.timeout(15000); await queue.close(); queue = await openTestQueue(storage(), [], { maxStorageBytes: 2 * 1024 * 1024 });
 		const session = randomUUID(); const accepted = []; let warned = false; let rejected = false;
 		for (let index = 0; index < 500; index++) {
 			const input = contentEvent(session);
@@ -55,7 +56,7 @@ suite('Queue storage limits and health', () => {
 
 	test('a larger configured limit admits new data after reopening without discarding old events', async () => {
 		await queue.enqueue(fileEvent()); const original = await queue.getPending(10); await queue.close();
-		queue = await LocalEventQueue.open(storage(), [], { maxStorageBytes: 3 * 1024 * 1024 });
+		queue = await openTestQueue(storage(), [], { maxStorageBytes: 3 * 1024 * 1024 });
 		await queue.enqueue(contentEvent(randomUUID(), 128000));
 		assert.deepEqual((await queue.getPending(10))[0], original[0]); assert.equal(await queue.getPendingCount(), 2);
 		assert.equal((await queue.getHealth()).maxStorageBytes, 3 * 1024 * 1024);
@@ -105,25 +106,25 @@ suite('Queue storage limits and health', () => {
 		const issues: string[] = [];
 		const writer = new EventPersistence(queue, new JsonlWriter(join(root, 'mirror.jsonl')),
 			(reason, code) => { issues.push(code ?? reason); recording.stop(); });
-		const subscription = writer.attachRecording(recording); await recording.start(); const session = recording.sessionId!;
+		const subscription = writer.attachRecording(recording, () => ({ approvedWorkspaceIds: ['workspace'], confirmedCodexSessions: [], codexContentConsent: false })); await recording.start(); const session = recording.sessionId!;
 		const input = fileEvent(session); await writer.write(input);
 		database().exec(`CREATE TRIGGER fail_insert BEFORE INSERT ON queued_events BEGIN SELECT RAISE(ABORT, 'PRIVATE WRITE FAILURE'); END`);
 		await assert.rejects(writer.write(fileEvent(session))); assert.equal(recording.isRecording, false);
 		await writer.completeSession(session); database().exec('DROP TRIGGER fail_insert'); await writer.close();
-		subscription.dispose(); recording.dispose(); queue = await LocalEventQueue.open(storage(), []);
+		subscription.dispose(); recording.dispose(); queue = await openTestQueue(storage(), []);
 		assert.deepEqual(await queue.getPending(10), [input]);
 		assert.equal((await queue.getRecordingSessions())[0].status, 'interrupted'); assert.deepEqual(issues, ['operation_failed']);
 	});
 
 	test('rejects invalid maximum storage values', async () => {
 		for (const limit of [0, -1, 1.5, NaN, Infinity, 1024, 11 * 1024 * 1024 * 1024]) {
-			await assert.rejects(LocalEventQueue.open(storage(), [], { maxStorageBytes: limit }), LocalEventQueueError);
+			await assert.rejects(openTestQueue(storage(), [], { maxStorageBytes: limit }), LocalEventQueueError);
 		}
 	});
 
 	test('worker health notifications warn at 80%, signal capacity and throttle ordinary updates', async function () {
 		this.timeout(15000); await queue.close();
-		const threaded = await AsyncLocalEventQueue.open(storage(), [], { maxStorageBytes: 2 * 1024 * 1024 });
+		const threaded = await openTestWorkerQueue(storage(), [], { maxStorageBytes: 2 * 1024 * 1024 });
 		const updates: string[] = []; const started = Date.now(); const session = randomUUID();
 		const observer = threaded.onDidChangeHealth(health => { updates.push(health.status); });
 		try {
@@ -140,7 +141,7 @@ suite('Queue storage limits and health', () => {
 	test('preserves an existing database larger than a lowered limit and blocks new collection', async () => {
 		const session = randomUUID(); const inputs = Array.from({ length: 20 }, () => contentEvent(session, 128000));
 		for (const input of inputs) { await queue.enqueue(input); }
-		await queue.close(); queue = await LocalEventQueue.open(storage(), [], { maxStorageBytes: 1024 * 1024 });
+		await queue.close(); queue = await openTestQueue(storage(), [], { maxStorageBytes: 1024 * 1024 });
 		assert.equal((await queue.getHealth()).status, 'full');
 		await assert.rejects(queue.enqueue(fileEvent()), error => error instanceof LocalEventQueueError && error.code === 'storage_limit');
 		await queue.enqueue(inputs[0]); assert.deepEqual(await queue.getPending(100), inputs);

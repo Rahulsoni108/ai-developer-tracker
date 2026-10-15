@@ -1,15 +1,25 @@
+import type { UploadRetryState, UploadPauseReason } from './uploadState';
+import type { PreparedEventBatch, DeliveryStatus } from './eventBatchManager';
 import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { randomUUID } from 'node:crypto';
 import type { Uri } from 'vscode';
 import type { TrackerEvent } from './eventSchema';
 import { ACTIVE_QUEUE_OWNERS, LocalEventQueueError, QUEUE_PROCESS_INSTANCE_ID,
-	type QueueFailureCode, type QueueHealth, type QueueOptions, type RecordingSessionStatus } from './localEventQueue';
+	type QueueFailureCode, type QueueHealth, type QueueOptions, type RecordingSessionStatus, type RecordingPrivacyHealth, type CleanupScope, type CleanupResult, type LocalDataSummary } from './localEventQueue';
+import type { DiagnosticDirectories } from './localDiagnosticFiles';
+import type { PrivacyReasonCode } from './privacyFilter';
+import { EvidenceEncryptionError, type EncryptionKeys, type EncryptionRequirements } from './evidenceEncryption';
+import { supplyEvidenceKeys, type EvidenceSecretStorage } from './evidenceKeyStorage';
 
-export type QueueOperation = 'enqueue' | 'getPending' | 'markAcknowledged' | 'getPendingCount' | 'getHealth' | 'beginSession' | 'finishSession' | 'getRecordingSessions' | 'close';
+export type QueueOperation = 'getUploadRetryState' | 'configureUpload' | 'claimUploadAttempt' | 'finishUploadAttempt' | 'prepareBatch' | 'markDelivered' | 'releaseBatch' | 'getDeliveryStatus' | 'enqueue' | 'getPending' | 'markAcknowledged' | 'getPendingCount' | 'getHealth' | 'beginSession' | 'finishSession' | 'getRecordingSessions' | 'recordPrivacyRejection' | 'getPrivacyHealth' | 'getLocalDataSummary' | 'acquireMaintenance' | 'releaseMaintenance' | 'deleteEvidence' | 'expireAcknowledged' | 'close';
+export interface LocalStorageSummary extends LocalDataSummary { legacyLogCount: number; diagnosticFileCount: number }
+export interface LocalCleanupResult extends CleanupResult { deletedFiles: number; filesFailed: boolean; storageFailed?: boolean }
 export interface QueueRequest { id: number; operation: QueueOperation; argument?: unknown }
 export type QueueReply = { type: 'ready'; health: QueueHealth } | { type: 'health'; health: QueueHealth }
+	| { type: 'keys_required'; requirements: EncryptionRequirements }
 	| { type: 'failed'; code: QueueFailureCode } | { type: 'result'; id: number; ok: boolean; value?: unknown; code?: QueueFailureCode };
+export type KeySupplyReply = { type: 'keys_supplied'; keys: EncryptionKeys; liveOwnerIds: string[] } | { type: 'keys_failed'; code: QueueFailureCode };
 type StorageUri = Pick<Uri, 'scheme' | 'fsPath'>;
 
 /** Run the existing LocalEventQueue off the extension host; no event consumer or uploader. */
@@ -42,23 +52,38 @@ export class AsyncLocalEventQueue {
 		});
 	}
 
-	static async open(globalStorageUri: StorageUri, workspaceFolders: readonly { uri: StorageUri }[], options: Pick<QueueOptions, 'maxStorageBytes'> = {}): Promise<AsyncLocalEventQueue> {
+	static async open(globalStorageUri: StorageUri, workspaceFolders: readonly { uri: StorageUri }[], options: Pick<QueueOptions, 'maxStorageBytes'> & { diagnosticDirectories?: DiagnosticDirectories } = {},
+		secrets?: EvidenceSecretStorage): Promise<AsyncLocalEventQueue> {
 		let worker: Worker;
 		const ownerId = randomUUID();
 		ACTIVE_QUEUE_OWNERS.add(ownerId);
 		try {
 			worker = new Worker(join(__dirname, 'localEventQueueWorker.js'), { workerData: {
 				storage: { scheme: globalStorageUri.scheme, fsPath: globalStorageUri.fsPath },
-				options: { ...options, ownerId, processInstanceId: QUEUE_PROCESS_INSTANCE_ID, liveOwnerIds: [...ACTIVE_QUEUE_OWNERS] },
-				folders: workspaceFolders.map(folder => ({ uri: { scheme: folder.uri.scheme, fsPath: folder.uri.fsPath } }))
+				options: { maxStorageBytes: options.maxStorageBytes, ownerId, processInstanceId: QUEUE_PROCESS_INSTANCE_ID, liveOwnerIds: [...ACTIVE_QUEUE_OWNERS] },
+				folders: workspaceFolders.map(folder => ({ uri: { scheme: folder.uri.scheme, fsPath: folder.uri.fsPath } })),
+				diagnosticDirectories: options.diagnosticDirectories
 			} });
 		} catch { ACTIVE_QUEUE_OWNERS.delete(ownerId); throw new LocalEventQueueError('Unable to open local event queue.', 'unavailable'); }
 		const queue = new AsyncLocalEventQueue(worker, ownerId);
 		try {
 			await new Promise<void>((resolve, reject) => {
+				let supplying = false;
 				const ready = (reply: QueueReply) => {
 					if (reply.type === 'ready') { cleanup(); resolve(); }
 					else if (reply.type === 'failed') { cleanup(); reject(new LocalEventQueueError('Unable to open local event queue.', reply.code)); }
+					else if (reply.type === 'keys_required' && !supplying) {
+						supplying = true;
+						void supplyEvidenceKeys(secrets, reply.requirements).then(keys => {
+							try {
+								// Transfer ownership: sender buffers detach. No keys in workerData, RPC results or diagnostics.
+								worker.postMessage({ type: 'keys_supplied', keys, liveOwnerIds: [...ACTIVE_QUEUE_OWNERS] } satisfies KeySupplyReply, keys.keys.map(key => key.bytes));
+							} catch { for (const key of keys.keys) { if (key.bytes.byteLength) { new Uint8Array(key.bytes).fill(0); } } }
+						}, error => {
+							const code = error instanceof EvidenceEncryptionError ? error.code : 'key_storage_unavailable';
+							try { worker.postMessage({ type: 'keys_failed', code } satisfies KeySupplyReply); } catch { /* Startup failure is already handled. */ }
+						});
+					}
 				};
 				const failure = () => { cleanup(); reject(new LocalEventQueueError('Unable to open local event queue.')); };
 				const cleanup = () => { worker.off('message', ready); worker.off('error', failure); worker.off('exit', failure); };
@@ -71,6 +96,23 @@ export class AsyncLocalEventQueue {
 		}
 	}
 
+	async getUploadRetryState(): Promise<UploadRetryState | null> { return await this.request('getUploadRetryState') as UploadRetryState | null; }
+	async configureUpload(endpointHash: string): Promise<void> { await this.request('configureUpload', endpointHash); }
+	async claimUploadAttempt(endpointHash: string, now: number, recoveryAt: number): Promise<UploadRetryState | null> {
+		return await this.request('claimUploadAttempt', { endpointHash, now, recoveryAt }) as UploadRetryState | null;
+	}
+	async finishUploadAttempt(nextAttemptAt: number, pauseReason: UploadPauseReason | null, resetAttempts: boolean): Promise<void> {
+		await this.request('finishUploadAttempt', { nextAttemptAt, pauseReason, resetAttempts });
+	}
+
+	async prepareBatch(maxEvents: number, maxBytes: number): Promise<PreparedEventBatch | null> {
+		return await this.request('prepareBatch', { maxEvents, maxBytes }) as PreparedEventBatch | null;
+	}
+	async markDelivered(batchId: string, acknowledgedEventIds: readonly string[]): Promise<void> {
+		await this.request('markDelivered', { batchId, acknowledgedEventIds: [...acknowledgedEventIds] });
+	}
+	async releaseBatch(batchId: string): Promise<void> { await this.request('releaseBatch', batchId); }
+	async getDeliveryStatus(): Promise<DeliveryStatus> { return await this.request('getDeliveryStatus') as DeliveryStatus; }
 	async enqueue(event: unknown): Promise<void> { await this.request('enqueue', event); }
 	async getPending(limit: number): Promise<TrackerEvent[]> { return await this.request('getPending', limit) as TrackerEvent[]; }
 	async markAcknowledged(eventIds: readonly string[]): Promise<void> { await this.request('markAcknowledged', [...eventIds]); }
@@ -81,6 +123,15 @@ export class AsyncLocalEventQueue {
 		await this.request('finishSession', { sessionId, status });
 	}
 	async getRecordingSessions(limit = 1000): Promise<RecordingSessionStatus[]> { return await this.request('getRecordingSessions', limit) as RecordingSessionStatus[]; }
+	async recordPrivacyRejection(sessionId: string, reasons: readonly PrivacyReasonCode[]): Promise<void> {
+		await this.request('recordPrivacyRejection', { sessionId, reasons: [...reasons] });
+	}
+	async getPrivacyHealth(sessionId: string): Promise<RecordingPrivacyHealth> { return await this.request('getPrivacyHealth', sessionId) as RecordingPrivacyHealth; }
+	async getLocalDataSummary(): Promise<LocalStorageSummary> { return await this.request('getLocalDataSummary') as LocalStorageSummary; }
+	async acquireMaintenance(): Promise<void> { await this.request('acquireMaintenance'); }
+	async releaseMaintenance(): Promise<void> { await this.request('releaseMaintenance'); }
+	async deleteEvidence(scope: CleanupScope): Promise<LocalCleanupResult> { return await this.request('deleteEvidence', scope) as LocalCleanupResult; }
+	async expireAcknowledged(cutoff: string): Promise<LocalCleanupResult> { return await this.request('expireAcknowledged', cutoff) as LocalCleanupResult; }
 	get latestHealth(): QueueHealth | undefined { return this.health && { ...this.health }; }
 	onDidChangeHealth(listener: (health: QueueHealth) => void): { dispose(): void } {
 		this.healthListeners.add(listener);

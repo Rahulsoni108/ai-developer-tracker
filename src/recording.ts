@@ -33,6 +33,7 @@ export class RecordingController {
 	get isRecording(): boolean {
 		return this.recording;
 	}
+	get isStarting(): boolean { return this.pendingConsent !== undefined; }
 
 	get sessionId(): string | undefined {
 		return this.recordingSessionId;

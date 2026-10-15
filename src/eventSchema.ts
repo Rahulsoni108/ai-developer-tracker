@@ -36,7 +36,7 @@ export interface FileActivityEvent extends CommonEvent<FileEventType, FileEventP
 
 // Extend this union and the runtime validator together when adding event kinds.
 export type ChangeReason = 'edit' | 'save' | 'external' | 'create' | 'delete';
-export const GAP_REASONS = ['binary', 'file_size_limit', 'diff_size_limit', 'memory_limit', 'read_error', 'read_race', 'diff_timeout', 'baseline_unavailable', 'checkpoint_overflow', 'write_error'] as const;
+export const GAP_REASONS = ['binary', 'file_size_limit', 'diff_size_limit', 'memory_limit', 'read_error', 'read_race', 'diff_timeout', 'baseline_unavailable', 'checkpoint_overflow', 'write_error', 'privacy_filter'] as const;
 export type GapReason = typeof GAP_REASONS[number];
 export const MAX_SCHEMA_DIFF_BYTES = 2 * 1024 * 1024;
 

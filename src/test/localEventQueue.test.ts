@@ -1,3 +1,4 @@
+import { openTestQueue } from './queueTestKeys';
 import * as assert from 'node:assert';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
@@ -21,7 +22,7 @@ suite('Persistent local event queue', () => {
 	setup(async () => {
 		root = await mkdtemp(join(tmpdir(), 'ai-queue-'));
 		storage = join(root, 'global-storage');
-		queue = await LocalEventQueue.open(uri(storage), [{ uri: uri(join(root, 'workspace')) }]);
+		queue = await openTestQueue(uri(storage), [{ uri: uri(join(root, 'workspace')) }]);
 	});
 
 	teardown(async () => {
@@ -83,14 +84,14 @@ suite('Persistent local event queue', () => {
 		await Promise.all(inputs.map(input => queue.enqueue(input)));
 		await queue.markAcknowledged([inputs[0].eventId]);
 		await queue.close();
-		queue = await LocalEventQueue.open(uri(storage), []);
+		queue = await openTestQueue(uri(storage), []);
 		await Promise.all(inputs.map(input => queue.enqueue(input)));
 		assert.deepStrictEqual(await queue.getPending(10), [inputs[1]]);
 		assert.strictEqual(await queue.getPendingCount(), 1);
 	});
 
 	test('commits are visible from another connection before closing', async () => {
-		extra = await LocalEventQueue.open(uri(storage), []);
+		extra = await openTestQueue(uri(storage), []);
 		const input = event();
 		await queue.enqueue(input);
 		assert.deepStrictEqual(await extra.getPending(10), [input]);
@@ -190,14 +191,14 @@ suite('Persistent local event queue', () => {
 		await assert.rejects(queue.getPending(1), /closed/);
 		await assert.rejects(queue.markAcknowledged([]), /closed/);
 		await Promise.all([inserted, closing]);
-		queue = await LocalEventQueue.open(uri(storage), []);
+		queue = await openTestQueue(uri(storage), []);
 		assert.deepStrictEqual(await queue.getPending(10), [input]);
 	});
 
 	test('rejects nonlocal storage and workspace-local storage', async () => {
-		await assert.rejects(LocalEventQueue.open({ scheme: 'vscode-remote', fsPath: storage }, []), /local globalStorageUri/);
-		await assert.rejects(LocalEventQueue.open(uri('relative-path'), []), /local globalStorageUri/);
-		await assert.rejects(LocalEventQueue.open(uri(join(root, 'workspace', 'logs')), [{ uri: uri(join(root, 'workspace')) }]), /outside workspace/);
+		await assert.rejects(openTestQueue({ scheme: 'vscode-remote', fsPath: storage }, []), /local globalStorageUri/);
+		await assert.rejects(openTestQueue(uri('relative-path'), []), /local globalStorageUri/);
+		await assert.rejects(openTestQueue(uri(join(root, 'workspace', 'logs')), [{ uri: uri(join(root, 'workspace')) }]), /outside workspace/);
 	});
 
 	test('checks canonical workspace paths before creating storage through a symlink', async function () {
@@ -205,7 +206,7 @@ suite('Persistent local event queue', () => {
 		const workspace = join(root, 'workspace');
 		await mkdir(workspace);
 		await symlink(workspace, join(root, 'alias'));
-		await assert.rejects(LocalEventQueue.open(uri(join(root, 'alias', 'logs')), [{ uri: uri(workspace) }]), /outside workspace/);
+		await assert.rejects(openTestQueue(uri(join(root, 'alias', 'logs')), [{ uri: uri(workspace) }]), /outside workspace/);
 		await assert.rejects(stat(join(workspace, 'logs')), { code: 'ENOENT' });
 	});
 
@@ -217,10 +218,10 @@ suite('Persistent local event queue', () => {
 		await writeFile(target, 'do not change');
 		const path = join(otherStorage, LOCAL_QUEUE_FILENAME);
 		await symlink(target, path);
-		await assert.rejects(LocalEventQueue.open(uri(otherStorage), []), /Unsafe queue storage/);
+		await assert.rejects(openTestQueue(uri(otherStorage), []), /Unsafe queue storage/);
 		await rm(path);
 		await symlink(target, `${path}-wal`);
-		await assert.rejects(LocalEventQueue.open(uri(otherStorage), []), /Unsafe queue storage/);
+		await assert.rejects(openTestQueue(uri(otherStorage), []), /Unsafe queue storage/);
 		assert.strictEqual(await readFile(target, 'utf8'), 'do not change');
 	});
 
@@ -230,7 +231,7 @@ suite('Persistent local event queue', () => {
 		const database = new DatabaseSync(path);
 		database.exec('PRAGMA user_version = 99');
 		database.close();
-		await assert.rejects(LocalEventQueue.open(uri(storage), []), /Unsupported queue/);
+		await assert.rejects(openTestQueue(uri(storage), []), /Unsupported queue/);
 		const reopened = new DatabaseSync(path);
 		try { assert.strictEqual(reopened.prepare('PRAGMA user_version').get()?.user_version, 99); }
 		finally { reopened.close(); }
@@ -241,6 +242,7 @@ suite('Persistent local event queue', () => {
 		await queue.enqueue(input);
 		const database = new DatabaseSync(join(storage, LOCAL_QUEUE_FILENAME));
 		try {
+			const original = database.prepare('SELECT event_json FROM queued_events').get()!.event_json;
 			database.prepare('UPDATE queued_events SET event_json = ?').run('private malformed contents');
 			await assert.rejects(queue.getPending(10), error => {
 				assert.ok(error instanceof LocalEventQueueError);
@@ -248,7 +250,7 @@ suite('Persistent local event queue', () => {
 				assert.strictEqual(error.cause, undefined);
 				return true;
 			});
-			database.prepare('UPDATE queued_events SET event_json = ?').run(JSON.stringify(input));
+			database.prepare('UPDATE queued_events SET event_json = ?').run(original!);
 			assert.deepStrictEqual(await queue.getPending(10), [input]);
 		} finally { database.close(); }
 	});

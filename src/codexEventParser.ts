@@ -132,6 +132,10 @@ export class CodexEventParser implements RecordingLifecycle {
 		return !!sessionId && !this.disposed && this.run?.id === sessionId && this.run.consented && !this.run.failed
 			&& this.recording.isRecording && this.recording.sessionId === sessionId;
 	}
+	/** Trusted lifecycle snapshot only; ingestion still requires hasContentConsent/isRecording. */
+	hasAdmittedContentConsent(sessionId: string): boolean {
+		return !this.disposed && this.run?.id === sessionId && this.run.consented && !this.run.failed;
+	}
 	canCapture(registration: Readonly<CodexSessionRegistration>): boolean {
 		return this.hasContentConsent(registration.recordingSessionId) && registration.status === 'confirmed'
 			&& registration.reason === 'user_confirmed' && !!registration.sourceSessionId && !!registration.workspaceId

@@ -1,3 +1,4 @@
+import { MemoryEventJournal } from './memoryEventJournal';
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
@@ -35,7 +36,7 @@ suite('File activity tracking', () => {
 	let folders: vscode.WorkspaceFolder[];
 	let recording: RecordingController;
 	let tracker: FileTracker;
-	let writer: JsonlWriter;
+	let writer: MemoryEventJournal;
 	let changes: vscode.EventEmitter<vscode.TextDocumentChangeEvent>;
 	let saves: vscode.EventEmitter<vscode.TextDocument>;
 	let watchers: TestWatcher[];
@@ -65,7 +66,7 @@ suite('File activity tracking', () => {
 	async function events(): Promise<FileActivityEvent[]> {
 		await tracker.flush();
 		try {
-			return (await readFile(writer.filePath, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+			return writer.captured as FileActivityEvent[];
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
 				return [];
@@ -103,7 +104,7 @@ suite('File activity tracking', () => {
 		patterns = [];
 		errors = [];
 		recording = new RecordingController({ text: '', tooltip: undefined, command: undefined, show() {}, dispose() {} }, async () => true);
-		writer = new JsonlWriter(join(temporary, 'storage', EVENT_LOG_FILENAME));
+		writer = new MemoryEventJournal(join(temporary, 'storage', EVENT_LOG_FILENAME));
 		tracker = new FileTracker(recording, writer, vscode.Uri.file(dirname(writer.filePath)), error => errors.push(error), host(), () => new Date(timestamp));
 		await tracker.selectWorkspace(folder);
 	});
@@ -308,7 +309,7 @@ suite('File activity tracking', () => {
 	test('excludes log storage even when it is located inside the workspace', async () => {
 		tracker.dispose();
 		const storage = uri('tracker-storage');
-		writer = new JsonlWriter(vscode.Uri.joinPath(storage, EVENT_LOG_FILENAME).fsPath);
+		writer = new MemoryEventJournal(vscode.Uri.joinPath(storage, EVENT_LOG_FILENAME).fsPath);
 		tracker = new FileTracker(recording, writer, storage, error => errors.push(error), host());
 		await tracker.selectWorkspace(folder);
 		await recording.start();
@@ -462,7 +463,7 @@ suite('Path filters and JSONL writer', () => {
 		const temporary = await mkdtemp(join(tmpdir(), 'writer-test-'));
 		try {
 			const filePath = join(temporary, 'nested', 'events.jsonl');
-			const writer = new JsonlWriter(filePath);
+			const writer = new MemoryEventJournal(filePath);
 			const makeEvent = (relativePath: string): FileActivityEvent => createFileEvent({
 				eventType: 'file.saved', timestamp: new Date('2026-10-12T12:00:00.000Z'), source: 'vscode',
 				sessionId: randomUUID(), payload: { relativePath }, workspaceId: 'workspace-id'
@@ -472,7 +473,8 @@ suite('Path filters and JSONL writer', () => {
 			await reopened.write(makeEvent('b.ts'));
 			await reopened.flush();
 			const lines = (await readFile(filePath, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-			assert.deepStrictEqual(lines.map(event => event.payload.relativePath), ['a.ts', 'quote"and\nnewline.ts', 'b.ts']);
+			assert.deepStrictEqual(lines.map(event => event.eventType), ['file.saved', 'file.saved', 'file.saved']);
+			assert.ok(lines.every(event => !('payload' in event)));
 		} finally {
 			await rm(temporary, { recursive: true, force: true });
 		}

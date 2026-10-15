@@ -1,3 +1,5 @@
+import { eventDiagnostic, type SafeEventDiagnostic } from '../jsonlWriter';
+import { openTestQueue, openTestWorkerQueue } from './queueTestKeys';
 import * as assert from 'node:assert/strict';
 import * as vscode from 'vscode';
 import { createHash, randomUUID } from 'node:crypto';
@@ -47,6 +49,7 @@ suite('SQLite collector integration', () => {
 	let confirmed: boolean;
 	let issues: PersistenceDiagnostic[];
 	let recordIndex: number;
+	let registrySessionId: string | undefined;
 	const base = Date.parse('2026-10-13T10:00:00.000Z');
 	const before = 'const value = 1;\n';
 	const after = 'const value = 2;\n';
@@ -80,12 +83,16 @@ suite('SQLite collector integration', () => {
 		folder = { uri: vscode.Uri.file(join(root, 'workspace')), name: 'workspace', index: 0 };
 		await mkdir(folder.uri.fsPath); await writeFile(uri('app.ts').fsPath, before);
 		mirrorFails = false; queueFails = false; confirmed = true; issues = []; recordIndex = 0; watchers = [];
-		queue = await AsyncLocalEventQueue.open(storage(), [folder]);
+		queue = await openTestWorkerQueue(storage(), [folder]);
 		jsonl = new JsonlWriter(join(root, 'logs', 'events.v1.jsonl'));
 		recording = new RecordingController({ text: '', tooltip: undefined, command: undefined, show() {}, dispose() {} }, async () => true, () => new Date(base));
 		writer = new EventPersistence({ enqueue: input => queueFails ? Promise.reject(new Error('PRIVATE_DRIVER_DETAILS')) : queue.enqueue(input),
-			close: () => queue.close() }, { write: input => mirrorFails ? Promise.reject(new Error('PRIVATE_MIRROR_DETAILS')) : jsonl.write(input),
+			beginSession: id => queue.beginSession(id), finishSession: (id, status) => queue.finishSession(id, status),
+			recordPrivacyRejection: (id, reasons) => queue.recordPrivacyRejection(id, reasons), close: () => queue.close() }, { write: input => mirrorFails ? Promise.reject(new Error('PRIVATE_MIRROR_DETAILS')) : jsonl.write(input),
 			flush: () => jsonl.flush() }, reason => { issues.push(reason); if (reason === 'queue_failed') { recording.stop(); } });
+		writer.attachRecording(recording, sessionId => ({ approvedWorkspaceIds: [workspaceId()],
+			confirmedCodexSessions: confirmed ? [{ sourceSessionId, workspaceId: workspaceId() }] : [],
+			codexContentConsent: parser?.hasAdmittedContentConsent(sessionId) ?? false }));
 		changes = new vscode.EventEmitter(); saves = new vscode.EventEmitter();
 		const host = {
 			textDocuments: [] as vscode.TextDocument[], onDidChangeTextDocument: changes.event, onDidSaveTextDocument: saves.event,
@@ -101,8 +108,11 @@ suite('SQLite collector integration', () => {
 		correlator = new ActivityCorrelator(recording, writer, { approvedWorkspaces: () => [workspaceId()], isExcludedPath, now: () => new Date(base + 10000) });
 		subscription = writer.onDidWrite(event => correlator.observe(event));
 		parser = new CodexEventParser(recording, {
-			getRegistry: () => [{ recordingSessionId: recording.sessionId!, sourceSessionId, workspaceId: workspaceId(), sourceFileId,
-				sourceFileReference: 'codex-file:' + sourceFileId, status: confirmed ? 'confirmed' : 'ambiguous', reason: 'user_confirmed' }],
+			getRegistry: () => {
+				registrySessionId = recording.sessionId ?? registrySessionId;
+				return [{ recordingSessionId: registrySessionId!, sourceSessionId, workspaceId: workspaceId(), sourceFileId,
+					sourceFileReference: 'codex-file:' + sourceFileId, status: confirmed ? 'confirmed' : 'ambiguous', reason: 'user_confirmed' }];
+			},
 			isConfirmed: (file, session, source) => confirmed && recording.isRecording && session === recording.sessionId && file === sourceFileId && source === sourceSessionId
 		}, writer, { isExcludedPath, now: () => new Date(base + 10000) });
 		await recording.start(); parser.grantContentConsent(recording.sessionId!); await drain();
@@ -126,7 +136,7 @@ suite('SQLite collector integration', () => {
 			'ai.tool.started', 'ai.tool.completed', 'activity.relationship.created']) { assert.ok(types.has(type), type); }
 		assert.ok(events.every(event => event.sessionId === recording.sessionId && event.workspaceId === workspaceId()));
 		const lines = (await readFile(jsonl.filePath, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-		assert.deepEqual(lines, events); assert.deepEqual(issues, []);
+		assert.deepEqual(lines, events.map(eventDiagnostic)); assert.deepEqual(issues, []);
 		await writer.write(events[0]); assert.equal(await queue.getPendingCount(), events.length);
 	});
 
@@ -179,12 +189,72 @@ suite('SQLite collector integration', () => {
 		assert.ok(events.some(event => event.eventType === 'file.diff'));
 		assert.ok(events.every(event => event.sessionId === session));
 		edit('app.ts', 'after Stop'); await drain(); assert.equal(await queue.getPendingCount(), events.length);
-		await writer.close(); queue = await AsyncLocalEventQueue.open(storage(), [folder]);
+		await writer.close(); queue = await openTestWorkerQueue(storage(), [folder]);
 		assert.deepEqual(await queue.getPending(100), events);
 	});
 
 	test('rejects global queue storage inside folders added after activation', async () => {
 		await LocalEventQueue.assertStorageOutsideWorkspaces(storage(), [folder]);
 		await assert.rejects(LocalEventQueue.assertStorageOutsideWorkspaces(storage(), [{ uri: vscode.Uri.file(root) }]), /outside workspace/);
+	});
+
+	test('filters real Codex prompts, responses, tool calls and outputs before both local sinks', async () => {
+		const secret = 'sk-proj-' + 'DummySecret123456789'.repeat(2);
+		await parser.handle({ type: 'event_msg', payload: { type: 'user_message', message: 'Use ' + secret } }, context());
+		await parser.handle({ type: 'response_item', payload: { type: 'message', role: 'assistant', phase: 'final_answer',
+			content: [{ type: 'output_text', text: 'Bearer dummyBearerSecret' }] } }, context(2000));
+		await parser.handle({ type: 'response_item', payload: { type: 'function_call', name: 'exec_command', call_id: 'private-tool',
+			arguments: '{"path":"app.ts","password":"dummyPassword"}' } }, context(2500));
+		await parser.handle({ type: 'response_item', payload: { type: 'function_call_output', call_id: 'private-tool',
+			output: 'Authorization: Bearer dummyOutputSecret' } }, context(3000));
+		await drain(); const events = await queue.getPending(100); const serialized = JSON.stringify(events);
+		assert.ok(!/DummySecret|dummyBearerSecret|dummyPassword|dummyOutputSecret/.test(serialized));
+		assert.ok(serialized.includes('[REDACTED]'));
+		assert.deepEqual((await readFile(jsonl.filePath, 'utf8')).trim().split('\n').map(line => JSON.parse(line)), events.map(eventDiagnostic));
+		assert.equal(recording.isRecording, true); assert.deepEqual(issues, []);
+	});
+
+	test('editor diffs containing secrets become gaps and cannot become correlation evidence', async () => {
+		await parser.handle({ type: 'event_msg', payload: { type: 'exec_command_begin', call_id: 'tool', command: ['edit', 'app.ts'] } }, context());
+		edit('app.ts', 'const api_key = "sk-proj-' + 'DummySecret123456789'.repeat(2) + '";\n'); await drain();
+		await parser.handle({ type: 'event_msg', payload: { type: 'exec_command_end', call_id: 'tool', exit_code: 0 } }, context(3000)); await drain();
+		const events = await queue.getPending(100);
+		assert.ok(events.some(event => event.eventType === 'file.modified')); assert.ok(events.some(event => event.eventType === 'file.saved'));
+		assert.ok(events.some(event => event.eventType === 'file.gap' && event.payload.reason === 'privacy_filter'));
+		assert.ok(!events.some(event => event.eventType === 'file.diff'));
+		assert.ok(!events.some(event => event.eventType.startsWith('activity.relationship.')));
+		assert.equal(correlator.getStats().diffs, 0); assert.ok(issues.includes('privacy_gap'));
+		assert.ok(!JSON.stringify(events).includes('DummySecret'));
+	});
+
+	test('rejected Codex evidence visibly degrades recording with only safe health metadata', async () => {
+		const count = await queue.getPendingCount(); const session = recording.sessionId!;
+		await parser.handle({ type: 'event_msg', payload: { type: 'user_message', message: '-----BEGIN PRIVATE KEY-----\ndummySensitiveBlock' } }, context());
+		await drain(); assert.equal(await queue.getPendingCount(), count); assert.ok(issues.includes('privacy_rejected'));
+		assert.deepEqual(await queue.getPrivacyHealth(session), { rejectedCount: 1, reasonCounts: { incomplete_private_key: 1 } });
+		assert.equal(parser.hasContentConsent(session), false); // Existing write-failure handling disables unsafe content capture.
+		assert.equal(recording.isRecording, true);
+	});
+
+	test('filters admitted Codex calls drained after Stop without extending content consent', async () => {
+		const captured = context();
+		const handling = parser.handle({ type: 'response_item', payload: { type: 'function_call', name: 'exec_command', call_id: 'stop-tool',
+			arguments: '{"password":"dummyPassword"}' } }, captured);
+		const session = recording.sessionId; recording.stop(); await handling; await drain();
+		const events = await queue.getPending(100);
+		assert.ok(events.some(event => event.eventType === 'ai.tool.started'));
+		assert.ok(events.some(event => event.eventType === 'ai.tool.incomplete'));
+		assert.ok(events.every(event => event.sessionId === session)); assert.ok(!JSON.stringify(events).includes('dummyPassword'));
+		assert.equal(parser.hasContentConsent(session), false); assert.ok(!issues.includes('privacy_rejected'));
+	});
+
+	test('filters the initial source baseline while retaining file activity and recording controls', async () => {
+		const stopped = recording.sessionId; recording.stop(); await drain(); await correlator.finishSession(stopped); await writer.completeSession(stopped);
+		await writeFile(uri('app.ts').fsPath, 'const password = "dummyBaselinePassword";\n');
+		await recording.start(); await drain();
+		const events = (await queue.getPending(100)).filter(event => event.sessionId === recording.sessionId);
+		assert.ok(events.some(event => event.eventType === 'file.gap' && event.payload.reason === 'privacy_filter'));
+		assert.ok(!events.some(event => event.eventType === 'file.baseline')); assert.ok(!JSON.stringify(events).includes('dummyBaselinePassword'));
+		assert.equal(recording.isRecording, true); assert.equal(parser.hasContentConsent(recording.sessionId), false);
 	});
 });

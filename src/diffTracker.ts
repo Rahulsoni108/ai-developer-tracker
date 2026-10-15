@@ -59,6 +59,11 @@ const bytes = (snapshot: Snapshot) => Buffer.byteLength(snapshot.content ?? '', 
 const MAX_PENDING = 64;
 
 export class DiffTracker implements vscode.Disposable, RecordingLifecycle {
+	async clearStoppedEvidence(): Promise<void> {
+		await this.flush();
+		if (this.recording.isRecording || this.recording.isStarting) { throw new Error('Cannot clear active evidence.'); }
+		this.session?.states.clear(); this.session = undefined;
+	}
 	private readonly options: DiffOptions;
 	private readonly subscriptions: vscode.Disposable[];
 	private watchers: vscode.Disposable[] = [];

@@ -1,3 +1,4 @@
+import { MemoryEventJournal } from './memoryEventJournal';
 import * as assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -13,7 +14,7 @@ import { contentHash } from '../toolFileEvidence';
 
 suite('Local correlation pipeline', () => {
 	let recording: RecordingController;
-	let writer: JsonlWriter;
+	let writer: MemoryEventJournal;
 	let correlator: ActivityCorrelator;
 	let parser: CodexEventParser;
 	let observer: { dispose(): void };
@@ -30,13 +31,12 @@ suite('Local correlation pipeline', () => {
 	const context = (milliseconds: number) => ({ sessionId: recording.sessionId!, sourceSessionId, workspaceId, sourceFileId, sourceFileReference,
 		generation: 0, recordIndex: ++index, byteOffset: index * 200, byteLength: 200, timestamp: new Date(base + milliseconds).toISOString() });
 	async function logged(): Promise<TrackerEvent[]> {
-		const text = await readFile(writer.filePath, 'utf8').catch(() => '');
-		return text.trim() ? text.trim().split('\n').map(line => JSON.parse(line)) : [];
+		return [...writer.captured];
 	}
 	setup(async () => {
 		directory = await mkdtemp(join(tmpdir(), 'correlation-pipeline-')); index = 0;
 		recording = new RecordingController({ text: '', tooltip: undefined, command: undefined, show() {}, dispose() {} }, async () => true, () => new Date(base));
-		writer = new JsonlWriter(join(directory, 'events.v1.jsonl'));
+		writer = new MemoryEventJournal(join(directory, 'events.v1.jsonl'));
 		correlator = new ActivityCorrelator(recording, writer, { approvedWorkspaces: () => [workspaceId], now: () => new Date(base + 10000) });
 		observer = writer.onDidWrite(event => correlator.observe(event));
 		parser = new CodexEventParser(recording, {
