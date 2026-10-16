@@ -12,7 +12,7 @@ import type { PrivacyReasonCode } from './privacyFilter';
 import { EvidenceEncryptionError, type EncryptionKeys, type EncryptionRequirements } from './evidenceEncryption';
 import { supplyEvidenceKeys, type EvidenceSecretStorage } from './evidenceKeyStorage';
 
-export type QueueOperation = 'getRecordedEventSummary' | 'getUploadRetryState' | 'configureUpload' | 'claimUploadAttempt' | 'finishUploadAttempt' | 'prepareBatch' | 'markDelivered' | 'releaseBatch' | 'getDeliveryStatus' | 'enqueue' | 'getPending' | 'markAcknowledged' | 'getPendingCount' | 'getHealth' | 'beginSession' | 'finishSession' | 'getRecordingSessions' | 'recordPrivacyRejection' | 'getPrivacyHealth' | 'getLocalDataSummary' | 'acquireMaintenance' | 'releaseMaintenance' | 'deleteEvidence' | 'expireAcknowledged' | 'close';
+export type QueueOperation = 'getSessionEvidenceStatus' | 'getRecordedEventSummary' | 'getUploadRetryState' | 'configureUpload' | 'claimUploadAttempt' | 'finishUploadAttempt' | 'prepareBatch' | 'markDelivered' | 'releaseBatch' | 'getDeliveryStatus' | 'enqueue' | 'getPending' | 'markAcknowledged' | 'getPendingCount' | 'getHealth' | 'beginSession' | 'finishSession' | 'getRecordingSessions' | 'recordPrivacyRejection' | 'getPrivacyHealth' | 'getLocalDataSummary' | 'acquireMaintenance' | 'releaseMaintenance' | 'deleteEvidence' | 'expireAcknowledged' | 'close';
 export interface LocalStorageSummary extends LocalDataSummary { legacyLogCount: number; diagnosticFileCount: number }
 export interface LocalCleanupResult extends CleanupResult { deletedFiles: number; filesFailed: boolean; storageFailed?: boolean }
 export interface QueueRequest { id: number; operation: QueueOperation; argument?: unknown }
@@ -117,6 +117,9 @@ export class AsyncLocalEventQueue {
 	async getPending(limit: number): Promise<TrackerEvent[]> { return await this.request('getPending', limit) as TrackerEvent[]; }
 	async markAcknowledged(eventIds: readonly string[]): Promise<void> { await this.request('markAcknowledged', [...eventIds]); }
 	async getRecordedEventSummary(): Promise<RecordedEventSummary> { return await this.request('getRecordedEventSummary') as RecordedEventSummary; }
+	async getSessionEvidenceStatus(sessionIds: readonly string[]): Promise<{ totalEvents: number; pendingEvents: number; missingSessions: number }> {
+		return await this.request('getSessionEvidenceStatus', [...sessionIds]) as { totalEvents: number; pendingEvents: number; missingSessions: number };
+	}
 	async getPendingCount(): Promise<number> { return await this.request('getPendingCount') as number; }
 	async getHealth(): Promise<QueueHealth> { return await this.request('getHealth') as QueueHealth; }
 	async beginSession(sessionId: string): Promise<void> { await this.request('beginSession', sessionId); }

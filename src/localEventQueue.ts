@@ -547,6 +547,25 @@ export class LocalEventQueue {
 		})));
 	}
 
+	/** Indexed metadata-only delivery check. Missing/retained-away recordings cannot prove delivery. */
+	getSessionEvidenceStatus(sessionIds: readonly string[]): Promise<{ totalEvents: number; pendingEvents: number; missingSessions: number }> {
+		return this.schedule(() => {
+			if (!Array.isArray(sessionIds) || sessionIds.length > 32 || !sessionIds.every(isUuid)
+				|| new Set(sessionIds).size !== sessionIds.length) { throw new LocalEventQueueError('Invalid recording selection.'); }
+			const result = { totalEvents: 0, pendingEvents: 0, missingSessions: 0 };
+			this.database.exec('BEGIN');
+			try {
+				for (const id of sessionIds) {
+					if (!this.database.prepare('SELECT 1 FROM recording_sessions WHERE session_id = ?').get(id)) { result.missingSessions++; }
+					const row = this.database.prepare(`SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN acknowledged = 0 THEN 1 ELSE 0 END), 0) AS pending
+						FROM queued_events WHERE session_id = ?`).get(id)!;
+					result.totalEvents += Number(row.total); result.pendingEvents += Number(row.pending);
+				}
+				this.database.exec('COMMIT'); return result;
+			} catch (error) { this.database.exec('ROLLBACK'); throw error; }
+		});
+	}
+
 	/** Read-only snapshot. Decrypted evidence stays on the storage worker in production. */
 	getRecordedEventSummary(): Promise<RecordedEventSummary> {
 		return this.schedule(() => {

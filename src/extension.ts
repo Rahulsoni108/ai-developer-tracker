@@ -26,7 +26,12 @@ import { AsyncLocalEventQueue } from './asyncLocalEventQueue';
 import { EventPersistence, EventPersistenceError, type PersistenceDiagnostic } from './eventPersistence';
 import { LocalDataController, DEFAULT_RETENTION_DAYS, DELETE_LOCAL_EVIDENCE_COMMAND, CLEANUP_LEGACY_EVIDENCE_COMMAND, type LocalDataNotice } from './localDataController';
 import { DIAGNOSTIC_LOG_PREFIX } from './jsonlWriter';
+import { AssessmentController } from './assessmentController';
+import { AssessmentApiError, MockAssessmentApiClient, UnavailableAssessmentApiClient } from './assessmentApiClient';
+import { AssessmentConnectionStore } from './assessmentStorage';
+import { formatAssessmentStatus, registerAssessmentCommands } from './assessmentCommands';
 
+let activeAssessment: AssessmentController | undefined;
 let activeClaudeParser: ClaudeEventParser | undefined;
 let activeClaudeUi: ClaudeCaptureUi | undefined;
 let activeUploads: UploadController | undefined;
@@ -412,7 +417,8 @@ export async function activate(context: vscode.ExtensionContext) {
 				if (['authentication', 'configuration', 'protocol', 'privacy', 'storage', 'consent_required'].includes(reason)) { void vscode.window.showWarningMessage(messages[reason]); }
 			}
 		}, (settings, hooks) => new EventUploader(new EventBatchManager(queue), queue, context.secrets, {
-			...settings, ...hooks, privacyContext: event => writer.getUploadPrivacyContext(event)
+			...settings, ...hooks, privacyContext: event => activeAssessment && !activeAssessment.allowsDevelopmentUpload(event.sessionId)
+				? undefined : writer.getUploadPrivacyContext(event)
 		}));
 		activeUploads = uploads;
 		await uploads.initialize();
@@ -421,7 +427,7 @@ export async function activate(context: vscode.ExtensionContext) {
 			vscode.commands.registerCommand(CONFIGURE_UPLOAD_ENDPOINT_COMMAND, () => uploads.configureEndpoint()),
 			vscode.commands.registerCommand(CONFIGURE_UPLOAD_AUTHENTICATION_COMMAND, () => uploads.configureAuthentication()),
 			vscode.commands.registerCommand(ENABLE_UPLOADS_COMMAND, () => uploads.enable()),
-			vscode.commands.registerCommand(DISABLE_UPLOADS_COMMAND, async () => { await uploads.disable(); void vscode.window.showInformationMessage(messages.disabled); }),
+			vscode.commands.registerCommand(DISABLE_UPLOADS_COMMAND, async () => { activeAssessment?.revokeUploadConsent(); await uploads.disable(); void vscode.window.showInformationMessage(messages.disabled); }),
 			vscode.commands.registerCommand(SHOW_UPLOAD_STATUS_COMMAND, async () => {
 				const status = await uploads.showStatus();
 				void vscode.window.showInformationMessage(`Uploads: ${status.enabled ? 'enabled with consent' : 'disabled'}; destination hostname: ${status.hostname ?? 'not configured'}; authentication: ${status.authenticationConfigured ? 'configured' : 'missing'}; status: ${status.pauseReason ?? status.outcome}; pending events: ${status.pendingEvents ?? 'unavailable'}.`);
@@ -436,6 +442,30 @@ export async function activate(context: vscode.ExtensionContext) {
 		}
 	}
 
+	const flushStoppedRecording = async (stoppedSession: string | undefined): Promise<void> => {
+		await diffs.flush(); await tracker.flush(); await activeCodexReader?.flush(); await activeCodexParser?.flush();
+		await activeClaudeParser?.flush(); await activeDiscovery?.flush(); await activeClaudeParser?.finishRecording();
+		await correlator.finishSession(stoppedSession); await writer.flush(); await writer.completeSession(stoppedSession);
+	};
+	const mockAssessments = vscode.workspace.getConfiguration('ai-developer-tracker.assessment.mock').inspect<boolean>('enabled')?.globalValue === true;
+	const assessmentApi = mockAssessments ? new MockAssessmentApiClient() : new UnavailableAssessmentApiClient();
+	if (assessmentApi instanceof MockAssessmentApiClient) { assessmentApi.seedInvitation('DEMO-ASSESSMENT', '1'); }
+	const assessmentStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left);
+	assessmentStatus.name = 'AI Developer Tracker assessment'; assessmentStatus.command = 'ai-developer-tracker.showAssessmentStatus';
+	const assessment = new AssessmentController(assessmentApi, new AssessmentConnectionStore(context.globalState, context.secrets), recording, {
+		flushStopped: async id => {
+			await flushStoppedRecording(id);
+			if (writer.isDegraded || !queue) { throw new AssessmentApiError('storage'); }
+		},
+		getStatus: async ids => { if (!queue) { throw new AssessmentApiError('storage'); } return queue.getSessionEvidenceStatus(ids); },
+		disableDevelopmentUploads: async () => { await activeUploads?.disable(); }
+	}, async hostname => (await vscode.window.showWarningMessage(`Allow assessment uploads to ${hostname}?`, { modal: true,
+		detail: 'Separate upload consent: sanitized code, diffs, AI conversations and tool activity may be transmitted for this paired assessment. Recording consent alone does not allow uploads. This build uses a local mock only: no assessment events are transmitted or automatically acknowledged. Pending evidence blocks final submission. Consent expires on reload; use Stop & Submit to stop local capture. Codex/Claude content still requires its existing separate approval.' }, 'Allow Assessment Uploads')) === 'Allow Assessment Uploads',
+	view => { assessmentStatus.text = `Assessment: ${view.state.replace(/_/g, ' ')}${view.mode === 'mock' ? ' (mock)' : ''}`;
+		assessmentStatus.tooltip = formatAssessmentStatus(view); if (view.state === 'unpaired') { assessmentStatus.hide(); } else { assessmentStatus.show(); } });
+	activeAssessment = assessment;
+	await assessment.initialize();
+	context.subscriptions.push(assessmentStatus, ...registerAssessmentCommands(assessment, mockAssessments));
 	const recordedEventSummaryOutput = vscode.window.createOutputChannel(RECORDED_EVENT_SUMMARY_TITLE);
 	context.subscriptions.push(
 		recordedEventSummaryOutput,
@@ -484,16 +514,7 @@ export async function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand(STOP_RECORDING_COMMAND, async () => {
 			const stoppedSession = recording.sessionId;
 			recording.stop();
-			await diffs.flush();
-			await tracker.flush();
-			await activeCodexReader?.flush();
-			await activeCodexParser?.flush();
-			await activeClaudeParser?.flush();
-			await activeDiscovery?.flush();
-			await activeClaudeParser?.finishRecording();
-			await correlator.finishSession(stoppedSession);
-			await writer.flush();
-			await writer.completeSession(stoppedSession);
+			await flushStoppedRecording(stoppedSession);
 			await activeLocalData?.automaticRetention();
 			if (queue) { try { renderHealth(await queue.getHealth()); } catch (error) { reportPersistence('queue_failed', safeQueueError(error).code); } }
 		})
@@ -502,6 +523,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
 // VS Code disposes the commands and controller in context.subscriptions.
 export async function deactivate(): Promise<void> {
+	await activeAssessment?.dispose();
 	await activeClaudeUi?.dispose(); activeClaudeUi = undefined;
 	await activeUploads?.dispose(); activeUploads = undefined;
 	const stoppedSession = activeRecording?.sessionId;
@@ -535,5 +557,6 @@ export async function deactivate(): Promise<void> {
 		try { await activePersistence?.close(); } catch { /* Persistence already reports a sanitized visible warning. */ }
 		activePersistence = undefined;
 		activeRecording = undefined;
+		activeAssessment = undefined;
 	}
 }

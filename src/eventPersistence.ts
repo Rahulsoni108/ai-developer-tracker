@@ -72,6 +72,8 @@ export class EventPersistence implements ActivityWriter {
 	}
 
 	/** Notifications mean durable SQLite capture, independently of JSONL success. */
+	get isDegraded(): boolean { return this.degraded; }
+
 	onDidWrite(listener: (event: Readonly<TrackerEvent>) => void): { dispose(): void } {
 		this.listeners.add(listener);
 		return { dispose: () => { this.listeners.delete(listener); } };
