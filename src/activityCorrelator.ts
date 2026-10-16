@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { createRelationshipEvent, validateEvent, type CodexFileEvidence, type CodexSourceRecord,
+import { createRelationshipEvent, validateEvent, type CodexFileEvidence, type AiSourceRecord,
 	type CodexToolPayload, type DiffEvent, type RelationshipEvidence, type RelationshipPayload, type TrackerEvent } from './eventSchema';
 import { patchChangeHash } from './toolFileEvidence';
 import type { ActivityWriter } from './jsonlWriter';
@@ -21,10 +21,10 @@ export interface ActivityCorrelatorOptions {
 	onDiagnostic?: (reason: CorrelatorDiagnostic) => void;
 }
 interface ToolRecord {
-	id: string; timestamp: number; sourceRecord: CodexSourceRecord;
+	id: string; timestamp: number; sourceRecord: AiSourceRecord;
 	status: CodexToolPayload['status']; effects: CodexFileEvidence[];
 	timestampOrigin?: 'source' | 'capture'; startedEventId?: string;
-	effectsEventId?: string; effectsSourceRecord?: CodexSourceRecord;
+	effectsEventId?: string; effectsSourceRecord?: AiSourceRecord;
 }
 interface Tool {
 	key: string; sourceSessionId: string; workspaceId: string; callId?: string;
@@ -168,7 +168,7 @@ export class ActivityCorrelator implements RecordingLifecycle {
 	}
 	private effects(tool: Tool): CodexFileEvidence[] { return [...(tool.start?.effects ?? []), ...(tool.result?.effects ?? [])]; }
 	private toolKey(event: TrackerEvent, payload: CodexToolPayload): string {
-		return [event.workspaceId, event.sourceSessionId, payload.sourceRecord.sourceFileReference, payload.sourceRecord.generation,
+		return [event.source, event.workspaceId, event.sourceSessionId, payload.sourceRecord.sourceFileReference, payload.sourceRecord.generation,
 			payload.callId ?? payload.startedEventId ?? event.eventId].join('\0');
 	}
 	private newer(a: ToolRecord, b: ToolRecord): boolean {

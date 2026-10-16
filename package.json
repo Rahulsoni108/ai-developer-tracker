@@ -65,6 +65,9 @@
       }
     },
     "commands": [
+      {"command": "ai-developer-tracker.startClaudeCapture", "title": "AI Developer Tracker: Start Claude Code Capture"},
+      {"command": "ai-developer-tracker.revokeClaudeCapture", "title": "AI Developer Tracker: Revoke Claude Code Capture"},
+      {"command": "ai-developer-tracker.showRecordedEventSummary", "title": "AI Developer Tracker: Show Recorded Event Summary"},
       {"command": "ai-developer-tracker.configureUploadEndpoint", "title": "AI Developer Tracker: Configure Upload Endpoint"},
       {"command": "ai-developer-tracker.configureUploadAuthentication", "title": "AI Developer Tracker: Configure Upload Authentication"},
       {"command": "ai-developer-tracker.enableUploads", "title": "AI Developer Tracker: Enable Uploads"},

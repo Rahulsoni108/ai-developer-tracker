@@ -6,13 +6,13 @@ import { randomUUID } from 'node:crypto';
 import type { Uri } from 'vscode';
 import type { TrackerEvent } from './eventSchema';
 import { ACTIVE_QUEUE_OWNERS, LocalEventQueueError, QUEUE_PROCESS_INSTANCE_ID,
-	type QueueFailureCode, type QueueHealth, type QueueOptions, type RecordingSessionStatus, type RecordingPrivacyHealth, type CleanupScope, type CleanupResult, type LocalDataSummary } from './localEventQueue';
+	type RecordedEventSummary, type QueueFailureCode, type QueueHealth, type QueueOptions, type RecordingSessionStatus, type RecordingPrivacyHealth, type CleanupScope, type CleanupResult, type LocalDataSummary } from './localEventQueue';
 import type { DiagnosticDirectories } from './localDiagnosticFiles';
 import type { PrivacyReasonCode } from './privacyFilter';
 import { EvidenceEncryptionError, type EncryptionKeys, type EncryptionRequirements } from './evidenceEncryption';
 import { supplyEvidenceKeys, type EvidenceSecretStorage } from './evidenceKeyStorage';
 
-export type QueueOperation = 'getUploadRetryState' | 'configureUpload' | 'claimUploadAttempt' | 'finishUploadAttempt' | 'prepareBatch' | 'markDelivered' | 'releaseBatch' | 'getDeliveryStatus' | 'enqueue' | 'getPending' | 'markAcknowledged' | 'getPendingCount' | 'getHealth' | 'beginSession' | 'finishSession' | 'getRecordingSessions' | 'recordPrivacyRejection' | 'getPrivacyHealth' | 'getLocalDataSummary' | 'acquireMaintenance' | 'releaseMaintenance' | 'deleteEvidence' | 'expireAcknowledged' | 'close';
+export type QueueOperation = 'getRecordedEventSummary' | 'getUploadRetryState' | 'configureUpload' | 'claimUploadAttempt' | 'finishUploadAttempt' | 'prepareBatch' | 'markDelivered' | 'releaseBatch' | 'getDeliveryStatus' | 'enqueue' | 'getPending' | 'markAcknowledged' | 'getPendingCount' | 'getHealth' | 'beginSession' | 'finishSession' | 'getRecordingSessions' | 'recordPrivacyRejection' | 'getPrivacyHealth' | 'getLocalDataSummary' | 'acquireMaintenance' | 'releaseMaintenance' | 'deleteEvidence' | 'expireAcknowledged' | 'close';
 export interface LocalStorageSummary extends LocalDataSummary { legacyLogCount: number; diagnosticFileCount: number }
 export interface LocalCleanupResult extends CleanupResult { deletedFiles: number; filesFailed: boolean; storageFailed?: boolean }
 export interface QueueRequest { id: number; operation: QueueOperation; argument?: unknown }
@@ -116,6 +116,7 @@ export class AsyncLocalEventQueue {
 	async enqueue(event: unknown): Promise<void> { await this.request('enqueue', event); }
 	async getPending(limit: number): Promise<TrackerEvent[]> { return await this.request('getPending', limit) as TrackerEvent[]; }
 	async markAcknowledged(eventIds: readonly string[]): Promise<void> { await this.request('markAcknowledged', [...eventIds]); }
+	async getRecordedEventSummary(): Promise<RecordedEventSummary> { return await this.request('getRecordedEventSummary') as RecordedEventSummary; }
 	async getPendingCount(): Promise<number> { return await this.request('getPendingCount') as number; }
 	async getHealth(): Promise<QueueHealth> { return await this.request('getHealth') as QueueHealth; }
 	async beginSession(sessionId: string): Promise<void> { await this.request('beginSession', sessionId); }

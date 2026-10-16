@@ -81,16 +81,25 @@ export interface CodexSourceRecord {
 	byteLength: number;
 	recordType: 'response_item' | 'event_msg';
 }
+export interface ClaudeSourceRecord {
+	sourceFileReference: string;
+	recordIndex: number;
+	generation: number;
+	byteOffset: number;
+	byteLength: number;
+	recordType: 'claude_hook' | 'claude_transcript';
+}
+export type AiSourceRecord = CodexSourceRecord | ClaudeSourceRecord;
 export interface CodexMessagePayload {
 	text: string;
-	sourceRecord: CodexSourceRecord;
+	sourceRecord: AiSourceRecord;
 	partLengths?: number[];
 	messageId?: string;
 	phase?: 'commentary' | 'final_answer';
 }
 export interface CodexToolPayload {
 	toolName: string;
-	sourceRecord: CodexSourceRecord;
+	sourceRecord: AiSourceRecord;
 	callId?: string;
 	input?: string;
 	output?: string;
@@ -117,6 +126,11 @@ export type CodexActivityEvent = (
 	CommonEvent<'ai.prompt.submitted' | 'ai.response.completed', CodexMessagePayload>
 	| CommonEvent<'ai.tool.started' | 'ai.tool.completed' | 'ai.tool.failed' | 'ai.tool.incomplete', CodexToolPayload>
 ) & { source: 'codex'; sourceSessionId: string; workspaceId: string };
+export type ClaudeActivityEvent = (
+	CommonEvent<'ai.prompt.submitted' | 'ai.response.completed', CodexMessagePayload>
+	| CommonEvent<'ai.tool.started' | 'ai.tool.completed' | 'ai.tool.failed' | 'ai.tool.incomplete', CodexToolPayload>
+	| CommonEvent<'ai.session.started' | 'ai.session.ended', { sourceRecord: ClaudeSourceRecord; status: 'started' | 'resumed' | 'ended' }>
+) & { source: 'claude'; sourceSessionId: string; workspaceId: string };
 export const RELATIONSHIP_EXPLANATIONS = ['applied_change_matches_diff', 'explicit_path_window', 'timestamp_only',
 	'missing_tool_result', 'missing_tool_start', 'tool_unsuccessful', 'editor_checkpoint', 'overlapping_tools',
 	'outside_execution_window', 'source_reference_conflict', 'read_only_tool', 'unverified_timestamps', 'change_evidence_mismatch', 'bounded_history'] as const;
@@ -125,7 +139,7 @@ export interface RelationshipEvidence {
 	eventId: string;
 	kind: 'tool_start' | 'tool_result' | 'explicit_path' | 'applied_change' | 'change_hash_match'
 		| 'time_window' | 'editor_checkpoint' | 'competing_tool';
-	sourceRecord?: CodexSourceRecord;
+	sourceRecord?: AiSourceRecord;
 }
 export interface RelationshipPayload {
 	relationshipId: string;
@@ -146,7 +160,7 @@ export interface RelationshipEvent extends CommonEvent<'activity.relationship.cr
 	workspaceId: string;
 	attribution: 'unknown';
 }
-export type TrackerEvent = FileActivityEvent | CodeChangeEvent | CodexActivityEvent | RelationshipEvent;
+export type TrackerEvent = FileActivityEvent | CodeChangeEvent | CodexActivityEvent | ClaudeActivityEvent | RelationshipEvent;
 
 export function createRelationshipEvent(input: Omit<RelationshipEvent, 'schemaVersion' | 'eventId' | 'timestamp' | 'source' | 'attribution'>
 	& { timestamp?: Date }): RelationshipEvent {
@@ -158,6 +172,12 @@ export function createCodexEvent(input: Omit<CodexActivityEvent, 'schemaVersion'
 	& { timestamp?: Date }): CodexActivityEvent {
 	return { ...input, schemaVersion: SCHEMA_VERSION, eventId: randomUUID(), source: 'codex',
 		timestamp: (input.timestamp ?? new Date()).toISOString() } as CodexActivityEvent;
+}
+
+export function createClaudeEvent(input: Omit<ClaudeActivityEvent, 'schemaVersion' | 'eventId' | 'timestamp' | 'source'>
+	& { timestamp?: Date }): ClaudeActivityEvent {
+	return { ...input, schemaVersion: SCHEMA_VERSION, eventId: randomUUID(), source: 'claude',
+		timestamp: (input.timestamp ?? new Date()).toISOString() } as ClaudeActivityEvent;
 }
 
 export function createChangeEvent(input: (
@@ -253,8 +273,9 @@ function isRelativePath(value: unknown): value is string {
 function validCodexPayload(type: string, payload: Record<string, unknown>): boolean {
 	const sourceRecord = dataObject(payload.sourceRecord);
 	if (!sourceRecord || Object.keys(sourceRecord).some(key => !['sourceFileReference', 'recordIndex', 'generation', 'byteOffset', 'byteLength', 'recordType'].includes(key))
-		|| typeof sourceRecord.sourceFileReference !== 'string' || !/^codex-file:[a-f0-9]{64}$/.test(sourceRecord.sourceFileReference)
-		|| !['response_item', 'event_msg'].includes(sourceRecord.recordType as string)
+		|| typeof sourceRecord.sourceFileReference !== 'string'
+		|| !(/^codex-file:[a-f0-9]{64}$/.test(sourceRecord.sourceFileReference) && ['response_item', 'event_msg'].includes(sourceRecord.recordType as string)
+			|| /^claude-file:[a-f0-9]{64}$/.test(sourceRecord.sourceFileReference) && ['claude_hook', 'claude_transcript'].includes(sourceRecord.recordType as string))
 		|| !Number.isSafeInteger(sourceRecord.recordIndex) || (sourceRecord.recordIndex as number) < 1
 		|| !Number.isSafeInteger(sourceRecord.generation) || (sourceRecord.generation as number) < 0
 		|| !Number.isSafeInteger(sourceRecord.byteOffset) || (sourceRecord.byteOffset as number) < 0
@@ -381,9 +402,10 @@ export function validateEvent(value: unknown): EventValidationResult {
 		if (!['vscode', 'codex', 'claude'].includes(input.source as string)) {
 			errors.push('Unsupported or missing source');
 		}
+		const isLifecycle = ['ai.session.started', 'ai.session.ended'].includes(input.eventType as string);
 		const isCodex = codexEventTypes.has(input.eventType as string);
 		const isRelationship = relationshipEventTypes.has(input.eventType as string);
-		if (!eventTypes.has(input.eventType as FileEventType) && !isCodex && !isRelationship) {
+		if (!eventTypes.has(input.eventType as FileEventType) && !isCodex && !isRelationship && !isLifecycle) {
 			errors.push('Unsupported or missing eventType');
 		}
 		if (!isIdentifier(input.workspaceId)) {
@@ -399,8 +421,17 @@ export function validateEvent(value: unknown): EventValidationResult {
 				|| !payload || !validRelationshipPayload(input.eventType as string, payload)) {
 				errors.push('Invalid relationship event');
 			}
+		} else if (isLifecycle) {
+			const record = payload?.sourceRecord as Record<string, unknown> | undefined;
+			if (input.source !== 'claude' || !isIdentifier(input.sourceSessionId) || !payload
+				|| Object.keys(payload).some(key => !['sourceRecord', 'status'].includes(key))
+				|| !['started', 'resumed', 'ended'].includes(payload.status as string)
+				|| (input.eventType === 'ai.session.ended') !== (payload.status === 'ended')
+				|| !validCodexPayload('ai.prompt.submitted', { text: 'lifecycle', sourceRecord: record })
+				|| !String(record?.sourceFileReference).startsWith('claude-file:')) { errors.push('Invalid Claude session event'); }
 		} else if (isCodex) {
-			if (input.source !== 'codex' || !isIdentifier(input.sourceSessionId) || !payload || !validCodexPayload(input.eventType as string, payload)) {
+			if (!['codex', 'claude'].includes(input.source as string) || !isIdentifier(input.sourceSessionId) || !payload || !validCodexPayload(input.eventType as string, payload)
+				|| !String((payload?.sourceRecord as Record<string, unknown>)?.sourceFileReference).startsWith(input.source === 'claude' ? 'claude-file:' : 'codex-file:')) {
 				errors.push('Invalid Codex event source, sourceSessionId, or payload');
 			}
 		} else if (!payload || Object.keys(payload).some(key => !allowedPayloadFields.includes(key)) || !isRelativePath(payload.relativePath)) {

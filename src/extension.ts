@@ -1,3 +1,8 @@
+import { ClaudeEventParser } from './claudeEventParser';
+import { ClaudeCapture } from './claudeCapture';
+import { ClaudeCaptureUi, START_CLAUDE_CAPTURE_COMMAND, REVOKE_CLAUDE_CAPTURE_COMMAND } from './claudeCaptureUi';
+import { join } from 'node:path';
+import { RECORDED_EVENT_SUMMARY_COMMAND, RECORDED_EVENT_SUMMARY_TITLE, showRecordedEventSummary } from './recordedEventSummary';
 import { EventUploader } from './eventUploader';
 import { EventBatchManager } from './eventBatchManager';
 import { UploadController, CONFIGURE_UPLOAD_ENDPOINT_COMMAND, CONFIGURE_UPLOAD_AUTHENTICATION_COMMAND,
@@ -22,6 +27,8 @@ import { EventPersistence, EventPersistenceError, type PersistenceDiagnostic } f
 import { LocalDataController, DEFAULT_RETENTION_DAYS, DELETE_LOCAL_EVIDENCE_COMMAND, CLEANUP_LEGACY_EVIDENCE_COMMAND, type LocalDataNotice } from './localDataController';
 import { DIAGNOSTIC_LOG_PREFIX } from './jsonlWriter';
 
+let activeClaudeParser: ClaudeEventParser | undefined;
+let activeClaudeUi: ClaudeCaptureUi | undefined;
 let activeUploads: UploadController | undefined;
 let activeTracker: FileTracker | undefined;
 let activeDiffTracker: DiffTracker | undefined;
@@ -159,6 +166,8 @@ export async function activate(context: vscode.ExtensionContext) {
 				&& entry.status === 'confirmed' && entry.reason === 'user_confirmed' && entry.sourceSessionId && entry.workspaceId)
 				.map(entry => ({ sourceSessionId: entry.sourceSessionId!, workspaceId: entry.workspaceId! })),
 			codexContentConsent: privacyParser?.hasAdmittedContentConsent(sessionId) ?? false,
+			confirmedClaudeSessions: activeClaudeParser?.getApprovals(sessionId) ?? [],
+			claudeContentConsent: (activeClaudeParser?.getApprovals(sessionId).length ?? 0) > 0,
 			resolveToolPath: (path, workspaceId) => {
 				const folder = folders.find(folder => folder.workspaceId === workspaceId);
 				if (!folder || folder.uri.scheme !== 'file' || !isAbsolute(path)) { return undefined; }
@@ -274,6 +283,25 @@ export async function activate(context: vscode.ExtensionContext) {
 			vscode.window.showInformationMessage('Codex session discovery is disabled in AI Developer Tracker settings.')));
 	}
 
+	const claudeParser = new ClaudeEventParser(recording, writer, reason => output.appendLine('Claude capture diagnostic: ' + reason));
+	activeClaudeParser = claudeParser;
+	const claudeUi = new ClaudeCaptureUi(recording, tracker, nodeExecutable => new ClaudeCapture(recording, claudeParser, {
+		storageDirectory: join(queueStorageUri.fsPath, 'claude-runtime'), nodeExecutable, bridgePath: join(__dirname, 'claudeHookBridge.js'),
+		assertOutsideWorkspaces: async path => { await LocalEventQueue.assertStorageOutsideWorkspaces(vscode.Uri.file(path), vscode.workspace.workspaceFolders ?? []); }
+	}), reason => {
+		const messages = { unavailable: 'Claude Code capture requires an available Claude Code CLI and Node.js on PATH. No sessions were imported.',
+			revoked: 'Claude Code capture revoked. Local evidence is preserved; capture requires fresh approval.',
+			failed: 'Claude Code capture could not start safely. Check installation and local workspace/storage availability.' };
+		output.appendLine(messages[reason]); void vscode.window.showWarningMessage(messages[reason]);
+	});
+	activeClaudeUi = claudeUi;
+	context.subscriptions.push({ dispose: () => { void claudeUi.dispose(); claudeParser.dispose(); } },
+		vscode.commands.registerCommand(START_CLAUDE_CAPTURE_COMMAND, async () => {
+			if (!recording.isRecording) { void vscode.window.showInformationMessage('Start recording before approving a Claude Code assessment session.'); return; }
+			await claudeUi.start();
+		}),
+		vscode.commands.registerCommand(REVOKE_CLAUDE_CAPTURE_COMMAND, () => claudeUi.revoke()));
+
 	if (queue) {
 		const notices: Record<LocalDataNotice, string> = {
 			recording_active: 'Stop all recordings before cleaning local assessment data.',
@@ -295,7 +323,7 @@ export async function activate(context: vscode.ExtensionContext) {
 					await LocalEventQueue.assertStorageOutsideWorkspaces(vscode.Uri.file(path), vscode.workspace.workspaceFolders ?? []);
 				}
 			},
-			drain: async () => { await diffs.flush(); await tracker.flush(); await activeCodexReader?.flush(); await activeCodexParser?.flush(); await correlator.flush(); await writer.flush(); },
+			drain: async () => { await diffs.flush(); await tracker.flush(); await activeCodexReader?.flush(); await activeCodexParser?.flush(); await activeClaudeParser?.flush(); await correlator.flush(); await writer.flush(); },
 			cleared: async () => {
 				await diffs.clearStoppedEvidence(); await correlator.clearStoppedEvidence(); activeDiscovery?.clearStoppedRegistry(); writer.resetAfterCleanup();
 				const health = await queue!.getHealth(); renderHealth(health);
@@ -408,7 +436,10 @@ export async function activate(context: vscode.ExtensionContext) {
 		}
 	}
 
+	const recordedEventSummaryOutput = vscode.window.createOutputChannel(RECORDED_EVENT_SUMMARY_TITLE);
 	context.subscriptions.push(
+		recordedEventSummaryOutput,
+		vscode.commands.registerCommand(RECORDED_EVENT_SUMMARY_COMMAND, () => showRecordedEventSummary(queue, recordedEventSummaryOutput)),
 		queueStatus,
 		degradation,
 		recording,
@@ -435,6 +466,8 @@ export async function activate(context: vscode.ExtensionContext) {
 			await tracker.flush();
 			await activeCodexReader?.flush();
 			await activeCodexParser?.flush();
+			await activeClaudeParser?.flush();
+			await activeClaudeParser?.finishRecording();
 			await correlator.finishSession(stoppedSession);
 			await writer.flush();
 			await writer.completeSession(stoppedSession);
@@ -455,7 +488,9 @@ export async function activate(context: vscode.ExtensionContext) {
 			await tracker.flush();
 			await activeCodexReader?.flush();
 			await activeCodexParser?.flush();
+			await activeClaudeParser?.flush();
 			await activeDiscovery?.flush();
+			await activeClaudeParser?.finishRecording();
 			await correlator.finishSession(stoppedSession);
 			await writer.flush();
 			await writer.completeSession(stoppedSession);
@@ -467,6 +502,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
 // VS Code disposes the commands and controller in context.subscriptions.
 export async function deactivate(): Promise<void> {
+	await activeClaudeUi?.dispose(); activeClaudeUi = undefined;
 	await activeUploads?.dispose(); activeUploads = undefined;
 	const stoppedSession = activeRecording?.sessionId;
 	activeRecording?.stop();
@@ -477,6 +513,7 @@ export async function deactivate(): Promise<void> {
 		activeCodexReader = undefined;
 		activeCodexParser?.dispose();
 		await activeCodexParser?.flush();
+		await activeClaudeParser?.flush();
 		activeCodexParser = undefined;
 		activeDiscovery?.dispose();
 		await activeDiscovery?.flush();
@@ -487,6 +524,8 @@ export async function deactivate(): Promise<void> {
 		activeTracker?.dispose();
 		await activeTracker?.flush();
 		activeTracker = undefined;
+		await activeClaudeParser?.finishRecording();
+		activeClaudeParser?.dispose(); activeClaudeParser = undefined;
 		await activeCorrelator?.finishSession(stoppedSession);
 		activeCorrelator?.dispose();
 		await activeCorrelator?.flush();

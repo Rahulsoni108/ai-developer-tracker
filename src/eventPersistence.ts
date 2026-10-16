@@ -118,7 +118,10 @@ export class EventPersistence implements ActivityWriter {
 			approvedWorkspaceIds: context.approvedWorkspaceIds.filter(id => id === validation.event.workspaceId),
 			confirmedCodexSessions: context.confirmedCodexSessions.filter(entry => entry.sourceSessionId === validation.event.sourceSessionId
 				&& entry.workspaceId === validation.event.workspaceId).map(entry => ({ ...entry })),
-			codexContentConsent: context.codexContentConsent, verifiedToolPaths
+			codexContentConsent: context.codexContentConsent,
+			confirmedClaudeSessions: context.confirmedClaudeSessions?.filter(entry => entry.sourceSessionId === validation.event.sourceSessionId
+				&& entry.workspaceId === validation.event.workspaceId).map(entry => ({ ...entry })),
+			claudeContentConsent: context.claudeContentConsent, verifiedToolPaths
 		} : undefined;
 		const snapshot = JSON.stringify(validation.event);
 		const bytes = Buffer.byteLength(snapshot);

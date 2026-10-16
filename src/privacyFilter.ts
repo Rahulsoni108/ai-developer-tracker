@@ -5,7 +5,7 @@ import { validateEvent, type TrackerEvent } from './eventSchema';
 export const REDACTED_VALUE = '[REDACTED]';
 export const PRIVACY_EVENT_TYPES = [
 	'file.created', 'file.modified', 'file.saved', 'file.deleted', 'file.diff', 'file.baseline', 'file.gap',
-	'ai.prompt.submitted', 'ai.response.completed', 'ai.tool.started', 'ai.tool.completed', 'ai.tool.failed', 'ai.tool.incomplete',
+	'ai.session.started', 'ai.session.ended', 'ai.prompt.submitted', 'ai.response.completed', 'ai.tool.started', 'ai.tool.completed', 'ai.tool.failed', 'ai.tool.incomplete',
 	'activity.relationship.created', 'activity.relationship.updated'
 ] as const satisfies readonly TrackerEvent['eventType'][];
 export const PRIVACY_REASON_CODES = ['secret_redacted', 'private_key_redacted', 'sensitive_file_path', 'unverified_path',
@@ -22,6 +22,8 @@ export interface PrivacyContext {
 	approvedWorkspaceIds: readonly string[];
 	confirmedCodexSessions: readonly { sourceSessionId: string; workspaceId: string }[];
 	codexContentConsent: boolean;
+	confirmedClaudeSessions?: readonly { sourceSessionId: string; workspaceId: string }[];
+	claudeContentConsent?: boolean;
 	/** Optional snapshot-based guard, for example eligible files indexed by FileTracker. */
 	isApprovedRelativePath?: (relativePath: string, workspaceId: string) => boolean;
 	/** Required to verify absolute structured tool paths; must not execute tool input. */
@@ -122,7 +124,7 @@ export class PrivacyFilter {
 			const validation = validateEvent(snapshot);
 			if (!validation.valid) { throw new Rejection('malformed_event'); }
 			const input = validation.event;
-			if (input.source !== 'vscode' && input.source !== 'codex' || input.eventType.startsWith('file.') && input.source !== 'vscode') { throw new Rejection('unsupported_source'); }
+			if (input.source !== 'vscode' && input.source !== 'codex' && input.source !== 'claude' || input.eventType.startsWith('file.') && input.source !== 'vscode') { throw new Rejection('unsupported_source'); }
 			this.checkBoundaries(input, context);
 			const reasons = new Set<PrivacyReasonCode>();
 			for (const [key, value] of Object.entries(snapshot)) {
@@ -165,9 +167,14 @@ export class PrivacyFilter {
 		if (!context.recordingActive) { throw new Rejection('recording_inactive'); }
 		if (event.sessionId !== context.sessionId) { throw new Rejection('session_not_approved'); }
 		if (!context.approvedWorkspaceIds.includes(event.workspaceId!)) { throw new Rejection('workspace_not_approved'); }
-		if (event.sourceSessionId && !context.confirmedCodexSessions.some(session => session.sourceSessionId === event.sourceSessionId
+		const relationshipPayload = 'evidence' in event.payload ? event.payload : undefined;
+		const relationshipReference = relationshipPayload?.evidence.find(entry => entry.eventId === relationshipPayload.sourceEventId && entry.sourceRecord)?.sourceRecord?.sourceFileReference;
+		const claude = event.source === 'claude' || relationshipReference?.startsWith('claude-file:');
+		const confirmed = claude ? context.confirmedClaudeSessions ?? [] : context.confirmedCodexSessions;
+		if (event.sourceSessionId && !confirmed.some(session => session.sourceSessionId === event.sourceSessionId
 			&& session.workspaceId === event.workspaceId)) { throw new Rejection('source_session_not_confirmed'); }
-		if ((event.source === 'codex' || event.eventType.startsWith('activity.')) && !context.codexContentConsent) { throw new Rejection('content_consent_missing'); }
+		if ((event.source === 'claude' || event.source === 'codex' || event.eventType.startsWith('activity.'))
+			&& !(claude ? context.claudeContentConsent : context.codexContentConsent)) { throw new Rejection('content_consent_missing'); }
 	}
 
 	private clone(value: unknown, work: Budget, depth: number, ancestors: Set<object>, allowUndefined: boolean): unknown {

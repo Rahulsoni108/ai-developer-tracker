@@ -78,6 +78,7 @@ async function run(): Promise<void> {
 					case 'enqueue': await queue.enqueue(request.argument); break;
 					case 'getPending': value = await queue.getPending(request.argument as number); break;
 					case 'markAcknowledged': await queue.markAcknowledged(request.argument as string[]); break;
+					case 'getRecordedEventSummary': value = await queue.getRecordedEventSummary(); break;
 					case 'getPendingCount': value = await queue.getPendingCount(); break;
 					case 'getHealth': value = await queue.getHealth(); break;
 					case 'beginSession': await queue.beginSession(request.argument as string); break;
@@ -102,7 +103,7 @@ async function run(): Promise<void> {
 				port.postMessage({ type: 'result', id: request.id, ok: true, value } satisfies QueueReply);
 			} catch (error) { port.postMessage({ type: 'result', id: request.id, ok: false, code: safeQueueError(error).code } satisfies QueueReply); }
 			finally { if (request.operation === 'close') { port.close(); } }
-			if (request.operation !== 'close') {
+			if (request.operation !== 'close' && request.operation !== 'getRecordedEventSummary') {
 				try { await notifyHealth(); } catch (error) { port.postMessage({ type: 'failed', code: safeQueueError(error).code } satisfies QueueReply); }
 			}
 		});

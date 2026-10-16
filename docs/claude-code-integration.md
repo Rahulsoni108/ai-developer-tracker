@@ -1,0 +1,42 @@
+# Claude Code integration — Task 2.5.1
+
+The extension uses Claude Code's supported [command hooks](https://code.claude.com/docs/en/hooks) and a per-launch [local plugin](https://code.claude.com/docs/en/cli-reference). Capture is restricted to a new explicitly approved assessment session; it never searches all private Claude projects or imports old conversations based on cwd alone.
+
+## Using it
+
+1. Install a current Claude Code CLI supporting `--plugin-dir`, `--session-id`, command-hook `args` and the listed hooks. Node.js must be on VS Code's PATH. Managed policy or disabled hooks can prevent collection; the extension does not override them.
+2. Open the assessment folders and run **AI Developer Tracker: Start Recording** as usual.
+3. Run **AI Developer Tracker: Start Claude Code Capture**. Choose an approved workspace when several are open. Accept the separate content-capture modal only for assessment activity.
+4. The extension opens a dedicated Claude Code terminal with a generated session UUID and temporary plugin directory. Use this terminal for the assessment. SessionStart hooks confirm activity for that exact launch identity; every subsequent event must match its capability, recording, workspace and source-session ID.
+5. Run **Show Recorded Event Summary** to check retained `ai.session.*`, `ai.prompt.submitted`, `ai.response.completed` and `ai.tool.*` counts alongside file/diff events.
+6. Run **Revoke Claude Code Capture** to stop capture without stopping file/diff recording, or Stop Recording to stop all collection. Extension shutdown also revokes capture. Claude itself is not terminated. Starting capture again requires explicit consent and a fresh launch.
+
+Recording consent and upload consent remain independent. Captured Claude events use the existing filtered encrypted SQLite path; an already approved uploader can send only verified sanitized events under its own separate destination consent. No backend, dashboard, new authentication flow or automatic upload enablement was added.
+
+## Modules and capture flow
+
+- `claudeCaptureUi.ts`: installation checks, workspace choice, separate modal consent, revocation and terminal launch with arguments passed directly rather than shell interpolation.
+- `claudeCapture.ts`: creates an isolated uniquely named plugin, private runtime capability and private local IPC endpoint; revokes endpoints/capabilities and drains synthetic incomplete-call metadata. It does not modify `.claude/settings.json`, `.claude/settings.local.json`, global settings or unrelated hooks/plugins.
+- `claudeHookBridge.ts`: passive command-hook executable. It checks private runtime metadata and authenticates a live endpoint **before reading stdin**. It then forwards only the selected main-session ID. Hook input is never spooled to a plaintext file, printed, evaluated or used as a command. Exit is always passive, without permission decisions or content injection.
+- `claudeEventParser.ts`: approves only launch-scoped sessions in current recording workspaces, checks lexical/canonical cwd and structured file paths, normalizes ordered hook data, matches calls by ID/name, bounds history/queues and closes incomplete calls.
+- `claudeTranscriptReader.ts`: bounded incremental fallback, restricted to an approved hook-provided transcript with the exact source UUID filename under the Claude projects root. It establishes an EOF baseline on SessionStart, excludes history and subagents, and reads only new assistant `text` blocks when response hooks are unavailable. It ignores thinking/system/tool blocks and unrelated session IDs. Truncation/replacement skips old bytes rather than replaying them; unsafe symlinks/hard links are rejected.
+
+Supported hooks are SessionStart, SessionEnd, UserPromptSubmit, PreToolUse, PostToolUse, PostToolUseFailure, MessageDisplay and Stop. MessageDisplay chunks are assembled in sequence into visible assistant messages; Stop supplies the final response when needed. The two hook forms deduplicate matching responses within a turn. Once response hooks have supplied text, the session does not switch back to potentially lagging transcript data. Prompts with stable IDs deduplicate by ID; legacy identical prompts without IDs remain distinct rather than guessing message identity. Known internal-instruction/task-notification wrappers are omitted.
+
+The existing `eventSchema.ts` gets additive version-1 Claude source references and two necessary lifecycle event types (`ai.session.started`, `ai.session.ended`). AI message/tool payload structures are reused; existing Codex event formats and stored records retain their versions. `PrivacyFilter` and `EventPersistence` use separate confirmed Claude-session/content-consent scopes, including exact-content upload proofs. Codex consent cannot authorize Claude capture. Only sanitized successful persistence writes feed `ActivityCorrelator`.
+
+Claude source references use an opaque `claude-file:` digest, generation and record metadata; hook offsets are virtual zero, transcript fallback offsets refer to appended file bytes (record indexes count the post-baseline captured stream). No source file paths enter diagnostic output. Session lifecycle payloads contain only a source reference and a fixed status. Runtime configuration contains an ephemeral local IPC capability, not evidence encryption keys; evidence keys remain solely in SecretStorage and the existing worker.
+
+## Correlation and limits
+
+Only documented structured Edit/Write/Read `file_path` metadata creates file evidence. Paths must resolve inside the approved root and pass sensitive-file exclusions. Shell commands, MCP prose and arbitrary tool results are never interpreted or executed to guess file effects. Hook receipt times are labeled `capture`; existing correlation rules therefore preserve uncertainty (`unknown`/unverified timestamps) rather than claim AI authorship. File diffs keep their original attribution. Codex and Claude tool keys/source references remain isolated even when call/session IDs collide.
+
+Capture is bounded to eight simultaneous launch endpoints, 16 approved parser sessions, 128 open calls per session, 32 queued parser records, 10,000 hooks per session and 1 MiB hook input. Individual message/tool content is limited to 256 KiB; at most 16 visible messages may be buffered per source. Transcript fallback reads at most 1 MiB per checkpoint and excludes files above 64 MiB. Hooks time out passively within five seconds. Capabilities expire after eight hours. Limits and malformed/source-boundary failures use fixed diagnostic codes; persistence/privacy failures use existing recording-health reporting.
+
+## Validation and limitations
+
+Focused automated tests use synthetic sessions and temporary directories. They cover consent rejection/revocation, missing CLI handling, command registration, real child-process stdin-to-authenticated-IPC transport, unrelated session/workspace/subagent rejection, configuration preservation, lifecycle/restart, malformed/oversized hooks, multipart/deduplicated messages, tool outcomes, incremental transcript filtering/symlinks, secret redaction through encrypted SQLite, independent Codex consent and conservative diff correlation. They do not access real Claude conversations or call Claude's model API.
+
+Existing independent CLI/IDE sessions are deliberately not retroactively attached; launch through the capture command. New source IDs after session end or extension restart need a fresh approved launch. Subagents/remote sessions are excluded. Live installed Claude versions, managed hook policy, Windows native CLI executables and Node PATH availability require deployment verification; actual model interaction was not exercised by automated tests. The existing memory-bound historical upload-approval restriction remains intact.
+
+A hook timeout, unsupported hook version, managed policy or size bound can leave missing evidence; capture never blocks Claude's tool permission flow or fabricates successful activity. Transcript writes can lag; prefer supported visible-response hooks. Original Claude-managed transcript storage is unchanged and may contain plaintext; only this extension's captured evidence is filtered/encrypted. Crashes can leave metadata-only plugin/runtime files, but old endpoints are dead and cannot resume capture without fresh recording/approval. No sensitive evidence is written into those files. Secret redaction remains heuristic and does not guarantee removal of every sensitive value.

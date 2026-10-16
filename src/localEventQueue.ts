@@ -7,7 +7,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { DatabaseSync } from 'node:sqlite';
 import type { Uri } from 'vscode';
 import { EventValidationError, isUuid, validateEvent, type TrackerEvent } from './eventSchema';
-import { PRIVACY_REASON_CODES, type PrivacyReasonCode } from './privacyFilter';
+import { PRIVACY_EVENT_TYPES, PRIVACY_REASON_CODES, type PrivacyReasonCode } from './privacyFilter';
 import { EvidenceCipher, EvidenceEncryptionError, type EncryptionFailureCode, type EncryptionKeys, type EncryptionRequirements } from './evidenceEncryption';
 
 export const LOCAL_QUEUE_FILENAME = 'event-queue.v1.sqlite';
@@ -54,6 +54,11 @@ export interface LocalDataSummary {
 	pendingCount: number;
 	legacySqliteCount: number;
 	legacyPendingDeletionCount: number;
+}
+/** Deliberately contains no session identity, event objects or caller-provided strings. */
+export interface RecordedEventSummary {
+	total: number;
+	counts: Partial<Record<TrackerEvent['eventType'], number>>;
 }
 export interface CleanupResult { deletedRecords: number; deletedSessions: number }
 
@@ -540,6 +545,33 @@ export class LocalEventQueue {
 			sessionId: String(row.session_id), status: row.status as RecordingSessionStatus['status'], startedAt: String(row.started_at),
 			endedAt: row.ended_at as string | null, reason: row.reason as string | null
 		})));
+	}
+
+	/** Read-only snapshot. Decrypted evidence stays on the storage worker in production. */
+	getRecordedEventSummary(): Promise<RecordedEventSummary> {
+		return this.schedule(() => {
+			const summary: RecordedEventSummary = { total: 0, counts: {} };
+			this.database.exec('BEGIN');
+			try {
+				// Include empty/interrupted sessions; never substitute an older session with more data.
+				// Insertion order breaks ties when recording starts share a millisecond.
+				const latest = this.database.prepare(`SELECT session_id FROM recording_sessions WHERE status != 'cancelled'
+					ORDER BY started_at DESC, rowid DESC LIMIT 1`).get();
+				if (latest) {
+					for (const row of this.database.prepare(`SELECT event_id, event_json, payload_format, session_id FROM queued_events
+						WHERE session_id = ? AND acknowledged = 0 ORDER BY sequence`).iterate(latest.session_id)) {
+						const event = this.readStoredEvent(row);
+						if (!PRIVACY_EVENT_TYPES.includes(event.eventType)) { throw new LocalEventQueueError('Invalid recorded event type.', 'corrupt'); }
+						summary.counts[event.eventType] = (summary.counts[event.eventType] ?? 0) + 1;
+						summary.total++;
+					}
+				}
+				this.database.exec('COMMIT'); return summary;
+			} catch (error) {
+				try { this.database.exec('ROLLBACK'); } catch { /* No SQLite details or partial summary returned. */ }
+				throw error;
+			}
+		});
 	}
 
 	getLocalDataSummary(): Promise<LocalDataSummary> {
