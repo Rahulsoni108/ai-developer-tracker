@@ -1,5 +1,6 @@
-import { createEvidenceApproval, verifyEvidenceApproval, type EvidenceApproval } from './evidenceApproval';
-import { consentCoversEvent, validConsentState, type EvidenceConsentState } from './evidenceConsent';
+import { createAssessmentEventApproval, type AssessmentApprovalBinding } from './assessmentEventApproval';
+import { createEvidenceApproval, verifyEvidenceApproval, validOrigin, type EvidenceApproval } from './evidenceApproval';
+import { consentCoversEvent, validConsentState, utcTime, type EvidenceConsentState } from './evidenceConsent';
 import type { UploadPrivacyContext } from './uploadPrivacyContext';
 import type { UploadRetryState, UploadPauseReason } from './uploadState';
 import { MAX_DELIVERY_BATCH_BYTES, type PreparedEventBatch, type DeliveryStatus } from './eventBatchManager';
@@ -343,6 +344,10 @@ export class LocalEventQueue {
 					if (scope) {
 						proof.assessment = { codingSessionId: scope.codingSessionId, origin: scope.origin,
 							...(consentCoversEvent(scope, validation.event) ? { consentId: scope.receipt!.consent_id } : {}) };
+						if (proof.assessment.consentId) {
+							proof.version = 2;
+							proof.assessmentEventApproval = createAssessmentEventApproval(validation.event, proof.assessment.consentId);
+						}
 					}
 					encryptedApproval = JSON.stringify(this.cipher!.encrypt(eventId, JSON.stringify(proof), 'approval'));
 				}
@@ -376,6 +381,38 @@ export class LocalEventQueue {
 			catch { throw new EvidenceEncryptionError('authentication_failed'); }
 			if (proof.assessment) { return undefined; }
 			return { ...proof.context, exactEventDigest: proof.eventDigest };
+		});
+	}
+
+	/** Preparation only: returns an existing capture-time envelope. Does not authorize network transmission. */
+	getAssessmentUploadContext(event: TrackerEvent, binding: AssessmentApprovalBinding): Promise<UploadPrivacyContext | undefined> {
+		const validation = validateEvent(event);
+		if (!validation.valid || !binding || typeof binding.codingSessionId !== 'string' || !/^[1-9][0-9]{0,19}$/.test(binding.codingSessionId)
+			|| !validOrigin(binding.origin) || !isUuid(binding.consentReceiptId) || !utcTime(binding.serverTime)
+			|| Object.keys(binding).length !== 4) { return Promise.resolve(undefined); }
+		const json = JSON.stringify(validation.event); const target = { ...binding };
+		return this.schedule(() => {
+			const current = JSON.parse(json) as TrackerEvent;
+			if (this.isApprovalRevoked(current.sessionId)) { return undefined; }
+			const scope = this.readEvidenceConsent(current.sessionId); const receipt = scope?.receipt;
+			if (!scope || !receipt || scope.locallyRevoked || scope.pendingAction || !['active', 'stopped'].includes(receipt.state)
+				|| scope.captureClosed && receipt.state !== 'stopped' || scope.codingSessionId !== target.codingSessionId || scope.origin !== target.origin
+				|| receipt.consent_id !== target.consentReceiptId || receipt.destination_origin !== target.origin
+				|| Date.parse(target.serverTime) < Date.parse(receipt.server_time) || Date.parse(target.serverTime) >= Date.parse(receipt.expires_at)
+				|| Date.parse(target.serverTime) >= Date.parse(scope.deadline) || Date.parse(current.timestamp) > Date.parse(target.serverTime)
+				|| Date.parse(current.timestamp) < Date.parse(receipt.evidence_window.starts_at) || Date.parse(current.timestamp) > Date.parse(receipt.evidence_window.ends_at)
+				|| !receipt.approved_workspace_ids.includes(current.workspaceId!) || !receipt.event_types.includes(current.eventType)) { return undefined; }
+			const row = this.database.prepare(`SELECT e.event_id, e.event_json, e.payload_format, e.session_id, a.approval_json
+				FROM queued_events e JOIN event_approvals a ON a.event_id = e.event_id WHERE e.event_id = ? AND e.acknowledged = 0`).get(current.eventId);
+			if (!row) { return undefined; }
+			if (row.payload_format !== 1 || !this.cipher) { throw new EvidenceEncryptionError('authentication_failed'); }
+			const stored = this.readStoredEvent(row); if (JSON.stringify(stored) !== json) { return undefined; }
+			let proof: EvidenceApproval;
+			try { proof = verifyEvidenceApproval(this.cipher.decrypt(current.eventId, JSON.parse(String(row.approval_json)), 'approval'), stored); }
+			catch { throw new EvidenceEncryptionError('authentication_failed'); }
+			if (proof.version !== 2 || !proof.assessmentEventApproval || proof.assessment?.codingSessionId !== target.codingSessionId
+				|| proof.assessment.origin !== target.origin || proof.assessment.consentId !== target.consentReceiptId) { return undefined; }
+			return { ...proof.context, exactEventDigest: proof.eventDigest, assessmentEventApproval: proof.assessmentEventApproval, assessmentApprovalBinding: target };
 		});
 	}
 

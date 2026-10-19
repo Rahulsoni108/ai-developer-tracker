@@ -1,3 +1,4 @@
+import { validAssessmentEventApproval, type AssessmentEventApproval } from './assessmentEventApproval';
 import { createHash } from 'node:crypto';
 import { isUuid, validateEvent, type TrackerEvent } from './eventSchema';
 import { PrivacyFilter } from './privacyFilter';
@@ -5,7 +6,7 @@ import type { UploadPrivacyContext } from './uploadPrivacyContext';
 
 /** This is local integrity evidence, NOT a remotely verifiable client attestation. */
 export interface EvidenceApproval {
-	version: 1;
+	version: 1 | 2;
 	consentScope: 'local_filtered_capture.v1';
 	eventId: string;
 	sessionId: string;
@@ -13,6 +14,8 @@ export interface EvidenceApproval {
 	eventType: TrackerEvent['eventType'];
 	eventDigest: string;
 	context: UploadPrivacyContext;
+	/** Present only on new v2 assessment captures; v1 approvals are never backfilled. */
+	assessmentEventApproval?: AssessmentEventApproval;
 	/** Immutable capture-time assessment scope. Absence never authorizes assessment uploads. */
 	assessment?: { codingSessionId: string; origin: string; consentId?: string };
 }
@@ -45,7 +48,7 @@ export function createEvidenceApproval(event: TrackerEvent, input: UploadPrivacy
 
 export function verifyEvidenceApproval(value: unknown, event: TrackerEvent): EvidenceApproval {
 	const approval = value as EvidenceApproval;
-	if (!approval || approval.version !== 1 || Object.keys(approval).some(key => !['version', 'consentScope', 'eventId', 'sessionId', 'workspaceId', 'eventType', 'eventDigest', 'context', 'assessment'].includes(key))
+	if (!approval || ![1, 2].includes(approval.version) || Object.keys(approval).some(key => !['version', 'consentScope', 'eventId', 'sessionId', 'workspaceId', 'eventType', 'eventDigest', 'context', 'assessment', 'assessmentEventApproval'].includes(key))
 		|| approval.consentScope !== 'local_filtered_capture.v1' || approval.eventId !== event.eventId || approval.sessionId !== event.sessionId
 		|| approval.workspaceId !== event.workspaceId || approval.eventType !== event.eventType || !validateEvent(event).valid || approval.eventDigest !== eventDigest(event)) { throw new Error(); }
 	const verified = createEvidenceApproval(event, approval.context);
@@ -55,6 +58,11 @@ export function verifyEvidenceApproval(value: unknown, event: TrackerEvent): Evi
 			|| Object.keys(approval.assessment).some(key => !['codingSessionId', 'origin', 'consentId'].includes(key))) { throw new Error(); }
 		verified.assessment = approval.assessment;
 	}
+	if (approval.version === 2) {
+		if (!validAssessmentEventApproval(approval.assessmentEventApproval, event) || !approval.assessment?.consentId
+			|| approval.assessmentEventApproval.consentReceiptId !== approval.assessment.consentId) { throw new Error(); }
+		verified.version = 2; verified.assessmentEventApproval = approval.assessmentEventApproval;
+	} else if (approval.assessmentEventApproval !== undefined) { throw new Error(); }
 	return verified;
 }
 export function validOrigin(origin: unknown): origin is string {

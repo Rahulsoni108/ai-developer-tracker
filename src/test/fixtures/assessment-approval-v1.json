@@ -1,0 +1,509 @@
+{
+  "protocol": "assessment-event-approval.v1",
+  "canonicalization": "RFC8785",
+  "digest": "SHA-256",
+  "vectors": [
+    {
+      "id": "nested",
+      "inputJson": "{\"z\":[{\"b\":2,\"a\":1},true,null],\"a\":{\"β\":\"two\",\"a\":[3,2,1]}}",
+      "canonical": "{\"a\":{\"a\":[3,2,1],\"β\":\"two\"},\"z\":[{\"a\":1,\"b\":2},true,null]}",
+      "sha256": "33db38fc6870d90d4c3fccbc81c38181404be343baa02901fae3bcdbe5721f5a"
+    },
+    {
+      "id": "reordered",
+      "inputJson": "{\"a\":{\"a\":[3,2,1],\"β\":\"two\"},\"z\":[{\"a\":1,\"b\":2},true,null]}",
+      "canonical": "{\"a\":{\"a\":[3,2,1],\"β\":\"two\"},\"z\":[{\"a\":1,\"b\":2},true,null]}",
+      "sha256": "33db38fc6870d90d4c3fccbc81c38181404be343baa02901fae3bcdbe5721f5a"
+    },
+    {
+      "id": "array-order",
+      "inputJson": "[3,1,2,{\"y\":2,\"x\":1}]",
+      "canonical": "[3,1,2,{\"x\":1,\"y\":2}]",
+      "sha256": "106843e8718539d727ad5abf2b7e388bb2c08736129c76a054fd04ace09e7a62"
+    },
+    {
+      "id": "utf16-key-order",
+      "inputJson": "{\"\\ue000\":1,\"\\ud83d\\ude00\":2,\"\\r\":3,\"a\":4,\"\\u0080\":5,\"\\u00f6\":6}",
+      "canonical": "{\"\\r\":3,\"a\":4,\"\":5,\"ö\":6,\"😀\":2,\"\":1}",
+      "sha256": "0150284ec59c7ae5d9a3dcb314891f597a36f52490980ed23fd40f7f49cdee73"
+    },
+    {
+      "id": "numeric-key-order",
+      "inputJson": "{\"2\":\"two\",\"10\":\"ten\",\"0\":\"zero\",\"-1\":\"minus\",\"a\":\"letter\"}",
+      "canonical": "{\"-1\":\"minus\",\"0\":\"zero\",\"10\":\"ten\",\"2\":\"two\",\"a\":\"letter\"}",
+      "sha256": "3a3c7c189a8c5a07557fe0f50ee10106859537a5cb74bae4f2e4fef32f1a0b7b"
+    },
+    {
+      "id": "unicode-preserved",
+      "inputJson": "{\"text\":\"你好 👩‍💻 café\",\"decomposed\":\"e\\u0301\",\"composed\":\"é\"}",
+      "canonical": "{\"composed\":\"é\",\"decomposed\":\"é\",\"text\":\"你好 👩‍💻 café\"}",
+      "sha256": "1cf6a4fd7dd4803248b205738eeb45f659da8c49efd0939232d7284f28bacd21"
+    },
+    {
+      "id": "string-escaping",
+      "inputJson": "{\"text\":\"\\u0000\\b\\t\\n\\f\\r\\\"\\\\/\\u2028\\u2029\"}",
+      "canonical": "{\"text\":\"\\u0000\\b\\t\\n\\f\\r\\\"\\\\/  \"}",
+      "sha256": "379bc1a1b19fa8ecba427b3b5b189c85d5fde198d1d9991b9d41ca3d7be00556"
+    },
+    {
+      "id": "missing-field",
+      "inputJson": "{}",
+      "canonical": "{}",
+      "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "id": "null-field",
+      "inputJson": "{\"present\":null}",
+      "canonical": "{\"present\":null}",
+      "sha256": "924c481da1aca4bbd856f20e4aaef20f67c34fccd0b5e27cb2647b8c45ee21ac"
+    },
+    {
+      "id": "number-formatting",
+      "inputJson": "{\"zero\":-0.0,\"one\":1.0,\"thousand\":1e3,\"small\":1e-6,\"tiny\":1e-7,\"large\":1e21,\"largePlain\":1e20,\"fraction\":0.30000000000000004,\"rounded\":333333333.33333329}",
+      "canonical": "{\"fraction\":0.30000000000000004,\"large\":1e+21,\"largePlain\":100000000000000000000,\"one\":1,\"rounded\":333333333.3333333,\"small\":0.000001,\"thousand\":1000,\"tiny\":1e-7,\"zero\":0}",
+      "sha256": "3981498b7bffe1e345686c1a6b3c6607fc2da2f0c91c573178439bdf3bd29d00"
+    },
+    {
+      "id": "ieee754-boundaries",
+      "inputJson": "[5e-324,-5e-324,1.7976931348623157e308,1e23,1.0000000000000001e23,9.999999999999997e-7,9007199254740991]",
+      "canonical": "[5e-324,-5e-324,1.7976931348623157e+308,1e+23,1.0000000000000001e+23,9.999999999999997e-7,9007199254740991]",
+      "sha256": "8b9ffb82567c4d19e2d801d38ab1f63d210264efc01e375c6a949b37f26cca29"
+    },
+    {
+      "id": "binary64-rounding",
+      "inputJson": "[9007199254740993,1.00000000000000001]",
+      "canonical": "[9007199254740992,1]",
+      "sha256": "6f0a5f65321ab04da83cab8fa86073d50b35b98dc147ca475c6f14b7a253b89f"
+    },
+    {
+      "id": "literals",
+      "inputJson": "{\"null\":null,\"true\":true,\"false\":false}",
+      "canonical": "{\"false\":false,\"null\":null,\"true\":true}",
+      "sha256": "53738299ec37f4ace8cbfc30738ad03bfdc4ea019d2ad7a9376cd3e274a6625d"
+    },
+    {
+      "id": "json-in-string",
+      "inputJson": "{\"tool\":\"{\\\"z\\\":2, \\\"a\\\":1}\"}",
+      "canonical": "{\"tool\":\"{\\\"z\\\":2, \\\"a\\\":1}\"}",
+      "sha256": "773f3da3d36deee0083d1163b56d25083c503915a57838c6f168ae9e669e2208"
+    },
+    {
+      "id": "normalized-event",
+      "inputJson": "{\"schemaVersion\": 1, \"eventId\": \"11111111-1111-4111-8111-111111111111\", \"sessionId\": \"22222222-2222-4222-8222-222222222222\", \"source\": \"vscode\", \"eventType\": \"file.modified\", \"timestamp\": \"2030-01-01T10:00:01.000Z\", \"workspaceId\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"attribution\": \"unknown\", \"payload\": {\"relativePath\": \"src/你好.ts\"}}",
+      "canonical": "{\"attribution\":\"unknown\",\"eventId\":\"11111111-1111-4111-8111-111111111111\",\"eventType\":\"file.modified\",\"payload\":{\"relativePath\":\"src/你好.ts\"},\"schemaVersion\":1,\"sessionId\":\"22222222-2222-4222-8222-222222222222\",\"source\":\"vscode\",\"timestamp\":\"2030-01-01T10:00:01.000Z\",\"workspaceId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+      "sha256": "e75286632c74c232a061a4f7b165fa3a19d1819a0bf3428c7561da33d2086703"
+    },
+    {
+      "id": "normalized-event-reordered",
+      "inputJson": "{\"payload\": {\"relativePath\": \"src/你好.ts\"}, \"attribution\": \"unknown\", \"workspaceId\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"timestamp\": \"2030-01-01T10:00:01.000Z\", \"eventType\": \"file.modified\", \"source\": \"vscode\", \"sessionId\": \"22222222-2222-4222-8222-222222222222\", \"eventId\": \"11111111-1111-4111-8111-111111111111\", \"schemaVersion\": 1}",
+      "canonical": "{\"attribution\":\"unknown\",\"eventId\":\"11111111-1111-4111-8111-111111111111\",\"eventType\":\"file.modified\",\"payload\":{\"relativePath\":\"src/你好.ts\"},\"schemaVersion\":1,\"sessionId\":\"22222222-2222-4222-8222-222222222222\",\"source\":\"vscode\",\"timestamp\":\"2030-01-01T10:00:01.000Z\",\"workspaceId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+      "sha256": "e75286632c74c232a061a4f7b165fa3a19d1819a0bf3428c7561da33d2086703"
+    }
+  ],
+  "invalidJson": [
+    {
+      "id": "duplicate-key",
+      "inputJson": "{\"a\":1,\"a\":2}"
+    },
+    {
+      "id": "lone-surrogate",
+      "inputJson": "{\"x\":\"\\ud800\"}"
+    },
+    {
+      "id": "overflow",
+      "inputJson": "{\"n\":1e400}"
+    }
+  ],
+  "approvalCases": [
+    {
+      "id": "valid-capture",
+      "event": {
+        "schemaVersion": 1,
+        "eventId": "11111111-1111-4111-8111-111111111111",
+        "sessionId": "22222222-2222-4222-8222-222222222222",
+        "source": "vscode",
+        "eventType": "file.modified",
+        "timestamp": "2030-01-01T10:00:01.000Z",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "attribution": "unknown",
+        "payload": {
+          "relativePath": "src/你好.ts"
+        }
+      },
+      "approval": {
+        "approvalProtocolVersion": 1,
+        "eventId": "11111111-1111-4111-8111-111111111111",
+        "localRecordingSessionId": "22222222-2222-4222-8222-222222222222",
+        "consentReceiptId": "33333333-3333-4333-8333-333333333333",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "captureApprovalReference": "44444444-4444-4444-8444-444444444444",
+        "canonicalization": "RFC8785",
+        "eventDigest": "e75286632c74c232a061a4f7b165fa3a19d1819a0bf3428c7561da33d2086703"
+      },
+      "authority": {
+        "consentReceiptId": "33333333-3333-4333-8333-333333333333",
+        "localRecordingSessionId": "22222222-2222-4222-8222-222222222222",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "eventTypes": [
+          "file.modified"
+        ],
+        "state": "active",
+        "startsAt": "2030-01-01T10:00:00.000Z",
+        "endsAt": "2030-01-01T11:00:00.000Z",
+        "serverTime": "2030-01-01T10:00:02.000Z"
+      },
+      "valid": true
+    },
+    {
+      "id": "identical-retry-reference",
+      "event": {
+        "schemaVersion": 1,
+        "eventId": "11111111-1111-4111-8111-111111111111",
+        "sessionId": "22222222-2222-4222-8222-222222222222",
+        "source": "vscode",
+        "eventType": "file.modified",
+        "timestamp": "2030-01-01T10:00:01.000Z",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "attribution": "unknown",
+        "payload": {
+          "relativePath": "src/你好.ts"
+        }
+      },
+      "approval": {
+        "approvalProtocolVersion": 1,
+        "eventId": "11111111-1111-4111-8111-111111111111",
+        "localRecordingSessionId": "22222222-2222-4222-8222-222222222222",
+        "consentReceiptId": "33333333-3333-4333-8333-333333333333",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "captureApprovalReference": "44444444-4444-4444-8444-444444444444",
+        "canonicalization": "RFC8785",
+        "eventDigest": "e75286632c74c232a061a4f7b165fa3a19d1819a0bf3428c7561da33d2086703"
+      },
+      "authority": {
+        "consentReceiptId": "33333333-3333-4333-8333-333333333333",
+        "localRecordingSessionId": "22222222-2222-4222-8222-222222222222",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "eventTypes": [
+          "file.modified"
+        ],
+        "state": "active",
+        "startsAt": "2030-01-01T10:00:00.000Z",
+        "endsAt": "2030-01-01T11:00:00.000Z",
+        "serverTime": "2030-01-01T10:00:02.000Z"
+      },
+      "valid": true
+    },
+    {
+      "id": "tampered-event",
+      "event": {
+        "schemaVersion": 1,
+        "eventId": "11111111-1111-4111-8111-111111111111",
+        "sessionId": "22222222-2222-4222-8222-222222222222",
+        "source": "vscode",
+        "eventType": "file.modified",
+        "timestamp": "2030-01-01T10:00:01.000Z",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "attribution": "unknown",
+        "payload": {
+          "relativePath": "src/tampered.ts"
+        }
+      },
+      "approval": {
+        "approvalProtocolVersion": 1,
+        "eventId": "11111111-1111-4111-8111-111111111111",
+        "localRecordingSessionId": "22222222-2222-4222-8222-222222222222",
+        "consentReceiptId": "33333333-3333-4333-8333-333333333333",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "captureApprovalReference": "44444444-4444-4444-8444-444444444444",
+        "canonicalization": "RFC8785",
+        "eventDigest": "e75286632c74c232a061a4f7b165fa3a19d1819a0bf3428c7561da33d2086703"
+      },
+      "authority": {
+        "consentReceiptId": "33333333-3333-4333-8333-333333333333",
+        "localRecordingSessionId": "22222222-2222-4222-8222-222222222222",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "eventTypes": [
+          "file.modified"
+        ],
+        "state": "active",
+        "startsAt": "2030-01-01T10:00:00.000Z",
+        "endsAt": "2030-01-01T11:00:00.000Z",
+        "serverTime": "2030-01-01T10:00:02.000Z"
+      },
+      "valid": false
+    },
+    {
+      "id": "incorrect-consent",
+      "event": {
+        "schemaVersion": 1,
+        "eventId": "11111111-1111-4111-8111-111111111111",
+        "sessionId": "22222222-2222-4222-8222-222222222222",
+        "source": "vscode",
+        "eventType": "file.modified",
+        "timestamp": "2030-01-01T10:00:01.000Z",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "attribution": "unknown",
+        "payload": {
+          "relativePath": "src/你好.ts"
+        }
+      },
+      "approval": {
+        "approvalProtocolVersion": 1,
+        "eventId": "11111111-1111-4111-8111-111111111111",
+        "localRecordingSessionId": "22222222-2222-4222-8222-222222222222",
+        "consentReceiptId": "55555555-5555-4555-8555-555555555555",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "captureApprovalReference": "44444444-4444-4444-8444-444444444444",
+        "canonicalization": "RFC8785",
+        "eventDigest": "e75286632c74c232a061a4f7b165fa3a19d1819a0bf3428c7561da33d2086703"
+      },
+      "authority": {
+        "consentReceiptId": "33333333-3333-4333-8333-333333333333",
+        "localRecordingSessionId": "22222222-2222-4222-8222-222222222222",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "eventTypes": [
+          "file.modified"
+        ],
+        "state": "active",
+        "startsAt": "2030-01-01T10:00:00.000Z",
+        "endsAt": "2030-01-01T11:00:00.000Z",
+        "serverTime": "2030-01-01T10:00:02.000Z"
+      },
+      "valid": false
+    },
+    {
+      "id": "incorrect-workspace",
+      "event": {
+        "schemaVersion": 1,
+        "eventId": "11111111-1111-4111-8111-111111111111",
+        "sessionId": "22222222-2222-4222-8222-222222222222",
+        "source": "vscode",
+        "eventType": "file.modified",
+        "timestamp": "2030-01-01T10:00:01.000Z",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "attribution": "unknown",
+        "payload": {
+          "relativePath": "src/你好.ts"
+        }
+      },
+      "approval": {
+        "approvalProtocolVersion": 1,
+        "eventId": "11111111-1111-4111-8111-111111111111",
+        "localRecordingSessionId": "22222222-2222-4222-8222-222222222222",
+        "consentReceiptId": "33333333-3333-4333-8333-333333333333",
+        "workspaceId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "captureApprovalReference": "44444444-4444-4444-8444-444444444444",
+        "canonicalization": "RFC8785",
+        "eventDigest": "e75286632c74c232a061a4f7b165fa3a19d1819a0bf3428c7561da33d2086703"
+      },
+      "authority": {
+        "consentReceiptId": "33333333-3333-4333-8333-333333333333",
+        "localRecordingSessionId": "22222222-2222-4222-8222-222222222222",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "eventTypes": [
+          "file.modified"
+        ],
+        "state": "active",
+        "startsAt": "2030-01-01T10:00:00.000Z",
+        "endsAt": "2030-01-01T11:00:00.000Z",
+        "serverTime": "2030-01-01T10:00:02.000Z"
+      },
+      "valid": false
+    },
+    {
+      "id": "incorrect-recording",
+      "event": {
+        "schemaVersion": 1,
+        "eventId": "11111111-1111-4111-8111-111111111111",
+        "sessionId": "22222222-2222-4222-8222-222222222222",
+        "source": "vscode",
+        "eventType": "file.modified",
+        "timestamp": "2030-01-01T10:00:01.000Z",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "attribution": "unknown",
+        "payload": {
+          "relativePath": "src/你好.ts"
+        }
+      },
+      "approval": {
+        "approvalProtocolVersion": 1,
+        "eventId": "11111111-1111-4111-8111-111111111111",
+        "localRecordingSessionId": "66666666-6666-4666-8666-666666666666",
+        "consentReceiptId": "33333333-3333-4333-8333-333333333333",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "captureApprovalReference": "44444444-4444-4444-8444-444444444444",
+        "canonicalization": "RFC8785",
+        "eventDigest": "e75286632c74c232a061a4f7b165fa3a19d1819a0bf3428c7561da33d2086703"
+      },
+      "authority": {
+        "consentReceiptId": "33333333-3333-4333-8333-333333333333",
+        "localRecordingSessionId": "22222222-2222-4222-8222-222222222222",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "eventTypes": [
+          "file.modified"
+        ],
+        "state": "active",
+        "startsAt": "2030-01-01T10:00:00.000Z",
+        "endsAt": "2030-01-01T11:00:00.000Z",
+        "serverTime": "2030-01-01T10:00:02.000Z"
+      },
+      "valid": false
+    },
+    {
+      "id": "unsupported-version",
+      "event": {
+        "schemaVersion": 1,
+        "eventId": "11111111-1111-4111-8111-111111111111",
+        "sessionId": "22222222-2222-4222-8222-222222222222",
+        "source": "vscode",
+        "eventType": "file.modified",
+        "timestamp": "2030-01-01T10:00:01.000Z",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "attribution": "unknown",
+        "payload": {
+          "relativePath": "src/你好.ts"
+        }
+      },
+      "approval": {
+        "approvalProtocolVersion": 2,
+        "eventId": "11111111-1111-4111-8111-111111111111",
+        "localRecordingSessionId": "22222222-2222-4222-8222-222222222222",
+        "consentReceiptId": "33333333-3333-4333-8333-333333333333",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "captureApprovalReference": "44444444-4444-4444-8444-444444444444",
+        "canonicalization": "RFC8785",
+        "eventDigest": "e75286632c74c232a061a4f7b165fa3a19d1819a0bf3428c7561da33d2086703"
+      },
+      "authority": {
+        "consentReceiptId": "33333333-3333-4333-8333-333333333333",
+        "localRecordingSessionId": "22222222-2222-4222-8222-222222222222",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "eventTypes": [
+          "file.modified"
+        ],
+        "state": "active",
+        "startsAt": "2030-01-01T10:00:00.000Z",
+        "endsAt": "2030-01-01T11:00:00.000Z",
+        "serverTime": "2030-01-01T10:00:02.000Z"
+      },
+      "valid": false
+    },
+    {
+      "id": "revoked-consent",
+      "event": {
+        "schemaVersion": 1,
+        "eventId": "11111111-1111-4111-8111-111111111111",
+        "sessionId": "22222222-2222-4222-8222-222222222222",
+        "source": "vscode",
+        "eventType": "file.modified",
+        "timestamp": "2030-01-01T10:00:01.000Z",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "attribution": "unknown",
+        "payload": {
+          "relativePath": "src/你好.ts"
+        }
+      },
+      "approval": {
+        "approvalProtocolVersion": 1,
+        "eventId": "11111111-1111-4111-8111-111111111111",
+        "localRecordingSessionId": "22222222-2222-4222-8222-222222222222",
+        "consentReceiptId": "33333333-3333-4333-8333-333333333333",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "captureApprovalReference": "44444444-4444-4444-8444-444444444444",
+        "canonicalization": "RFC8785",
+        "eventDigest": "e75286632c74c232a061a4f7b165fa3a19d1819a0bf3428c7561da33d2086703"
+      },
+      "authority": {
+        "consentReceiptId": "33333333-3333-4333-8333-333333333333",
+        "localRecordingSessionId": "22222222-2222-4222-8222-222222222222",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "eventTypes": [
+          "file.modified"
+        ],
+        "state": "revoked",
+        "startsAt": "2030-01-01T10:00:00.000Z",
+        "endsAt": "2030-01-01T11:00:00.000Z",
+        "serverTime": "2030-01-01T10:00:02.000Z"
+      },
+      "valid": false
+    },
+    {
+      "id": "expired-consent",
+      "event": {
+        "schemaVersion": 1,
+        "eventId": "11111111-1111-4111-8111-111111111111",
+        "sessionId": "22222222-2222-4222-8222-222222222222",
+        "source": "vscode",
+        "eventType": "file.modified",
+        "timestamp": "2030-01-01T10:00:01.000Z",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "attribution": "unknown",
+        "payload": {
+          "relativePath": "src/你好.ts"
+        }
+      },
+      "approval": {
+        "approvalProtocolVersion": 1,
+        "eventId": "11111111-1111-4111-8111-111111111111",
+        "localRecordingSessionId": "22222222-2222-4222-8222-222222222222",
+        "consentReceiptId": "33333333-3333-4333-8333-333333333333",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "captureApprovalReference": "44444444-4444-4444-8444-444444444444",
+        "canonicalization": "RFC8785",
+        "eventDigest": "e75286632c74c232a061a4f7b165fa3a19d1819a0bf3428c7561da33d2086703"
+      },
+      "authority": {
+        "consentReceiptId": "33333333-3333-4333-8333-333333333333",
+        "localRecordingSessionId": "22222222-2222-4222-8222-222222222222",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "eventTypes": [
+          "file.modified"
+        ],
+        "state": "active",
+        "startsAt": "2030-01-01T10:00:00.000Z",
+        "endsAt": "2030-01-01T11:00:00.000Z",
+        "serverTime": "2030-01-01T11:00:00.000Z"
+      },
+      "valid": false
+    },
+    {
+      "id": "wrong-event-category",
+      "event": {
+        "schemaVersion": 1,
+        "eventId": "11111111-1111-4111-8111-111111111111",
+        "sessionId": "22222222-2222-4222-8222-222222222222",
+        "source": "vscode",
+        "eventType": "file.modified",
+        "timestamp": "2030-01-01T10:00:01.000Z",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "attribution": "unknown",
+        "payload": {
+          "relativePath": "src/你好.ts"
+        }
+      },
+      "approval": {
+        "approvalProtocolVersion": 1,
+        "eventId": "11111111-1111-4111-8111-111111111111",
+        "localRecordingSessionId": "22222222-2222-4222-8222-222222222222",
+        "consentReceiptId": "33333333-3333-4333-8333-333333333333",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "captureApprovalReference": "44444444-4444-4444-8444-444444444444",
+        "canonicalization": "RFC8785",
+        "eventDigest": "e75286632c74c232a061a4f7b165fa3a19d1819a0bf3428c7561da33d2086703"
+      },
+      "authority": {
+        "consentReceiptId": "33333333-3333-4333-8333-333333333333",
+        "localRecordingSessionId": "22222222-2222-4222-8222-222222222222",
+        "workspaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "eventTypes": [
+          "file.saved"
+        ],
+        "state": "active",
+        "startsAt": "2030-01-01T10:00:00.000Z",
+        "endsAt": "2030-01-01T11:00:00.000Z",
+        "serverTime": "2030-01-01T10:00:02.000Z"
+      },
+      "valid": false
+    }
+  ]
+}

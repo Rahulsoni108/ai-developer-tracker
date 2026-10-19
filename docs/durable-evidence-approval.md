@@ -1,5 +1,11 @@
 # E4.3 — Durable evidence approvals and Rails consent
 
+E4.4 update: [the versioned event approval contract](event-approval-contract.md) adds
+capture-time local v2 approvals containing RFC 8785 wire envelopes. Historical v1
+approvals below retain their original exact-byte digest and are never backfilled.
+Assessment request preparation is implemented; transmission remains blocked until Rails
+implements the contract. No receipt/capability or upload-consent protection is relaxed.
+
 ## Security boundary and current availability
 
 Inspected the sibling `hiring-manager/docs/assessment-evidence-consent.md`,

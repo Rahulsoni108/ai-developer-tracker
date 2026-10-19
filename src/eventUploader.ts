@@ -1,3 +1,4 @@
+import type { SerializedUploadBatch } from './uploadBatchSerialization';
 import { createHash } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
 import { join } from 'node:path';
@@ -131,7 +132,11 @@ export class EventUploader {
 			if (typeof token !== 'string' || !token || !/^[\x21-\x7e]{1,8192}$/.test(token)) { throw new SafeUploadFailure('authentication'); }
 			batch = await this.batches.prepareBatch(this.options.maxEvents, this.options.maxBytes - 128);
 			if (!batch) { outcome = 'empty'; nextAttemptAt = 0; resetAttempts = true; return this.notify(outcome); }
-			const body = await this.prepareBody(batch, controller.signal);
+			const prepared = await this.prepareBody(batch, controller.signal);
+			// E4.4 defines preparation only. Rails R4.2C does not support this request extension.
+			// No option, receipt flag or caller assertion may enable transmission before joint implementation.
+			if (prepared.includesAssessmentApprovals) { throw new SafeUploadFailure('protocol'); }
+			const body = prepared.body;
 			if (controller.signal.aborted || !this.enabled) { outcome = timedOut ? 'retry' : 'cancelled'; return this.notify(outcome); }
 			const response = await this.abortable(this.transport.send({ endpoint: this.endpoint, token, body, signal: controller.signal }), controller.signal);
 			if (controller.signal.aborted || !this.enabled) { outcome = timedOut ? 'retry' : 'cancelled'; return this.notify(outcome); }
@@ -187,7 +192,7 @@ export class EventUploader {
 			return ack.durablyAcceptedEventIds;
 		} catch { throw new SafeUploadFailure('protocol'); }
 	}
-	private async prepareBody(batch: PreparedEventBatch, signal: AbortSignal): Promise<string> {
+	private async prepareBody(batch: PreparedEventBatch, signal: AbortSignal): Promise<SerializedUploadBatch> {
 		const contexts: UploadPrivacyContext[] = [];
 		try {
 			// Sequential RPCs bound outstanding requests and allow cancellation between records.
@@ -206,8 +211,10 @@ export class EventUploader {
 			const cancel = () => { void worker.terminate(); reject(new UploadTransportError('network')); };
 			if (signal.aborted) { cancel(); return; }
 			signal.addEventListener('abort', cancel, { once: true });
-			worker.once('message', (reply: { ok: boolean; body?: string; reason?: UploadPauseReason }) => {
-				if (reply.ok && typeof reply.body === 'string') { resolve(reply.body); }
+			worker.once('message', (reply: { ok: boolean; body?: string; includesAssessmentApprovals?: boolean; reason?: UploadPauseReason }) => {
+				if (reply.ok && typeof reply.body === 'string' && typeof reply.includesAssessmentApprovals === 'boolean') {
+					resolve({ body: reply.body, includesAssessmentApprovals: reply.includesAssessmentApprovals });
+				}
 				else { reject(new SafeUploadFailure(reply.reason === 'configuration' ? 'configuration' : 'privacy')); }
 			});
 			worker.once('error', () => reject(new SafeUploadFailure('privacy')));

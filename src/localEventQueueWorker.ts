@@ -1,3 +1,4 @@
+import type { AssessmentApprovalBinding } from './assessmentEventApproval';
 import type { UploadPrivacyContext } from './uploadPrivacyContext';
 import type { EvidenceConsentState } from './evidenceConsent';
 import type { TrackerEvent } from './eventSchema';
@@ -81,6 +82,10 @@ async function run(): Promise<void> {
 					case 'enqueueApproved': {
 						const args = request.argument as { event: unknown; context: UploadPrivacyContext };
 						await queue.enqueueApproved(args.event, args.context); break;
+					}
+					case 'getAssessmentUploadContext': {
+						const args = request.argument as { event: TrackerEvent; binding: AssessmentApprovalBinding };
+						value = await queue.getAssessmentUploadContext(args.event, args.binding); break;
 					}
 					case 'getUploadPrivacyContext': value = await queue.getUploadPrivacyContext(request.argument as TrackerEvent); break;
 					case 'revokeEvidenceApprovals': await queue.revokeEvidenceApprovals(request.argument as string); break;

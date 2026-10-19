@@ -1,3 +1,4 @@
+import type { AssessmentApprovalBinding } from './assessmentEventApproval';
 import type { UploadPrivacyContext } from './uploadPrivacyContext';
 import type { EvidenceConsentState } from './evidenceConsent';
 import type { UploadRetryState, UploadPauseReason } from './uploadState';
@@ -14,7 +15,7 @@ import type { PrivacyReasonCode } from './privacyFilter';
 import { EvidenceEncryptionError, type EncryptionKeys, type EncryptionRequirements } from './evidenceEncryption';
 import { supplyEvidenceKeys, type EvidenceSecretStorage } from './evidenceKeyStorage';
 
-export type QueueOperation = 'enqueueApproved' | 'getUploadPrivacyContext' | 'revokeEvidenceApprovals' | 'getEvidenceConsent' | 'setEvidenceConsent' | 'getSessionEvidenceStatus' | 'getRecordedEventSummary' | 'getUploadRetryState' | 'configureUpload' | 'claimUploadAttempt' | 'finishUploadAttempt' | 'prepareBatch' | 'markDelivered' | 'releaseBatch' | 'getDeliveryStatus' | 'enqueue' | 'getPending' | 'markAcknowledged' | 'getPendingCount' | 'getHealth' | 'beginSession' | 'finishSession' | 'getRecordingSessions' | 'recordPrivacyRejection' | 'getPrivacyHealth' | 'getLocalDataSummary' | 'acquireMaintenance' | 'releaseMaintenance' | 'deleteEvidence' | 'expireAcknowledged' | 'close';
+export type QueueOperation = 'getAssessmentUploadContext' | 'enqueueApproved' | 'getUploadPrivacyContext' | 'revokeEvidenceApprovals' | 'getEvidenceConsent' | 'setEvidenceConsent' | 'getSessionEvidenceStatus' | 'getRecordedEventSummary' | 'getUploadRetryState' | 'configureUpload' | 'claimUploadAttempt' | 'finishUploadAttempt' | 'prepareBatch' | 'markDelivered' | 'releaseBatch' | 'getDeliveryStatus' | 'enqueue' | 'getPending' | 'markAcknowledged' | 'getPendingCount' | 'getHealth' | 'beginSession' | 'finishSession' | 'getRecordingSessions' | 'recordPrivacyRejection' | 'getPrivacyHealth' | 'getLocalDataSummary' | 'acquireMaintenance' | 'releaseMaintenance' | 'deleteEvidence' | 'expireAcknowledged' | 'close';
 export interface LocalStorageSummary extends LocalDataSummary { legacyLogCount: number; diagnosticFileCount: number }
 export interface LocalCleanupResult extends CleanupResult { deletedFiles: number; filesFailed: boolean; storageFailed?: boolean }
 export interface QueueRequest { id: number; operation: QueueOperation; argument?: unknown }
@@ -118,6 +119,10 @@ export class AsyncLocalEventQueue {
 	async enqueue(event: unknown): Promise<void> { await this.request('enqueue', event); }
 	async enqueueApproved(event: unknown, context: UploadPrivacyContext): Promise<void> { await this.request('enqueueApproved', { event, context }); }
 	async getUploadPrivacyContext(event: TrackerEvent): Promise<UploadPrivacyContext | undefined> { return await this.request('getUploadPrivacyContext', event) as UploadPrivacyContext | undefined; }
+	async getAssessmentUploadContext(event: TrackerEvent, binding: AssessmentApprovalBinding): Promise<UploadPrivacyContext | undefined> {
+		return await this.request('getAssessmentUploadContext', { event, binding }) as UploadPrivacyContext | undefined;
+	}
+
 	async revokeEvidenceApprovals(sessionId: string): Promise<void> { await this.request('revokeEvidenceApprovals', sessionId); }
 	async getEvidenceConsent(sessionId: string): Promise<EvidenceConsentState | undefined> { return await this.request('getEvidenceConsent', sessionId) as EvidenceConsentState | undefined; }
 	async setEvidenceConsent(state: EvidenceConsentState): Promise<void> { await this.request('setEvidenceConsent', state); }

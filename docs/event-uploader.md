@@ -12,6 +12,11 @@ The uploader reruns the current `PrivacyFilter` over every prepared event, inclu
 
 ## Version 1 wire contract
 
+E4.4 defines an [assessment-only `eventApprovals` sidecar](event-approval-contract.md)
+without changing normalized events or acknowledgments. The worker prepares and validates
+that extended body, but the uploader rejects it before transport until Rails implements
+the contract. Non-assessment requests remain exactly the three fields shown below.
+
 POST to a configured HTTPS endpoint. No URL credentials, query strings, fragments or whitespace are permitted. Headers include `Authorization: Bearer <SecretStorage token>`, `Content-Type: application/json`, and `Accept: application/json`.
 
 Request (dummy data; complete normalized event objects are supplied):
