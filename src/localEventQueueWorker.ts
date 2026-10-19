@@ -1,3 +1,6 @@
+import type { UploadPrivacyContext } from './uploadPrivacyContext';
+import type { EvidenceConsentState } from './evidenceConsent';
+import type { TrackerEvent } from './eventSchema';
 import type { UploadPauseReason } from './uploadState';
 import { parentPort, workerData } from 'node:worker_threads';
 import { LocalEventQueue, safeQueueError, type QueueHealth, type CleanupScope, type CleanupResult } from './localEventQueue';
@@ -75,6 +78,14 @@ async function run(): Promise<void> {
 					}
 					case 'releaseBatch': await queue.releaseBatch(request.argument as string); break;
 					case 'getDeliveryStatus': value = await queue.getDeliveryStatus(); break;
+					case 'enqueueApproved': {
+						const args = request.argument as { event: unknown; context: UploadPrivacyContext };
+						await queue.enqueueApproved(args.event, args.context); break;
+					}
+					case 'getUploadPrivacyContext': value = await queue.getUploadPrivacyContext(request.argument as TrackerEvent); break;
+					case 'revokeEvidenceApprovals': await queue.revokeEvidenceApprovals(request.argument as string); break;
+					case 'getEvidenceConsent': value = await queue.getEvidenceConsent(request.argument as string); break;
+					case 'setEvidenceConsent': await queue.setEvidenceConsent(request.argument as EvidenceConsentState); break;
 					case 'enqueue': await queue.enqueue(request.argument); break;
 					case 'getPending': value = await queue.getPending(request.argument as number); break;
 					case 'markAcknowledged': await queue.markAcknowledged(request.argument as string[]); break;

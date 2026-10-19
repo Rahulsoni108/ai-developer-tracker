@@ -20,7 +20,7 @@ export interface EventUploaderOptions {
 	/** Must display a separate upload consent dialog. Never infer approval from recording consent/settings. */
 	confirmUpload: (origin: string) => Promise<boolean>;
 	/** Trusted historical approval snapshot, not derived from untrusted event fields. Missing approval fails closed. */
-	privacyContext: (event: TrackerEvent) => UploadPrivacyContext | undefined;
+	privacyContext: (event: TrackerEvent) => UploadPrivacyContext | undefined | Promise<UploadPrivacyContext | undefined>;
 	onStatus?: (status: UploadOutcome) => void;
 }
 export type UploadOutcome = 'disabled' | 'waiting' | 'empty' | 'delivered' | 'retry' | 'cancelled' | UploadPauseReason;
@@ -187,15 +187,20 @@ export class EventUploader {
 			return ack.durablyAcceptedEventIds;
 		} catch { throw new SafeUploadFailure('protocol'); }
 	}
-	private prepareBody(batch: PreparedEventBatch, signal: AbortSignal): Promise<string> {
+	private async prepareBody(batch: PreparedEventBatch, signal: AbortSignal): Promise<string> {
+		const contexts: UploadPrivacyContext[] = [];
+		try {
+			// Sequential RPCs bound outstanding requests and allow cancellation between records.
+			for (const event of batch.events) {
+				if (signal.aborted) { throw new UploadTransportError('network'); }
+				const context = await this.hooks.privacyContext(event);
+				if (!context || context.isApprovedRelativePath || context.resolveToolPath) { throw new SafeUploadFailure('privacy'); }
+				contexts.push(context);
+			}
+		} catch (error) { throw error instanceof UploadTransportError ? error : new SafeUploadFailure('privacy'); }
 		return new Promise((resolve, reject) => {
 			let worker: Worker;
 			try {
-				const contexts = batch.events.map(event => {
-					const context = this.hooks.privacyContext(event);
-					if (!context || context.isApprovedRelativePath || context.resolveToolPath) { throw new Error(); }
-					return context;
-				});
 				worker = new Worker(join(__dirname, 'eventUploadPrivacyWorker.js'), { workerData: { batch, contexts, maxBytes: this.options.maxBytes } });
 			} catch { reject(new SafeUploadFailure('privacy')); return; }
 			const cancel = () => { void worker.terminate(); reject(new UploadTransportError('network')); };

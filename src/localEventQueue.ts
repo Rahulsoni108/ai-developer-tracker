@@ -1,3 +1,6 @@
+import { createEvidenceApproval, verifyEvidenceApproval, type EvidenceApproval } from './evidenceApproval';
+import { consentCoversEvent, validConsentState, type EvidenceConsentState } from './evidenceConsent';
+import type { UploadPrivacyContext } from './uploadPrivacyContext';
 import type { UploadRetryState, UploadPauseReason } from './uploadState';
 import { MAX_DELIVERY_BATCH_BYTES, type PreparedEventBatch, type DeliveryStatus } from './eventBatchManager';
 import { constants } from 'node:fs';
@@ -15,7 +18,7 @@ export const MAX_QUEUE_BATCH = 1000;
 // Allow JSON escaping overhead for diffs up to the common schema's 2 MiB limit.
 export const MAX_QUEUE_EVENT_BYTES = 16 * 1024 * 1024;
 export const DEFAULT_QUEUE_STORAGE_BYTES = 100 * 1024 * 1024;
-export const QUEUE_DATABASE_VERSION = 7;
+export const QUEUE_DATABASE_VERSION = 8;
 // Shared with the worker proxy to distinguish live threads from abandoned threads in this process.
 export const QUEUE_PROCESS_INSTANCE_ID = randomUUID();
 export const ACTIVE_QUEUE_OWNERS = new Set<string>();
@@ -169,7 +172,7 @@ export class LocalEventQueue {
 			database = new DatabaseSync(path, { allowExtension: false });
 			database.exec('PRAGMA busy_timeout = 1000; PRAGMA synchronous = FULL; PRAGMA trusted_schema = OFF;');
 			const version = database.prepare('PRAGMA user_version').get()?.user_version;
-			if (![0, 1, 2, 3, 4, 5, 6, QUEUE_DATABASE_VERSION].includes(Number(version))) { throw new LocalEventQueueError('Unsupported queue database version.'); }
+			if (![0, 1, 2, 3, 4, 5, 6, 7, QUEUE_DATABASE_VERSION].includes(Number(version))) { throw new LocalEventQueueError('Unsupported queue database version.'); }
 			const integrity = database.prepare('PRAGMA integrity_check(1)').all();
 			if (integrity.length !== 1 || integrity[0].integrity_check !== 'ok') {
 				throw new LocalEventQueueError('Queue database integrity check failed.', 'corrupt');
@@ -270,6 +273,12 @@ export class LocalEventQueue {
 						owner_id TEXT
 					) STRICT; PRAGMA user_version = 7;`);
 				}
+				if (database.prepare('PRAGMA user_version').get()?.user_version === 7) {
+					database.exec(`CREATE TABLE event_approvals (event_id TEXT PRIMARY KEY REFERENCES queued_events(event_id), approval_json TEXT NOT NULL) STRICT;
+						CREATE TABLE evidence_consents (session_id TEXT PRIMARY KEY, consent_json TEXT NOT NULL) STRICT;
+						CREATE TABLE approval_revocations (session_id TEXT PRIMARY KEY, revocation_json TEXT NOT NULL) STRICT;
+						PRAGMA user_version = 8;`);
+				}
 				queue.verifyCounters();
 				queue.verifyDeliveryState();
 				const pageSize = Number(database!.prepare('PRAGMA page_size').get()?.page_size);
@@ -288,7 +297,12 @@ export class LocalEventQueue {
 		}
 	}
 
-	enqueue(event: unknown): Promise<void> {
+	enqueue(event: unknown): Promise<void> { return this.enqueueSnapshot(event); }
+
+	/** Only EventPersistence calls this after filtering; event and approval commit in one transaction. */
+	enqueueApproved(event: unknown, context: UploadPrivacyContext): Promise<void> { return this.enqueueSnapshot(event, context); }
+
+	private enqueueSnapshot(event: unknown, context?: UploadPrivacyContext): Promise<void> {
 		if (this.closing) { return Promise.reject(new LocalEventQueueError('Local event queue is closed.')); }
 		const validation = validateEvent(event);
 		if (!validation.valid) { return Promise.reject(new EventValidationError(validation.errors)); }
@@ -298,20 +312,128 @@ export class LocalEventQueue {
 			return Promise.reject(new LocalEventQueueError('Queue event exceeds size limit.'));
 		}
 		const eventId = validation.event.eventId;
+		let proof: EvidenceApproval | undefined;
+		try { if (context) { proof = createEvidenceApproval(validation.event, context); } }
+		catch { return Promise.reject(new LocalEventQueueError('Evidence approval validation failed.')); }
 		return this.schedule(async () => {
 			this.assertCollectionAllowed();
 			// Deduplication is permitted even if no space remains; never revive an acknowledged ID.
-			if (this.database.prepare('SELECT 1 FROM queued_events WHERE event_id = ?').get(eventId)) { return; }
+			const existing = this.database.prepare('SELECT event_id, event_json, payload_format, session_id, acknowledged FROM queued_events WHERE event_id = ?').get(eventId);
+			if (existing) {
+				// No approval is ever added to an existing legacy row. Approved snapshots are immutable.
+				if (!existing.acknowledged && this.database.prepare('SELECT 1 FROM event_approvals WHERE event_id = ?').get(eventId)
+					&& JSON.stringify(this.readStoredEvent(existing)) !== json) { throw new LocalEventQueueError('Conflicting approved event.'); }
+				return;
+			}
 			if (!this.cipher) { throw new EvidenceEncryptionError('key_storage_unavailable'); }
 			const encrypted = JSON.stringify(this.cipher.encrypt(eventId, json));
 			// Include Base64/format overhead in admission; never reserve merely the plaintext size.
-			await this.writeWithReservation(Buffer.byteLength(encrypted), () => {
+			await this.writeWithReservation(Buffer.byteLength(encrypted) + (proof ? Buffer.byteLength(JSON.stringify(proof)) * 2 + 2048 : 0), () => {
 				this.assertCollectionAllowed();
+				// Recheck under BEGIN IMMEDIATE: a different extension window may have committed meanwhile.
+				const raced = this.database.prepare('SELECT event_id, event_json, payload_format, session_id, acknowledged FROM queued_events WHERE event_id = ?').get(eventId);
+				if (raced) {
+					if (!raced.acknowledged && this.database.prepare('SELECT 1 FROM event_approvals WHERE event_id = ?').get(eventId)
+						&& JSON.stringify(this.readStoredEvent(raced)) !== json) { throw new LocalEventQueueError('Conflicting approved event.'); }
+					return;
+				}
+				let encryptedApproval: string | undefined;
+				if (proof && !this.isApprovalRevoked(validation.event.sessionId)) {
+					const scope = this.readEvidenceConsent(validation.event.sessionId);
+					if (scope) {
+						proof.assessment = { codingSessionId: scope.codingSessionId, origin: scope.origin,
+							...(consentCoversEvent(scope, validation.event) ? { consentId: scope.receipt!.consent_id } : {}) };
+					}
+					encryptedApproval = JSON.stringify(this.cipher!.encrypt(eventId, JSON.stringify(proof), 'approval'));
+				}
 				this.database.prepare(`INSERT INTO recording_sessions(session_id, status, started_at, owner_id)
 					VALUES (?, 'active', ?, ?) ON CONFLICT(session_id) DO NOTHING`)
 					.run(validation.event.sessionId, validation.event.timestamp, this.ownerId);
 				this.database.prepare('INSERT INTO queued_events(event_id, event_json, payload_format, session_id) VALUES (?, ?, 1, ?) ON CONFLICT(event_id) DO NOTHING')
 					.run(eventId, encrypted, validation.event.sessionId);
+				if (encryptedApproval) { this.database.prepare('INSERT INTO event_approvals VALUES (?, ?)').run(eventId, encryptedApproval); }
+			});
+		});
+	}
+
+	/** Exact, authenticated, capture-time approval only. Assessments remain blocked pending a Rails proof protocol. */
+	getUploadPrivacyContext(event: TrackerEvent): Promise<UploadPrivacyContext | undefined> {
+		const validated = validateEvent(event);
+		if (!validated.valid) { return Promise.resolve(undefined); }
+		const snapshot = JSON.stringify(validated.event);
+		return this.schedule(() => {
+			const current = JSON.parse(snapshot) as TrackerEvent;
+			if (this.isApprovalRevoked(current.sessionId) || this.readEvidenceConsent(current.sessionId)) { return undefined; }
+			const row = this.database.prepare(`SELECT e.event_id, e.event_json, e.payload_format, e.session_id, a.approval_json
+				FROM queued_events e JOIN event_approvals a ON a.event_id = e.event_id WHERE e.event_id = ? AND e.acknowledged = 0`).get(current.eventId);
+			if (!row) { return undefined; }
+			if (row.payload_format !== 1) { throw new EvidenceEncryptionError('authentication_failed'); }
+			if (!this.cipher) { throw new EvidenceEncryptionError('key_missing'); }
+			const stored = this.readStoredEvent(row);
+			if (JSON.stringify(stored) !== snapshot) { return undefined; }
+			let proof: EvidenceApproval;
+			try { proof = verifyEvidenceApproval(this.cipher.decrypt(current.eventId, JSON.parse(String(row.approval_json)), 'approval'), stored); }
+			catch { throw new EvidenceEncryptionError('authentication_failed'); }
+			if (proof.assessment) { return undefined; }
+			return { ...proof.context, exactEventDigest: proof.eventDigest };
+		});
+	}
+
+	revokeEvidenceApprovals(sessionId: string): Promise<void> {
+		if (!isUuid(sessionId)) { return Promise.reject(new LocalEventQueueError('Invalid approval scope.')); }
+		return this.schedule(async () => {
+			if (!this.cipher) { throw new EvidenceEncryptionError('key_missing'); }
+			const encrypted = JSON.stringify(this.cipher.encrypt(sessionId, JSON.stringify({ version: 1, sessionId, revoked: true }), 'revocation'));
+			await this.writeWithReservation(Buffer.byteLength(encrypted), () => {
+				this.database.prepare('INSERT INTO approval_revocations VALUES (?, ?) ON CONFLICT(session_id) DO NOTHING').run(sessionId, encrypted);
+			});
+		});
+	}
+	private isApprovalRevoked(sessionId: string): boolean {
+		const row = this.database.prepare('SELECT revocation_json FROM approval_revocations WHERE session_id = ?').get(sessionId);
+		if (!row) { return false; }
+		const value = this.cipher?.decrypt(sessionId, JSON.parse(String(row.revocation_json)), 'revocation') as { version: number; sessionId: string; revoked: boolean } | undefined;
+		if (!value || value.version !== 1 || value.sessionId !== sessionId || value.revoked !== true) { throw new EvidenceEncryptionError('authentication_failed'); }
+		return true;
+	}
+	getEvidenceConsent(sessionId: string): Promise<EvidenceConsentState | undefined> {
+		if (!isUuid(sessionId)) { return Promise.reject(new LocalEventQueueError('Invalid consent scope.')); }
+		return this.schedule(() => this.readEvidenceConsent(sessionId));
+	}
+	private readEvidenceConsent(sessionId: string): EvidenceConsentState | undefined {
+		const row = this.database.prepare('SELECT consent_json FROM evidence_consents WHERE session_id = ?').get(sessionId);
+		if (!row) { return undefined; }
+		const value = this.cipher?.decrypt(sessionId, JSON.parse(String(row.consent_json)), 'consent') as EvidenceConsentState;
+		if (!value || !validConsentState(value) || value.request.local_recording_session_id !== sessionId) { throw new EvidenceEncryptionError('authentication_failed'); }
+		return value;
+	}
+	/** State updates cannot move a recording to another assessment, reopen capture, or undo revocation. */
+	setEvidenceConsent(state: EvidenceConsentState): Promise<void> {
+		let snapshot: EvidenceConsentState;
+		try { snapshot = JSON.parse(JSON.stringify(state)); if (!validConsentState(snapshot)) { throw new Error(); } }
+		catch { return Promise.reject(new LocalEventQueueError('Invalid evidence consent.')); }
+		return this.schedule(async () => {
+			const id = snapshot.request.local_recording_session_id;
+			if (!this.cipher) { throw new EvidenceEncryptionError('key_missing'); }
+			const encrypted = JSON.stringify(this.cipher.encrypt(id, JSON.stringify(snapshot), 'consent'));
+			await this.writeWithReservation(Buffer.byteLength(encrypted), () => {
+				const previous = this.readEvidenceConsent(id);
+				if (previous && (previous.codingSessionId !== snapshot.codingSessionId || previous.origin !== snapshot.origin
+					|| JSON.stringify(previous.request) !== JSON.stringify(snapshot.request) || previous.deadline !== snapshot.deadline
+					|| previous.locallyRevoked && !snapshot.locallyRevoked || previous.captureClosed && !snapshot.captureClosed
+					|| previous.receipt && (!snapshot.receipt || previous.receipt.consent_id !== snapshot.receipt.consent_id
+						|| previous.receipt.consented_at !== snapshot.receipt.consented_at || previous.receipt.expires_at !== snapshot.receipt.expires_at
+						|| Date.parse(snapshot.receipt.server_time) < Date.parse(previous.receipt.server_time)
+						|| Date.parse(snapshot.receipt.evidence_window.ends_at) > Date.parse(previous.receipt.evidence_window.ends_at)
+						|| previous.receipt.state === 'revoked' && snapshot.receipt.state !== 'revoked'
+						|| previous.receipt.evidence_window.stopped_at !== undefined && snapshot.receipt.evidence_window.stopped_at !== previous.receipt.evidence_window.stopped_at))) {
+					throw new LocalEventQueueError('Conflicting evidence consent.');
+				}
+				// An existing event can never acquire assessment authorization retroactively.
+				if (!previous && this.database.prepare('SELECT 1 FROM queued_events WHERE session_id = ? LIMIT 1').get(id)) {
+					throw new LocalEventQueueError('Evidence scope must precede capture.');
+				}
+				this.database.prepare('INSERT INTO evidence_consents VALUES (?, ?) ON CONFLICT(session_id) DO UPDATE SET consent_json = excluded.consent_json').run(id, encrypted);
 			});
 		});
 	}
@@ -671,6 +793,9 @@ export class LocalEventQueue {
 			UPDATE delivery_members SET claimed = 0 WHERE batch_id IN (SELECT batch_id FROM delivery_batches WHERE status = 'released');
 			DELETE FROM delivery_members WHERE event_id IN (SELECT event_id FROM queued_events ${all ? '' : 'WHERE session_id IN (SELECT session_id FROM cleanup_sessions)'});
 			DELETE FROM delivery_batches WHERE NOT EXISTS (SELECT 1 FROM delivery_members m WHERE m.batch_id = delivery_batches.batch_id);`);
+		this.database.exec(`DELETE FROM event_approvals WHERE event_id IN (SELECT event_id FROM queued_events ${all ? '' : 'WHERE session_id IN (SELECT session_id FROM cleanup_sessions)'});
+			DELETE FROM evidence_consents ${all ? '' : 'WHERE session_id IN (SELECT session_id FROM cleanup_sessions)'};
+			DELETE FROM approval_revocations ${all ? '' : 'WHERE session_id IN (SELECT session_id FROM cleanup_sessions)'};`);
 		const deletedRecords = Number(this.database.prepare('DELETE FROM queued_events'  + (all ? '' : ' WHERE session_id IN (SELECT session_id FROM cleanup_sessions)')).run().changes);
 		this.database.exec('DELETE FROM recording_privacy_health WHERE session_id IN (SELECT session_id FROM cleanup_sessions)');
 		const deletedSessions = Number(this.database.prepare('DELETE FROM recording_sessions WHERE session_id IN (SELECT session_id FROM cleanup_sessions)').run().changes);
@@ -841,7 +966,8 @@ export class LocalEventQueue {
 		const required = ['queue_health', 'queue_owners', 'recording_sessions', 'count_event_insert', 'count_event_ack',
 			'count_interrupted_insert', 'count_interrupted_update', 'pending_events', 'session_owners', 'session_history', 'recording_privacy_health', 'queue_encryption_keys',
 			'queue_maintenance', 'retention_events', 'count_event_delete', 'count_session_delete',
-			'delivery_batches', 'delivery_members', 'delivery_owners', 'delivery_claims', 'upload_retry_state'];
+			'delivery_batches', 'delivery_members', 'delivery_owners', 'delivery_claims', 'upload_retry_state',
+			'event_approvals', 'evidence_consents', 'approval_revocations'];
 		const schema = new Set(this.database.prepare('SELECT name FROM sqlite_master').all().map(row => row.name));
 		if (required.some(name => !schema.has(name))) { throw new LocalEventQueueError('Queue schema integrity check failed.', 'corrupt'); }
 		const counters = this.database.prepare('SELECT * FROM queue_health WHERE singleton = 1').get();

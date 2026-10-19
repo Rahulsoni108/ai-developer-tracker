@@ -1,3 +1,5 @@
+> E4.3 update: see [durable approvals and the actual Rails consent contract](durable-evidence-approval.md). The control contract below is the older mock proposal; the real pairing/start/status adapter remains unavailable.
+
 # Assessment workflow foundation — E4.1
 
 This build adds an extension-side controller and typed API seam, not a Rails transport. Rails and React repositories are unchanged. The four commands are **Pair Assessment**, **Start Assessment**, **Stop & Submit Assessment**, and **Show Assessment Status**.
@@ -26,7 +28,7 @@ Stop & Submit stops local recording first, durably records submission intent, dr
 
 Only after there are no pending/missing records does the API get a finalize request. The controller displays `submitted` only after a validated server confirmation and local delivery check; lost responses leave `submission_pending` until authoritative recovery. Finalize retries reuse the stored request ID. **No upload grace period is assumed.** The generic uploader cannot upload assessment-bound recordings; assessment-scoped batching/transport is a production blocker, so the UI mock normally remains pending after capturing events. Existing batch/acknowledgment APIs are exercised only by tests simulating explicit durable server acceptance.
 
-Disable Uploads also revokes volatile assessment upload consent; any future retry/finalization needs fresh consent. Reload always clears this consent. Existing exact-content privacy approval proofs are memory-bound: historical queued events without those proofs remain blocked after restart. This task deliberately does not recreate them from persisted IDs or assessment consent. Pending evidence is preserved and never presented as successfully submitted. Manual Start/Stop Recording continues to work independently, and an already running manual recording cannot be adopted as an assessment.
+Disable Uploads also revokes volatile assessment upload consent; any future retry/finalization needs fresh consent. Reload always clears this consent. E4.3 persists exact sanitized-event approvals atomically in encrypted SQLite. Only authenticated capture-time approvals survive restart; historical events without them remain blocked. Assessment receipts never create these proofs or enable ingestion; see the E4.3 protocol. Pending evidence is preserved and never presented as successfully submitted. Manual Start/Stop Recording continues to work independently, and an already running manual recording cannot be adopted as an assessment.
 
 ## Proposed Rails API contract (not implemented)
 

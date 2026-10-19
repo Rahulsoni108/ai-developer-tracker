@@ -1,3 +1,6 @@
+import { AssessmentEvidenceConsent } from './assessmentEvidenceConsent';
+import { RailsEvidenceConsentClient } from './railsEvidenceConsentClient';
+import { PRIVACY_EVENT_TYPES } from './privacyFilter';
 import { ClaudeEventParser } from './claudeEventParser';
 import { ClaudeCapture } from './claudeCapture';
 import { ClaudeCaptureUi, START_CLAUDE_CAPTURE_COMMAND, REVOKE_CLAUDE_CAPTURE_COMMAND } from './claudeCaptureUi';
@@ -418,7 +421,7 @@ export async function activate(context: vscode.ExtensionContext) {
 			}
 		}, (settings, hooks) => new EventUploader(new EventBatchManager(queue), queue, context.secrets, {
 			...settings, ...hooks, privacyContext: event => activeAssessment && !activeAssessment.allowsDevelopmentUpload(event.sessionId)
-				? undefined : writer.getUploadPrivacyContext(event)
+				? undefined : writer.resolveUploadPrivacyContext(event)
 		}));
 		activeUploads = uploads;
 		await uploads.initialize();
@@ -427,7 +430,7 @@ export async function activate(context: vscode.ExtensionContext) {
 			vscode.commands.registerCommand(CONFIGURE_UPLOAD_ENDPOINT_COMMAND, () => uploads.configureEndpoint()),
 			vscode.commands.registerCommand(CONFIGURE_UPLOAD_AUTHENTICATION_COMMAND, () => uploads.configureAuthentication()),
 			vscode.commands.registerCommand(ENABLE_UPLOADS_COMMAND, () => uploads.enable()),
-			vscode.commands.registerCommand(DISABLE_UPLOADS_COMMAND, async () => { activeAssessment?.revokeUploadConsent(); await uploads.disable(); void vscode.window.showInformationMessage(messages.disabled); }),
+			vscode.commands.registerCommand(DISABLE_UPLOADS_COMMAND, async () => { const revoking = activeAssessment?.revokeUploadConsent(); await uploads.disable(); await revoking; void vscode.window.showInformationMessage(messages.disabled); }),
 			vscode.commands.registerCommand(SHOW_UPLOAD_STATUS_COMMAND, async () => {
 				const status = await uploads.showStatus();
 				void vscode.window.showInformationMessage(`Uploads: ${status.enabled ? 'enabled with consent' : 'disabled'}; destination hostname: ${status.hostname ?? 'not configured'}; authentication: ${status.authenticationConfigured ? 'configured' : 'missing'}; status: ${status.pauseReason ?? status.outcome}; pending events: ${status.pendingEvents ?? 'unavailable'}.`);
@@ -452,6 +455,11 @@ export async function activate(context: vscode.ExtensionContext) {
 	if (assessmentApi instanceof MockAssessmentApiClient) { assessmentApi.seedInvitation('DEMO-ASSESSMENT', '1'); }
 	const assessmentStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left);
 	assessmentStatus.name = 'AI Developer Tracker assessment'; assessmentStatus.command = 'ai-developer-tracker.showAssessmentStatus';
+	const assessmentConsents = queue ? new AssessmentEvidenceConsent(queue,
+		mockAssessments ? undefined : new RailsEvidenceConsentClient(), () => ({
+			workspaceIds: tracker.getApprovedFolders().map(folder => createHash('sha256').update(folder.uri.toString()).digest('hex')),
+			eventTypes: [...PRIVACY_EVENT_TYPES]
+		})) : undefined;
 	const assessment = new AssessmentController(assessmentApi, new AssessmentConnectionStore(context.globalState, context.secrets), recording, {
 		flushStopped: async id => {
 			await flushStoppedRecording(id);
@@ -460,9 +468,9 @@ export async function activate(context: vscode.ExtensionContext) {
 		getStatus: async ids => { if (!queue) { throw new AssessmentApiError('storage'); } return queue.getSessionEvidenceStatus(ids); },
 		disableDevelopmentUploads: async () => { await activeUploads?.disable(); }
 	}, async hostname => (await vscode.window.showWarningMessage(`Allow assessment uploads to ${hostname}?`, { modal: true,
-		detail: 'Separate upload consent: sanitized code, diffs, AI conversations and tool activity may be transmitted for this paired assessment. Recording consent alone does not allow uploads. This build uses a local mock only: no assessment events are transmitted or automatically acknowledged. Pending evidence blocks final submission. Consent expires on reload; use Stop & Submit to stop local capture. Codex/Claude content still requires its existing separate approval.' }, 'Allow Assessment Uploads')) === 'Allow Assessment Uploads',
+		detail: `Separate upload consent: sanitized code, diffs, AI conversations and tool activity may be transmitted for this paired assessment. Recording consent alone does not allow uploads.\n\nSelected workspace identifiers: ${tracker.getApprovedFolders().map(folder => createHash('sha256').update(folder.uri.toString()).digest('hex')).join(', ')}\nEvent categories: ${PRIVACY_EVENT_TYPES.join(', ')}\nScope: assessment_evidence (assessment-evidence.v1), limited to this assessment/recording and destination. Expires at the earliest server assessment deadline, credential expiry or revocation. Disable Uploads revokes consent; Stop & Submit closes the capture window after local writes drain.\n\nThis build uses a local mock only: no assessment events are transmitted or automatically acknowledged. A Rails consent receipt cannot bypass its unverified-privacy guard. Pending evidence blocks submission. Reload requires fresh upload consent; Codex/Claude content still requires separate source approval.` }, 'Allow Assessment Uploads')) === 'Allow Assessment Uploads',
 	view => { assessmentStatus.text = `Assessment: ${view.state.replace(/_/g, ' ')}${view.mode === 'mock' ? ' (mock)' : ''}`;
-		assessmentStatus.tooltip = formatAssessmentStatus(view); if (view.state === 'unpaired') { assessmentStatus.hide(); } else { assessmentStatus.show(); } });
+		assessmentStatus.tooltip = formatAssessmentStatus(view); if (view.state === 'unpaired') { assessmentStatus.hide(); } else { assessmentStatus.show(); } }, 10000, assessmentConsents);
 	activeAssessment = assessment;
 	await assessment.initialize();
 	context.subscriptions.push(assessmentStatus, ...registerAssessmentCommands(assessment, mockAssessments));

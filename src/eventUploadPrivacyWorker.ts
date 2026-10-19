@@ -1,3 +1,4 @@
+import { eventDigest } from './evidenceApproval';
 import { parentPort, workerData } from 'node:worker_threads';
 import { PrivacyFilter, type PrivacyContext } from './privacyFilter';
 import type { UploadPrivacyContext } from './uploadPrivacyContext';
@@ -14,7 +15,8 @@ try {
 			snapshot.verifiedToolPaths?.find(entry => entry.path === path && entry.workspaceId === workspaceId)?.relativePath };
 		const result = filter.filter(event, context);
 		// Changed patches/hashes cannot be uploaded as original reconstructable evidence.
-		if (result.status === 'rejected' || result.requiresReconstructionGap) { throw new Error(); }
+		if (result.status === 'rejected' || result.requiresReconstructionGap
+			|| snapshot.exactEventDigest !== undefined && (eventDigest(event) !== snapshot.exactEventDigest || eventDigest(result.event) !== snapshot.exactEventDigest)) { throw new Error(); }
 		return result.event;
 	});
 	const body = JSON.stringify({ contractVersion: 1, batchId: batch.batchId, events });

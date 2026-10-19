@@ -43,25 +43,25 @@ export class EvidenceCipher {
 		finally { for (const entry of Array.isArray(material?.keys) ? material.keys : []) { if (entry?.bytes instanceof ArrayBuffer) { new Uint8Array(entry.bytes).fill(0); } } }
 	}
 	hasKey(keyId: string): boolean { return this.keys.has(keyId); }
-	private aad(eventId: string, keyId: string): Buffer {
+	private aad(eventId: string, keyId: string, domain: 'event' | 'approval' | 'consent' | 'revocation'): Buffer {
 		if (!isUuid(eventId)) { throw new EvidenceEncryptionError('authentication_failed'); }
 		// Domain separation and immutable indexing/format metadata. Mutable ack/sequence are not event payloads.
-		return Buffer.from(JSON.stringify(['ai-developer-tracker.sqlite-event', 1, 'AES-256-GCM', keyId, eventId]));
+		return Buffer.from(JSON.stringify([`ai-developer-tracker.sqlite-${domain}`, 1, 'AES-256-GCM', keyId, eventId]));
 	}
-	encrypt(eventId: string, plaintext: string): EncryptedEvidence {
+	encrypt(eventId: string, plaintext: string, domain: 'event' | 'approval' | 'consent' | 'revocation' = 'event'): EncryptedEvidence {
 		const bytes = Buffer.from(plaintext, 'utf8');
 		try {
 			if (bytes.length > MAX_PLAINTEXT_BYTES) { throw new Error(); }
 			const nonce = randomBytes(12);
 			const cipher = createCipheriv('aes-256-gcm', this.keys.get(this.activeKeyId)!, nonce, { authTagLength: 16 });
-			cipher.setAAD(this.aad(eventId, this.activeKeyId));
+			cipher.setAAD(this.aad(eventId, this.activeKeyId, domain));
 			const ciphertext = Buffer.concat([cipher.update(bytes), cipher.final()]);
 			return { encryptionVersion: 1, algorithm: 'AES-256-GCM', keyId: this.activeKeyId,
 				nonce: nonce.toString('base64'), tag: cipher.getAuthTag().toString('base64'), ciphertext: ciphertext.toString('base64') };
 		} catch { throw new EvidenceEncryptionError('authentication_failed'); }
 		finally { bytes.fill(0); }
 	}
-	decrypt(eventId: string, value: unknown): unknown {
+	decrypt(eventId: string, value: unknown, domain: 'event' | 'approval' | 'consent' | 'revocation' = 'event'): unknown {
 		let plaintext: Buffer | undefined;
 		try {
 			if (!value || typeof value !== 'object' || Array.isArray(value)) { throw new Error(); }
@@ -71,7 +71,7 @@ export class EvidenceCipher {
 			const key = this.keys.get(envelope.keyId);
 			if (!key) { throw new EvidenceEncryptionError('key_missing'); }
 			const decipher = createDecipheriv('aes-256-gcm', key, decode(envelope.nonce, 12), { authTagLength: 16 });
-			decipher.setAAD(this.aad(eventId, envelope.keyId)); decipher.setAuthTag(decode(envelope.tag, 16));
+			decipher.setAAD(this.aad(eventId, envelope.keyId, domain)); decipher.setAuthTag(decode(envelope.tag, 16));
 			// Do not parse or deliver any plaintext until authentication succeeds.
 			const first = decipher.update(decode(envelope.ciphertext));
 			try { plaintext = Buffer.concat([first, decipher.final()]); } finally { first.fill(0); }

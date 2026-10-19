@@ -37,7 +37,7 @@ export class EventPersistence implements ActivityWriter {
 	private recording?: RecordingController;
 	private approvals?: (sessionId: string) => PrivacyApprovals;
 
-	constructor(private readonly queue: Pick<LocalEventQueue, 'enqueue' | 'close'> & Partial<Pick<LocalEventQueue, 'beginSession' | 'finishSession' | 'recordPrivacyRejection'>>
+	constructor(private readonly queue: Pick<LocalEventQueue, 'enqueue' | 'close'> & Partial<Pick<LocalEventQueue, 'beginSession' | 'finishSession' | 'recordPrivacyRejection' | 'enqueueApproved' | 'getUploadPrivacyContext' | 'revokeEvidenceApprovals'>>
 		& { onDidFail?: (listener: (code: QueueFailureCode) => void) => { dispose(): void } },
 		private readonly jsonl: ActivityWriter,
 		private readonly onDiagnostic: (reason: PersistenceDiagnostic, code?: QueueFailureCode) => void = () => {},
@@ -125,6 +125,7 @@ export class EventPersistence implements ActivityWriter {
 				&& entry.workspaceId === validation.event.workspaceId).map(entry => ({ ...entry })),
 			claudeContentConsent: context.claudeContentConsent, verifiedToolPaths
 		} : undefined;
+		if (!uploadContext) { return this.rejectPrivateEvent(context, [proofOversized ? 'processing_limit' : 'filter_failed']); }
 		const snapshot = JSON.stringify(validation.event);
 		const bytes = Buffer.byteLength(snapshot);
 		// Bound outstanding content; overload is visible rather than silently dropping it.
@@ -138,7 +139,10 @@ export class EventPersistence implements ActivityWriter {
 			if (this.committed.has(eventId)) { return; }
 			// Yield between individual commits: never synchronously drain a large batch.
 			await setImmediate();
-			try { await this.queue.enqueue(JSON.parse(snapshot)); }
+			try {
+				if (uploadContext && this.queue.enqueueApproved) { await this.queue.enqueueApproved(JSON.parse(snapshot), uploadContext); }
+				else { await this.queue.enqueue(JSON.parse(snapshot)); }
+			}
 			catch (error) {
 				this.diagnostic('queue_failed', safeQueueError(error).code);
 				throw new EventPersistenceError();
@@ -165,7 +169,24 @@ export class EventPersistence implements ActivityWriter {
 		return writing;
 	}
 
-	/** Exact-content proof exists only for successful filtered commits in this extension lifetime. */
+	/** Production uses authenticated worker proofs; never fall back to volatile approvals after a worker failure. */
+	async resolveUploadPrivacyContext(event: TrackerEvent): Promise<UploadPrivacyContext | undefined> {
+		if (this.queue.getUploadPrivacyContext) {
+			try { return await this.queue.getUploadPrivacyContext(event); }
+			catch { this.diagnostic('queue_failed'); return undefined; }
+		}
+		return this.getUploadPrivacyContext(event);
+	}
+	async revokeEvidenceApprovals(sessionId: string): Promise<void> {
+		// Block immediately in memory as well as durably. This does not delete evidence or acknowledge it.
+		for (const [id, proof] of this.uploadApprovals) {
+			if (proof.context.sessionId === sessionId) { this.uploadApprovals.delete(id); this.uploadApprovalBytes -= proof.bytes; }
+		}
+		if (!this.queue.revokeEvidenceApprovals) { throw new EventPersistenceError(); }
+		await this.queue.revokeEvidenceApprovals(sessionId);
+	}
+
+	/** Legacy in-memory view for embedders. Production upload resolution always uses the storage worker. */
 	getUploadPrivacyContext(event: TrackerEvent): UploadPrivacyContext | undefined {
 		try {
 			const proof = this.uploadApprovals.get(event.eventId); if (!proof) { return undefined; }

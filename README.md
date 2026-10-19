@@ -192,7 +192,7 @@ Details: [assessment workflow/proposed contract](docs/assessment-workflow.md), [
 - **Encryption:** new SQLite events use AES-256-GCM with random nonces and authenticated metadata. Keys/credentials use SecretStorage; missing required keys fail closed. This is event encryption, not whole-database encryption or a tamper-proof ledger. Operational IDs/counts/status metadata remain accessible.
 - **Diagnostics:** new JSONL contains safe metadata, not prompts, code, diffs, tool arguments or sensitive paths. There is no raw-evidence logging switch. SQLite is authoritative; diagnostic failure does not undo capture.
 - **Retention/deletion:** default retention is 30 days for eligible closed, fully acknowledged sessions and disposable diagnostics. Pending evidence is never automatically deleted or acknowledged. Historical plaintext detection reports counts. Cleanup requires confirmation and cannot run during recording; whole-session cleanup can include encrypted/pending evidence. Deletion does not guarantee secure erasure from media, snapshots or backups.
-- **Restart upload limitation:** exact-content upload approval proofs are bounded and memory-only. Restarted, evicted or unverifiable historical events remain pending and block delivery. Approval is not recreated from IDs or new consent alone; a blocked FIFO head can block later events. Safe durable approval recovery remains pending.
+- **Durable upload approvals:** newly filtered events and exact-content approvals commit atomically in encrypted SQLite. Only authenticated approvals can survive restart; fresh upload consent is still required. Older/unverifiable events remain blocked, and a blocked FIFO head can block later evidence. Assessment uploads remain blocked pending an agreed Rails privacy-proof protocol. See [E4.3](docs/durable-evidence-approval.md).
 
 Workspace files and AI tools' original transcripts may contain plaintext outside the extension's store. Evidence exists transiently in memory. Encryption/filtering cannot protect against every leak, a compromised host or unsafe exports.
 
@@ -236,7 +236,7 @@ For Claude, follow [the launch/consent procedure](docs/claude-code-integration.m
 - OTP-verified extension pairing and Rails-issued scoped upload credentials.
 - Rails event ingestion/storage, durable receipt/completeness verification and assessment-scoped delivery.
 - Real server-authoritative start/submission, including an explicit late-upload policy if needed.
-- Safe restart recovery of historical upload approval proofs.
+- An agreed Rails event-privacy authorization protocol; old events without capture-time proofs remain blocked.
 - Next.js candidate pairing/onboarding/start/submission integration.
 - Recruiter evidence review and analytics UI.
 - Live Claude Code verification and further platform/installed-version validation.

@@ -1,3 +1,4 @@
+import type { AssessmentConsentLifecycle } from './assessmentEvidenceConsent';
 import { randomUUID } from 'node:crypto';
 import type { RecordingController } from './recording';
 import { AssessmentApiError, type AssessmentApiClient, type AssessmentAuthentication, type AssessmentFailure, type AssessmentServerStatus } from './assessmentApiClient';
@@ -31,10 +32,13 @@ export class AssessmentController {
 	private starting = false;
 	private generation = 0;
 	private readonly lifecycle: { dispose(): void };
+	private consentWork: Promise<void> = Promise.resolve();
+	private readonly closingSessions = new Map<string, Promise<void>>();
 	constructor(private readonly api: AssessmentApiClient, private readonly store: AssessmentStore,
 		private readonly recording: RecordingController, private readonly evidence: AssessmentEvidence,
 		private readonly confirmUpload: (hostname: string) => Promise<boolean>,
-		private readonly onChange: (view: AssessmentView) => void = () => {}, private readonly requestTimeoutMs = 10000) {
+		private readonly onChange: (view: AssessmentView) => void = () => {}, private readonly requestTimeoutMs = 10000,
+		private readonly evidenceConsents?: AssessmentConsentLifecycle) {
 		this.lifecycle = recording.addLifecycleListener({
 			prepare: async (id, current) => {
 				if (!this.starting) { return; }
@@ -51,10 +55,15 @@ export class AssessmentController {
 					|| Date.parse(status.deadline!) <= Date.parse(status.serverTime)) { throw new AssessmentApiError('session_ended'); }
 				// Persist binding/deadline BEFORE RecordingController activates any collector.
 				await this.save('starting');
+				if (this.evidenceConsents) { await this.call(signal => this.evidenceConsents!.approve(this.auth!, id, status, signal)); }
 				if (!current() || this.disposed || generation !== this.generation) { throw new AssessmentApiError('cancelled'); }
 			},
-			started: () => {}, cancelled: () => {},
-			stopped: id => { if (this.isAssociatedSession(id) && !this.disposed) { this.set('submission_pending'); } }
+			started: () => {}, cancelled: id => {
+				if (this.evidenceConsents && this.auth && this.isAssociatedSession(id)) { this.closeStoppedConsent(id); }
+			},
+			stopped: id => { if (this.isAssociatedSession(id) && !this.disposed) { this.set('submission_pending');
+				if (this.evidenceConsents && this.auth) { this.closeStoppedConsent(id); }
+			} }
 		});
 	}
 	private auth?: AssessmentAuthentication;
@@ -68,16 +77,26 @@ export class AssessmentController {
 	isAssociatedSession(id: string): boolean { return this.metadata?.localRecordingSessionIds.includes(id) ?? false; }
 	/** General-purpose development uploader must never send assessment evidence to arbitrary credentials/endpoints. */
 	allowsDevelopmentUpload(id: string): boolean { return this.initialized && this.phase !== 'error' && !this.isAssociatedSession(id); }
-	revokeUploadConsent(): void {
+	revokeUploadConsent(): Promise<void> {
 		this.consent = false; ++this.generation; this.request?.abort();
 		if (this.starting) { this.recording.stop(); }
 		this.set(this.phase, 'consent_required');
+		const auth = this.auth;
+		if (this.evidenceConsents && auth) {
+			const tasks = (this.metadata?.localRecordingSessionIds ?? []).map(id => this.evidenceConsents!.revoke(auth, id, AbortSignal.timeout(this.requestTimeoutMs)));
+			this.consentWork = Promise.all(tasks).then(() => {}, () => { this.set(this.phase, 'recovery_required'); });
+		}
+		return this.consentWork;
 	}
 	initialize(): Promise<void> {
 		return this.run(async () => {
 			this.metadata = await this.store.load(); this.initialized = true;
 			if (!this.metadata) { this.set('unpaired'); return; }
 			this.set('recovery'); await this.authenticate(); await this.refresh();
+			// A process restart cannot leave an old capture window implicitly open. No recording/upload is resumed.
+			if (this.evidenceConsents) {
+				for (const id of this.metadata.localRecordingSessionIds) { await this.closeStoppedConsent(id); }
+			}
 		});
 	}
 	pair(code: string): Promise<void> {
@@ -131,7 +150,10 @@ export class AssessmentController {
 			this.set('stopping'); if (local) { this.recording.stop(); }
 			// Durable stop intent precedes drains/network; never restart a stopped assessment as a side effect of retry.
 			await this.save('submission_pending');
-			for (const id of this.metadata.localRecordingSessionIds) { await this.evidence.flushStopped(id); }
+			for (const id of this.metadata.localRecordingSessionIds) {
+				await this.evidence.flushStopped(id);
+				if (this.evidenceConsents && this.auth) { await this.closeStoppedConsent(id); }
+			}
 			await this.authenticate(); await this.refresh();
 			const delivery = await this.evidence.getStatus(this.metadata.localRecordingSessionIds); this.pendingEvents = delivery.pendingEvents;
 			if (delivery.pendingEvents || delivery.missingSessions || !this.metadata.localRecordingSessionIds.length) {
@@ -154,6 +176,18 @@ export class AssessmentController {
 		}));
 	}
 	showStatus(): Promise<void> { return this.run(async () => { if (this.metadata) { await this.authenticate(); await this.refresh(); } else { this.set('unpaired'); } }); }
+	private closeStoppedConsent(id: string): Promise<void> {
+		const previous = this.closingSessions.get(id); if (previous) { return previous; }
+		const auth = this.auth;
+		const work = (async () => {
+			await this.evidence.flushStopped(id);
+			if (auth && this.evidenceConsents) { await this.evidenceConsents.close(auth, id, AbortSignal.timeout(this.requestTimeoutMs)); }
+		})();
+		this.closingSessions.set(id, work);
+		this.consentWork = work.catch(() => { this.closingSessions.delete(id); this.set('submission_pending', 'recovery_required'); });
+		return work;
+	}
+
 	private async authenticate(): Promise<void> {
 		if (!this.metadata || this.api.mode !== this.metadata.connection.mode) { throw new AssessmentApiError('unavailable'); }
 		const credential = await this.store.getCredential(this.metadata.credentialId);
@@ -226,6 +260,10 @@ export class AssessmentController {
 	}
 	async dispose(): Promise<void> {
 		this.disposed = true; ++this.generation; this.request?.abort(); if (this.starting) { this.recording.stop(); }
-		await this.busy; this.consent = false; this.lifecycle.dispose(); this.auth = undefined;
+		if (this.evidenceConsents && this.recording.isRecording && this.isAssociatedSession(this.recording.sessionId!)) {
+			const id = this.recording.sessionId!; this.recording.stop();
+			try { await this.closeStoppedConsent(id); } catch { /* Durable close intent remains pending; never claim remote success. */ }
+		}
+		await this.busy; await this.consentWork; this.consent = false; this.lifecycle.dispose(); this.auth = undefined;
 	}
 }
