@@ -1,3 +1,4 @@
+import { parseRailsControlResponse } from './railsControlResponse';
 import type { AssessmentAuthentication } from './assessmentApiClient';
 import { AssessmentApiError } from './assessmentApiClient';
 import { validOrigin } from './evidenceApproval';
@@ -36,7 +37,7 @@ export class RailsEvidenceConsentClient implements EvidenceConsentApi {
 			if ([401, 403].includes(response.status)) { throw new AssessmentApiError('authentication'); }
 			if (response.status !== 200) { throw new AssessmentApiError(response.status === 409 ? 'rejected' : 'unavailable'); }
 			if (!/^application\/json(?:\s*;|$)/i.test(response.contentType ?? '') || Buffer.byteLength(response.body) > 32768) { throw new AssessmentApiError('protocol'); }
-			const envelope = JSON.parse(response.body) as { data?: EvidenceConsentReceipt };
+			const envelope = parseRailsControlResponse(response.body) as { data?: EvidenceConsentReceipt };
 			if (!envelope || Object.keys(envelope).length !== 1 || !envelope.data || !validConsentReceipt(envelope.data, state)
 				|| action === 'revoke' && envelope.data.state !== 'revoked'
 				|| action === 'stop' && !['stopped', 'revoked', 'expired'].includes(envelope.data.state)) { throw new AssessmentApiError('protocol'); }

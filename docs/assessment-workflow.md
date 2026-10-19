@@ -1,5 +1,12 @@
 > E4.3 update: see [durable approvals and the actual Rails consent contract](durable-evidence-approval.md). The control contract below is the older mock proposal; the real pairing/start/status adapter remains unavailable.
 
+E4.5 update: [real Rails assessment integration](rails-assessment-integration.md) now
+connects the documented R4.2D control APIs and scoped uploader, with fresh upload consent,
+exact capture-time approvals and credential-generation checks. The historical implementation
+notes below describe earlier tasks. The real path is pinned to R4.2D; generic/manual uploads
+remain unchanged, and no Rails finalization request is implemented.
+
+
 # Assessment workflow foundation — E4.1
 
 This build adds an extension-side controller and typed API seam, not a Rails transport. Rails and React repositories are unchanged. The four commands are **Pair Assessment**, **Start Assessment**, **Stop & Submit Assessment**, and **Show Assessment Status**.

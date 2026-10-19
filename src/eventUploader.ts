@@ -1,3 +1,6 @@
+import { inspectRailsUploadPermit, type RailsUploadPermit } from './railsAssessmentApiClient';
+import { AssessmentApiError } from './assessmentApiClient';
+import type { AssessmentApprovalBinding } from './assessmentEventApproval';
 import type { SerializedUploadBatch } from './uploadBatchSerialization';
 import { createHash } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
@@ -22,6 +25,10 @@ export interface EventUploaderOptions {
 	confirmUpload: (origin: string) => Promise<boolean>;
 	/** Trusted historical approval snapshot, not derived from untrusted event fields. Missing approval fails closed. */
 	privacyContext: (event: TrackerEvent) => UploadPrivacyContext | undefined | Promise<UploadPrivacyContext | undefined>;
+	/** Assessment-only preflight. Opaque permits are issued by the pinned real Rails adapter, never from settings/receipt flags. */
+	assessmentPermit?: (batch: PreparedEventBatch, signal: AbortSignal) => Promise<RailsUploadPermit>;
+	/** Recheck volatile consent, current SecretStorage credential and durable scope immediately before transport. */
+	assessmentStillApproved?: () => Promise<boolean>;
 	onStatus?: (status: UploadOutcome) => void;
 }
 export type UploadOutcome = 'disabled' | 'waiting' | 'empty' | 'delivered' | 'retry' | 'cancelled' | UploadPauseReason;
@@ -132,10 +139,13 @@ export class EventUploader {
 			if (typeof token !== 'string' || !token || !/^[\x21-\x7e]{1,8192}$/.test(token)) { throw new SafeUploadFailure('authentication'); }
 			batch = await this.batches.prepareBatch(this.options.maxEvents, this.options.maxBytes - 128);
 			if (!batch) { outcome = 'empty'; nextAttemptAt = 0; resetAttempts = true; return this.notify(outcome); }
-			const prepared = await this.prepareBody(batch, controller.signal);
-			// E4.4 defines preparation only. Rails R4.2C does not support this request extension.
-			// No option, receipt flag or caller assertion may enable transmission before joint implementation.
-			if (prepared.includesAssessmentApprovals) { throw new SafeUploadFailure('protocol'); }
+			let permit: RailsUploadPermit | undefined;
+			if (this.hooks.assessmentPermit) { permit = await this.hooks.assessmentPermit(batch, controller.signal); }
+			const binding = permit && inspectRailsUploadPermit(permit, batch, this.endpoint.href, token);
+			if (permit && !binding) { throw new SafeUploadFailure('privacy'); }
+			const prepared = await this.prepareBody(batch, controller.signal, binding);
+			if (prepared.includesAssessmentApprovals !== !!binding || binding && (!this.hooks.assessmentStillApproved
+				|| !await this.hooks.assessmentStillApproved() || !inspectRailsUploadPermit(permit, batch, this.endpoint.href, token))) { throw new SafeUploadFailure('protocol'); }
 			const body = prepared.body;
 			if (controller.signal.aborted || !this.enabled) { outcome = timedOut ? 'retry' : 'cancelled'; return this.notify(outcome); }
 			const response = await this.abortable(this.transport.send({ endpoint: this.endpoint, token, body, signal: controller.signal }), controller.signal);
@@ -152,6 +162,8 @@ export class EventUploader {
 			return this.notify(outcome);
 		} catch (error) {
 			outcome = controller.signal.aborted ? timedOut ? 'retry' : 'cancelled'
+				: error instanceof AssessmentApiError ? ['authentication', 'session_ended'].includes(error.code) ? 'authentication'
+					: error.code === 'unavailable' ? 'retry' : error.code === 'protocol' ? 'protocol' : 'privacy'
 				: error instanceof SafeUploadFailure ? error.reason
 				: error instanceof UploadTransportError ? error.category === 'network' ? 'retry' : error.category
 					: 'storage';
@@ -192,7 +204,7 @@ export class EventUploader {
 			return ack.durablyAcceptedEventIds;
 		} catch { throw new SafeUploadFailure('protocol'); }
 	}
-	private async prepareBody(batch: PreparedEventBatch, signal: AbortSignal): Promise<SerializedUploadBatch> {
+	private async prepareBody(batch: PreparedEventBatch, signal: AbortSignal, binding?: AssessmentApprovalBinding): Promise<SerializedUploadBatch> {
 		const contexts: UploadPrivacyContext[] = [];
 		try {
 			// Sequential RPCs bound outstanding requests and allow cancellation between records.
@@ -200,6 +212,9 @@ export class EventUploader {
 				if (signal.aborted) { throw new UploadTransportError('network'); }
 				const context = await this.hooks.privacyContext(event);
 				if (!context || context.isApprovedRelativePath || context.resolveToolPath) { throw new SafeUploadFailure('privacy'); }
+				if (binding && (!context.assessmentEventApproval || context.assessmentApprovalBinding?.codingSessionId !== binding.codingSessionId
+					|| context.assessmentApprovalBinding.origin !== binding.origin || context.assessmentApprovalBinding.consentReceiptId !== binding.consentReceiptId
+					|| context.assessmentApprovalBinding.serverTime !== binding.serverTime)) { throw new SafeUploadFailure('privacy'); }
 				contexts.push(context);
 			}
 		} catch (error) { throw error instanceof UploadTransportError ? error : new SafeUploadFailure('privacy'); }

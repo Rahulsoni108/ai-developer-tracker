@@ -6,7 +6,8 @@ export interface AssessmentConnection {
 	/** Pinned by the configured client, never taken from a pairing code. */
 	apiOrigin: string;
 	uploadEndpoint: string;
-	mode: 'mock'; // No real Rails transport exists in E4.1.
+	mode: 'mock' | 'rails';
+	credentialExpiresAt?: string;
 }
 export interface AssessmentServerStatus {
 	codingSessionId: string;
@@ -19,14 +20,15 @@ export interface AssessmentServerStatus {
 }
 export interface AssessmentAuthentication { connection: AssessmentConnection; credential: string }
 export interface AssessmentApiClient {
-	readonly mode: 'mock' | 'unavailable';
+	readonly mode: 'mock' | 'rails' | 'unavailable';
 	pair(code: string, signal: AbortSignal): Promise<{ connection: AssessmentConnection; credential: string; status: AssessmentServerStatus }>;
 	startOrResume(auth: AssessmentAuthentication, request: { requestId: string; localRecordingSessionId: string }, signal: AbortSignal): Promise<AssessmentServerStatus>;
+	revokeCredential?(auth: AssessmentAuthentication, signal: AbortSignal): Promise<void>;
 	getStatus(auth: AssessmentAuthentication, signal: AbortSignal): Promise<AssessmentServerStatus>;
 	submit(auth: AssessmentAuthentication, request: { requestId: string; localRecordingSessionIds: string[]; retainedEventCount: number }, signal: AbortSignal): Promise<AssessmentServerStatus>;
 }
 export type AssessmentFailure = 'unavailable' | 'rejected' | 'authentication' | 'protocol' | 'storage' | 'consent_required'
-	| 'recording_busy' | 'evidence_pending' | 'cancelled' | 'session_ended' | 'recovery_required';
+	| 'finalization_unavailable' | 'recording_busy' | 'evidence_pending' | 'cancelled' | 'session_ended' | 'recovery_required';
 export class AssessmentApiError extends Error {
 	constructor(readonly code: AssessmentFailure) { super('Assessment operation could not complete.'); }
 }

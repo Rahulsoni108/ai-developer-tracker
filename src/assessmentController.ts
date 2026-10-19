@@ -1,3 +1,4 @@
+import type { AssessmentDeliveryLifecycle } from './assessmentEventDelivery';
 import type { AssessmentConsentLifecycle } from './assessmentEvidenceConsent';
 import { randomUUID } from 'node:crypto';
 import type { RecordingController } from './recording';
@@ -12,10 +13,10 @@ export interface AssessmentEvidence {
 	disableDevelopmentUploads(): Promise<void>;
 }
 export interface AssessmentView {
-	state: AssessmentState; mode?: 'mock'; reason?: AssessmentFailure; serverTime?: string; deadline?: string;
+	state: AssessmentState; mode?: 'mock' | 'rails'; reason?: AssessmentFailure; serverTime?: string; deadline?: string;
 	/** Display only; measured at the last server response, never from the host's wall clock. */
 	remainingMsAtLastCheck?: number; pendingEvents?: number;
-	uploadConsent: boolean;
+	uploadConsent: boolean; uploadStatus?: string;
 }
 
 /** Assessment workflow only. RecordingController remains the sole recording-state owner. */
@@ -38,7 +39,7 @@ export class AssessmentController {
 		private readonly recording: RecordingController, private readonly evidence: AssessmentEvidence,
 		private readonly confirmUpload: (hostname: string) => Promise<boolean>,
 		private readonly onChange: (view: AssessmentView) => void = () => {}, private readonly requestTimeoutMs = 10000,
-		private readonly evidenceConsents?: AssessmentConsentLifecycle) {
+		private readonly evidenceConsents?: AssessmentConsentLifecycle, private readonly delivery?: AssessmentDeliveryLifecycle) {
 		this.lifecycle = recording.addLifecycleListener({
 			prepare: async (id, current) => {
 				if (!this.starting) { return; }
@@ -67,18 +68,20 @@ export class AssessmentController {
 		});
 	}
 	private auth?: AssessmentAuthentication;
+	get mode(): AssessmentApiClient['mode'] { return this.api.mode; }
 	get view(): AssessmentView {
 		const status = this.metadata?.serverStatus;
 		return { state: this.phase, ...(this.metadata ? { mode: this.metadata.connection.mode } : {}), ...(this.reason ? { reason: this.reason } : {}),
 			...(status ? { serverTime: status.serverTime, ...(status.deadline ? { deadline: status.deadline,
 				remainingMsAtLastCheck: Math.max(0, Date.parse(status.deadline) - Date.parse(status.serverTime)) } : {}) } : {}),
-			...(this.pendingEvents !== undefined ? { pendingEvents: this.pendingEvents } : {}), uploadConsent: this.consent };
+			...(this.pendingEvents !== undefined ? { pendingEvents: this.pendingEvents } : {}), uploadConsent: this.consent, ...(this.delivery?.status ? { uploadStatus: this.delivery.status } : {}) };
 	}
 	isAssociatedSession(id: string): boolean { return this.metadata?.localRecordingSessionIds.includes(id) ?? false; }
 	/** General-purpose development uploader must never send assessment evidence to arbitrary credentials/endpoints. */
 	allowsDevelopmentUpload(id: string): boolean { return this.initialized && this.phase !== 'error' && !this.isAssociatedSession(id); }
 	revokeUploadConsent(): Promise<void> {
 		this.consent = false; ++this.generation; this.request?.abort();
+		const disabling = this.delivery?.disable() ?? Promise.resolve();
 		if (this.starting) { this.recording.stop(); }
 		this.set(this.phase, 'consent_required');
 		const auth = this.auth;
@@ -86,7 +89,7 @@ export class AssessmentController {
 			const tasks = (this.metadata?.localRecordingSessionIds ?? []).map(id => this.evidenceConsents!.revoke(auth, id, AbortSignal.timeout(this.requestTimeoutMs)));
 			this.consentWork = Promise.all(tasks).then(() => {}, () => { this.set(this.phase, 'recovery_required'); });
 		}
-		return this.consentWork;
+		return Promise.all([disabling, this.consentWork]).then(() => {});
 	}
 	initialize(): Promise<void> {
 		return this.run(async () => {
@@ -130,7 +133,7 @@ export class AssessmentController {
 				// Existing dialog/workspace selection is unchanged. Rails gate runs in prepare after consent.
 				await this.recording.start();
 				if (!this.recording.isRecording || !this.isAssociatedSession(this.recording.sessionId!)) { throw new AssessmentApiError('consent_required'); }
-				await this.save('active'); this.set('active');
+				await this.save('active'); this.set('active'); await this.enableDelivery();
 			} finally { this.starting = false; }
 		});
 	}
@@ -175,13 +178,46 @@ export class AssessmentController {
 			await this.save('submitted'); this.set('submitted');
 		}));
 	}
-	showStatus(): Promise<void> { return this.run(async () => { if (this.metadata) { await this.authenticate(); await this.refresh(); } else { this.set('unpaired'); } }); }
+	enableUploads(): Promise<void> {
+		return this.run(async () => {
+			if (!this.metadata || !this.delivery || this.metadata.connection.mode !== 'rails') { throw new AssessmentApiError('unavailable'); }
+			await this.authenticate(); await this.refresh();
+			if (!this.metadata.localRecordingSessionIds.length) { throw new AssessmentApiError('consent_required'); }
+			const generation = this.generation;
+			const accepted = await this.confirmUpload(new URL(this.metadata.connection.uploadEndpoint).hostname);
+			if (!accepted || generation !== this.generation || this.disposed) { this.consent = false; await this.delivery?.disable(); this.set(this.phase, 'consent_required'); return; }
+			await this.evidence.disableDevelopmentUploads(); this.consent = true; await this.enableDelivery(); this.set(this.phase);
+		});
+	}
+	revokeCredential(): Promise<void> {
+		this.consent = false; ++this.generation; this.request?.abort(); void this.delivery?.disable().catch(() => {});
+		if (this.starting) { this.recording.stop(); }
+		const previous = this.busy;
+		return (previous ?? Promise.resolve()).then(() => this.run(async () => {
+			if (!this.metadata || !this.api.revokeCredential) { throw new AssessmentApiError('unavailable'); }
+			await this.revokeUploadConsent();
+			const id = this.recording.sessionId;
+			if (id && this.isAssociatedSession(id)) { this.recording.stop(); await this.evidence.flushStopped(id); }
+			await this.authenticate(); await this.call(signal => this.api.revokeCredential!(this.auth!, signal));
+			await this.store.deleteCredential?.(this.metadata.credentialId);
+			this.auth = undefined; await this.save('recovery'); this.set('recovery', 'authentication');
+		}));
+	}
+	private async enableDelivery(): Promise<void> {
+		if (this.disposed || !this.delivery || !this.metadata || !this.consent || this.metadata.connection.mode !== 'rails') { return; }
+		try { await this.delivery.enable(this.metadata, () => this.consent && !this.disposed); }
+		catch { this.set(this.phase, 'evidence_pending'); } // Network delivery cannot stop or block local collectors.
+	}
+	showStatus(): Promise<void> { return this.run(async () => { if (this.metadata) { await this.authenticate(); await this.refresh();
+			if (this.metadata.connection.mode === 'rails') { this.pendingEvents = (await this.evidence.getStatus(this.metadata.localRecordingSessionIds)).pendingEvents; } } else { this.set('unpaired'); } }); }
 	private closeStoppedConsent(id: string): Promise<void> {
 		const previous = this.closingSessions.get(id); if (previous) { return previous; }
 		const auth = this.auth;
 		const work = (async () => {
+			await this.delivery?.disable();
 			await this.evidence.flushStopped(id);
 			if (auth && this.evidenceConsents) { await this.evidenceConsents.close(auth, id, AbortSignal.timeout(this.requestTimeoutMs)); }
+			await this.enableDelivery();
 		})();
 		this.closingSessions.set(id, work);
 		this.consentWork = work.catch(() => { this.closingSessions.delete(id); this.set('submission_pending', 'recovery_required'); });
@@ -248,7 +284,7 @@ export class AssessmentController {
 			if (this.recording.isRecording && this.isAssociatedSession(this.recording.sessionId!)) {
 				const id = this.recording.sessionId!; this.recording.stop(); try { await this.evidence.flushStopped(id); } catch { /* Recovery remains required. */ }
 			}
-			this.consent = false;
+			this.consent = false; await this.delivery?.disable();
 			const phase = this.metadata?.phase === 'submission_pending' ? 'submission_pending' : this.metadata ? 'recovery' : 'error';
 			this.set(phase, reason);
 			if (this.metadata) { try { await this.save(phase); } catch { this.set('error', 'storage'); } }
@@ -264,6 +300,6 @@ export class AssessmentController {
 			const id = this.recording.sessionId!; this.recording.stop();
 			try { await this.closeStoppedConsent(id); } catch { /* Durable close intent remains pending; never claim remote success. */ }
 		}
-		await this.busy; await this.consentWork; this.consent = false; this.lifecycle.dispose(); this.auth = undefined;
+		await this.busy; await this.consentWork; this.consent = false; await this.delivery?.disable(); this.lifecycle.dispose(); this.auth = undefined;
 	}
 }

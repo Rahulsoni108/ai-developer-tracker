@@ -457,6 +457,7 @@ export class LocalEventQueue {
 				const previous = this.readEvidenceConsent(id);
 				if (previous && (previous.codingSessionId !== snapshot.codingSessionId || previous.origin !== snapshot.origin
 					|| JSON.stringify(previous.request) !== JSON.stringify(snapshot.request) || previous.deadline !== snapshot.deadline
+					|| previous.credentialDigest !== snapshot.credentialDigest
 					|| previous.locallyRevoked && !snapshot.locallyRevoked || previous.captureClosed && !snapshot.captureClosed
 					|| previous.receipt && (!snapshot.receipt || previous.receipt.consent_id !== snapshot.receipt.consent_id
 						|| previous.receipt.consented_at !== snapshot.receipt.consented_at || previous.receipt.expires_at !== snapshot.receipt.expires_at
@@ -502,23 +503,25 @@ export class LocalEventQueue {
 		}));
 	}
 
-	prepareBatch(maxEvents: number, maxBytes: number): Promise<PreparedEventBatch | null> {
-		if (!Number.isSafeInteger(maxEvents) || maxEvents < 1 || maxEvents > MAX_QUEUE_BATCH
+	prepareBatch(maxEvents: number, maxBytes: number, localSessionId?: string): Promise<PreparedEventBatch | null> {
+		if (localSessionId !== undefined && !isUuid(localSessionId) || !Number.isSafeInteger(maxEvents) || maxEvents < 1 || maxEvents > MAX_QUEUE_BATCH
 			|| !Number.isSafeInteger(maxBytes) || maxBytes < 2 || maxBytes > MAX_DELIVERY_BATCH_BYTES) {
 			return Promise.reject(new LocalEventQueueError('Invalid delivery batch limits.'));
 		}
 		return this.schedule(async () => {
 			let batch: PreparedEventBatch | null = null;
+			const scope = localSessionId === undefined ? '' : 'AND e.session_id = ?';
+			const parameters = localSessionId === undefined ? [] : [localSessionId];
 			this.assertCollectionAllowed();
-			if (!this.database.prepare(`SELECT 1 FROM queued_events e WHERE e.acknowledged = 0 AND NOT EXISTS
-				(SELECT 1 FROM delivery_members m WHERE m.event_id = e.event_id AND m.claimed = 1) LIMIT 1`).get()) { return null; }
+			if (!this.database.prepare(`SELECT 1 FROM queued_events e WHERE e.acknowledged = 0 ${scope} AND NOT EXISTS
+				(SELECT 1 FROM delivery_members m WHERE m.event_id = e.event_id AND m.claimed = 1) LIMIT 1`).get(...parameters)) { return null; }
 			await this.writeWithReservation(maxEvents * 512, () => {
 				this.assertCollectionAllowed();
 				const events: TrackerEvent[] = []; let byteSize = 2;
 				for (const row of this.database.prepare(`SELECT e.event_id, e.event_json, e.payload_format, e.session_id
-					FROM queued_events e WHERE e.acknowledged = 0 AND NOT EXISTS
+					FROM queued_events e WHERE e.acknowledged = 0 ${scope} AND NOT EXISTS
 					(SELECT 1 FROM delivery_members m WHERE m.event_id = e.event_id AND m.claimed = 1)
-					ORDER BY e.sequence LIMIT ?`).iterate(maxEvents)) {
+					ORDER BY e.sequence LIMIT ?`).iterate(...parameters, maxEvents)) {
 					const event = this.readStoredEvent(row);
 					const bytes = Buffer.byteLength(JSON.stringify(event)) + (events.length ? 1 : 0);
 					if (byteSize + bytes > maxBytes) {

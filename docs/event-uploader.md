@@ -1,5 +1,12 @@
 # HTTPS event uploader (Task 3.3.2)
 
+E4.5 update: [real Rails assessment integration](rails-assessment-integration.md) now
+connects the documented R4.2D control APIs and scoped uploader, with fresh upload consent,
+exact capture-time approvals and credential-generation checks. The historical implementation
+notes below describe earlier tasks. The real path is pinned to R4.2D; generic/manual uploads
+remain unchanged, and no Rails finalization request is implemented.
+
+
 `EventUploader` is standalone and disabled on construction/restart. It is not connected to event collectors, recording commands or extension activation. No real backend or automatic external upload is configured. Endpoint and bounds are constructor options; `enable()` requires a separate explicit upload confirmation callback and `start()` begins the optional retry driver. `uploadOnce()` performs one eligible attempt; simultaneous calls share the same operation. `cancel()` stops the driver and aborts the current operation, `disable()` additionally revokes enablement and drains it, and `dispose()` drains and closes the private transport.
 
 ## Host contract and consent

@@ -1,5 +1,6 @@
 import { AssessmentEvidenceConsent } from './assessmentEvidenceConsent';
-import { RailsEvidenceConsentClient } from './railsEvidenceConsentClient';
+import { RailsAssessmentApiClient } from './railsAssessmentApiClient';
+import { AssessmentEventDelivery } from './assessmentEventDelivery';
 import { PRIVACY_EVENT_TYPES } from './privacyFilter';
 import { ClaudeEventParser } from './claudeEventParser';
 import { ClaudeCapture } from './claudeCapture';
@@ -35,6 +36,7 @@ import { AssessmentConnectionStore } from './assessmentStorage';
 import { formatAssessmentStatus, registerAssessmentCommands } from './assessmentCommands';
 
 let activeAssessment: AssessmentController | undefined;
+let activeRailsApi: RailsAssessmentApiClient | undefined;
 let activeClaudeParser: ClaudeEventParser | undefined;
 let activeClaudeUi: ClaudeCaptureUi | undefined;
 let activeUploads: UploadController | undefined;
@@ -451,16 +453,28 @@ export async function activate(context: vscode.ExtensionContext) {
 		await correlator.finishSession(stoppedSession); await writer.flush(); await writer.completeSession(stoppedSession);
 	};
 	const mockAssessments = vscode.workspace.getConfiguration('ai-developer-tracker.assessment.mock').inspect<boolean>('enabled')?.globalValue === true;
-	const assessmentApi = mockAssessments ? new MockAssessmentApiClient() : new UnavailableAssessmentApiClient();
+	const assessmentOrigin = vscode.workspace.getConfiguration('ai-developer-tracker.assessment').inspect<string>('apiOrigin')?.globalValue ?? '';
+	let assessmentApi: MockAssessmentApiClient | RailsAssessmentApiClient | UnavailableAssessmentApiClient = new UnavailableAssessmentApiClient();
+	if (mockAssessments) { assessmentApi = new MockAssessmentApiClient(); }
+	else if (assessmentOrigin) {
+		try { assessmentApi = new RailsAssessmentApiClient(assessmentOrigin); activeRailsApi = assessmentApi; }
+		catch { output.appendLine('Invalid assessment HTTPS origin. Pairing is disabled; no mock fallback is used.'); }
+	}
 	if (assessmentApi instanceof MockAssessmentApiClient) { assessmentApi.seedInvitation('DEMO-ASSESSMENT', '1'); }
 	const assessmentStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left);
 	assessmentStatus.name = 'AI Developer Tracker assessment'; assessmentStatus.command = 'ai-developer-tracker.showAssessmentStatus';
 	const assessmentConsents = queue ? new AssessmentEvidenceConsent(queue,
-		mockAssessments ? undefined : new RailsEvidenceConsentClient(), () => ({
+		assessmentApi instanceof RailsAssessmentApiClient ? assessmentApi : undefined, () => ({
 			workspaceIds: tracker.getApprovedFolders().map(folder => createHash('sha256').update(folder.uri.toString()).digest('hex')),
 			eventTypes: [...PRIVACY_EVENT_TYPES]
 		})) : undefined;
-	const assessment = new AssessmentController(assessmentApi, new AssessmentConnectionStore(context.globalState, context.secrets), recording, {
+	const assessmentStore = new AssessmentConnectionStore(context.globalState, context.secrets);
+	const assessmentDelivery = queue && assessmentApi instanceof RailsAssessmentApiClient
+		? new AssessmentEventDelivery(queue, assessmentStore, assessmentApi, status => {
+			output.appendLine('Assessment delivery status: ' + status);
+			if (status === 'authentication') { void activeAssessment?.showStatus(); }
+		}) : undefined;
+	const assessment = new AssessmentController(assessmentApi, assessmentStore, recording, {
 		flushStopped: async id => {
 			await flushStoppedRecording(id);
 			if (writer.isDegraded || !queue) { throw new AssessmentApiError('storage'); }
@@ -468,12 +482,16 @@ export async function activate(context: vscode.ExtensionContext) {
 		getStatus: async ids => { if (!queue) { throw new AssessmentApiError('storage'); } return queue.getSessionEvidenceStatus(ids); },
 		disableDevelopmentUploads: async () => { await activeUploads?.disable(); }
 	}, async hostname => (await vscode.window.showWarningMessage(`Allow assessment uploads to ${hostname}?`, { modal: true,
-		detail: `Separate upload consent: sanitized code, diffs, AI conversations and tool activity may be transmitted for this paired assessment. Recording consent alone does not allow uploads.\n\nSelected workspace identifiers: ${tracker.getApprovedFolders().map(folder => createHash('sha256').update(folder.uri.toString()).digest('hex')).join(', ')}\nEvent categories: ${PRIVACY_EVENT_TYPES.join(', ')}\nScope: assessment_evidence (assessment-evidence.v1), limited to this assessment/recording and destination. Expires at the earliest server assessment deadline, credential expiry or revocation. Disable Uploads revokes consent; Stop & Submit closes the capture window after local writes drain.\n\nThis build uses a local mock only: no assessment events are transmitted or automatically acknowledged. A Rails consent receipt cannot bypass its unverified-privacy guard. Pending evidence blocks submission. Reload requires fresh upload consent; Codex/Claude content still requires separate source approval.` }, 'Allow Assessment Uploads')) === 'Allow Assessment Uploads',
+		detail: `Separate upload consent: sanitized code, diffs, AI conversations and tool activity may be transmitted for this paired assessment. Recording consent alone does not allow uploads.\n\nSelected workspace identifiers: ${tracker.getApprovedFolders().map(folder => createHash('sha256').update(folder.uri.toString()).digest('hex')).join(', ')}\nEvent categories: ${PRIVACY_EVENT_TYPES.join(', ')}\nScope: assessment_evidence (assessment-evidence.v1), limited to this assessment/recording and destination. Expires at the earliest server assessment deadline, credential expiry or revocation. Disable Uploads revokes consent; Stop & Submit closes the capture window after local writes drain.\n\n${mockAssessments ? 'Local mock only: no evidence is transmitted.' : 'The pinned R4.2D Rails contract sends only encrypted-queue events with verifiable capture-time approvals and matching scoped receipts. A receipt alone never authorizes an event. Finalization is not implemented; Stop & Submit stops capture and leaves submission pending.'} Reload requires fresh upload consent; Codex/Claude content still requires separate source approval.` }, 'Allow Assessment Uploads')) === 'Allow Assessment Uploads',
 	view => { assessmentStatus.text = `Assessment: ${view.state.replace(/_/g, ' ')}${view.mode === 'mock' ? ' (mock)' : ''}`;
-		assessmentStatus.tooltip = formatAssessmentStatus(view); if (view.state === 'unpaired') { assessmentStatus.hide(); } else { assessmentStatus.show(); } }, 10000, assessmentConsents);
+		assessmentStatus.tooltip = formatAssessmentStatus(view); if (view.state === 'unpaired') { assessmentStatus.hide(); } else { assessmentStatus.show(); } }, 10000, assessmentConsents, assessmentDelivery);
 	activeAssessment = assessment;
 	await assessment.initialize();
-	context.subscriptions.push(assessmentStatus, ...registerAssessmentCommands(assessment, mockAssessments));
+	context.subscriptions.push(assessmentStatus, ...registerAssessmentCommands(assessment, mockAssessments),
+		vscode.workspace.onDidChangeConfiguration(event => {
+			if (event.affectsConfiguration('ai-developer-tracker.assessment')) { void assessment.revokeUploadConsent();
+				void vscode.window.showWarningMessage('Assessment settings changed. Upload consent was revoked; reload before pairing or resuming with the new configuration.'); }
+		}));
 	const recordedEventSummaryOutput = vscode.window.createOutputChannel(RECORDED_EVENT_SUMMARY_TITLE);
 	context.subscriptions.push(
 		recordedEventSummaryOutput,
@@ -531,7 +549,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
 // VS Code disposes the commands and controller in context.subscriptions.
 export async function deactivate(): Promise<void> {
-	await activeAssessment?.dispose();
+	await activeAssessment?.dispose(); activeRailsApi?.dispose(); activeRailsApi = undefined;
 	await activeClaudeUi?.dispose(); activeClaudeUi = undefined;
 	await activeUploads?.dispose(); activeUploads = undefined;
 	const stoppedSession = activeRecording?.sessionId;

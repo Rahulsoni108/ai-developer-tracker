@@ -17,6 +17,7 @@
     "configuration": {
       "title": "AI Developer Tracker Diff Capture",
       "properties": {
+        "ai-developer-tracker.assessment.apiOrigin": {"type": "string", "default": "", "scope": "machine", "restricted": true, "description": "Trusted Rails HTTPS origin implementing R4.2D, for example https://assessment.example.com. Empty disables pairing. Only user settings are read. No credentials, paths, queries or fragments. Reload after changes; separate recording and upload consent remain required."},
         "ai-developer-tracker.assessment.mock.enabled": {"type": "boolean", "default": false, "scope": "machine", "restricted": true, "description": "Development only: enable an explicit local assessment mock after reload. No Rails calls or assessment event uploads. Never use for real interviews. Only user settings are read; the mock server does not survive reload."},
         "ai-developer-tracker.upload.endpoint": {"type": "string", "default": "", "description": "HTTPS event endpoint. Empty disables uploads. Only user settings are used; changes revoke upload consent. Credentials, query strings and fragments are prohibited.", "scope": "machine", "restricted": true},
         "ai-developer-tracker.upload.enabled": {"type": "boolean", "default": false, "description": "Upload status mirror. Settings cannot authorize uploads. Use Enable Uploads for separate explicit consent; reload always disables uploads. Set false to revoke consent.", "scope": "machine", "restricted": true},
@@ -90,6 +91,8 @@
         "command": "ai-developer-tracker.showQueueHealth",
         "title": "AI Developer Tracker: Show Local Queue Health"
       },
+      { "command": "ai-developer-tracker.enableAssessmentUploads", "title": "AI Developer Tracker: Enable Assessment Uploads" },
+      { "command": "ai-developer-tracker.revokeAssessmentCredential", "title": "AI Developer Tracker: Revoke Assessment Credential" },
       {
         "command": "ai-developer-tracker.startRecording",
         "title": "AI Developer Tracker: Start Recording"

@@ -1,5 +1,12 @@
 # E4.3 — Durable evidence approvals and Rails consent
 
+E4.5 update: [real Rails assessment integration](rails-assessment-integration.md) now
+connects the documented R4.2D control APIs and scoped uploader, with fresh upload consent,
+exact capture-time approvals and credential-generation checks. The historical implementation
+notes below describe earlier tasks. The real path is pinned to R4.2D; generic/manual uploads
+remain unchanged, and no Rails finalization request is implemented.
+
+
 E4.4 update: [the versioned event approval contract](event-approval-contract.md) adds
 capture-time local v2 approvals containing RFC 8785 wire envelopes. Historical v1
 approvals below retain their original exact-byte digest and are never backfilled.

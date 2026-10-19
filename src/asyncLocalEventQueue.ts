@@ -108,8 +108,8 @@ export class AsyncLocalEventQueue {
 		await this.request('finishUploadAttempt', { nextAttemptAt, pauseReason, resetAttempts });
 	}
 
-	async prepareBatch(maxEvents: number, maxBytes: number): Promise<PreparedEventBatch | null> {
-		return await this.request('prepareBatch', { maxEvents, maxBytes }) as PreparedEventBatch | null;
+	async prepareBatch(maxEvents: number, maxBytes: number, localSessionId?: string): Promise<PreparedEventBatch | null> {
+		return await this.request('prepareBatch', { maxEvents, maxBytes, localSessionId }) as PreparedEventBatch | null;
 	}
 	async markDelivered(batchId: string, acknowledgedEventIds: readonly string[]): Promise<void> {
 		await this.request('markDelivered', { batchId, acknowledgedEventIds: [...acknowledgedEventIds] });

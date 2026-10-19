@@ -31,6 +31,8 @@ export interface EvidenceConsentReceipt {
 }
 /** Encrypted storage only. A pending intent is never an authorization. No credentials here. */
 export interface EvidenceConsentState {
+	/** Capture-time generation binding; confidential one-way digest, encrypted here, never on the wire. */
+	credentialDigest?: string;
 	version: 1;
 	codingSessionId: string;
 	origin: string;
@@ -83,7 +85,8 @@ export function validConsentReceipt(value: EvidenceConsentReceipt, state: Eviden
 		&& JSON.stringify([...value.event_types].sort()) === JSON.stringify([...state.request.event_types].sort());
 }
 export function validConsentState(state: EvidenceConsentState): boolean {
-	return !!state && exactKeys(state, ['version', 'codingSessionId', 'origin', 'request', 'deadline', 'pendingAction', 'locallyRevoked', 'captureClosed', 'receipt'])
+	return !!state && exactKeys(state, ['version', 'codingSessionId', 'origin', 'request', 'deadline', 'pendingAction', 'locallyRevoked', 'captureClosed', 'receipt', 'credentialDigest'])
+		&& (state.credentialDigest === undefined || typeof state.credentialDigest === 'string' && /^[a-f0-9]{64}$/.test(state.credentialDigest))
 		&& state.version === 1 && /^[1-9][0-9]{0,19}$/.test(state.codingSessionId) && validOrigin(state.origin)
 		&& validConsentRequest(state.request) && utcTime(state.deadline) && typeof state.locallyRevoked === 'boolean' && typeof state.captureClosed === 'boolean'
 		&& (state.pendingAction === undefined || ['register', 'stop', 'revoke'].includes(state.pendingAction))

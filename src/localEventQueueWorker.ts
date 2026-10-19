@@ -70,8 +70,8 @@ async function run(): Promise<void> {
 						await queue.finishUploadAttempt(args.nextAttemptAt, args.pauseReason, args.resetAttempts); break;
 					}
 					case 'prepareBatch': {
-						const args = request.argument as { maxEvents: number; maxBytes: number };
-						value = await queue.prepareBatch(args.maxEvents, args.maxBytes); break;
+						const args = request.argument as { maxEvents: number; maxBytes: number; localSessionId?: string };
+						value = await queue.prepareBatch(args.maxEvents, args.maxBytes, args.localSessionId); break;
 					}
 					case 'markDelivered': {
 						const args = request.argument as { batchId: string; acknowledgedEventIds: string[] };

@@ -1,4 +1,5 @@
 import type { Memento, SecretStorage } from 'vscode';
+import { utcTime } from './evidenceConsent';
 import { isUuid } from './eventSchema';
 import { AssessmentApiError, type AssessmentConnection, type AssessmentServerStatus } from './assessmentApiClient';
 
@@ -15,12 +16,14 @@ export interface AssessmentStore {
 	save(value: AssessmentMetadata): Promise<void>;
 	getCredential(id: string): Promise<string | undefined>;
 	putCredential(id: string, credential: string): Promise<void>;
+	deleteCredential?(id: string): Promise<void>;
 }
 
 export function validConnection(value: AssessmentConnection): boolean {
 	try {
 		const origin = new URL(value.apiOrigin); const endpoint = new URL(value.uploadEndpoint);
-		return value.mode === 'mock' && /^[1-9]\d{0,19}$/.test(value.codingSessionId) && origin.protocol === 'https:'
+		return ['mock', 'rails'].includes(value.mode) && (value.mode !== 'rails' || utcTime(value.credentialExpiresAt)
+			&& endpoint.href === origin.origin + '/api/v2/coding_session/extension/events') && typeof value.codingSessionId === 'string' && /^[1-9]\d{0,19}$/.test(value.codingSessionId) && origin.protocol === 'https:'
 			&& origin.origin === value.apiOrigin && !origin.username && !origin.password && !origin.search && !origin.hash
 			&& endpoint.origin === origin.origin && !endpoint.username && !endpoint.password && !endpoint.search && !endpoint.hash;
 	} catch { return false; }
@@ -41,7 +44,7 @@ export function validServerStatus(value: AssessmentServerStatus, connection: Ass
 /** Only a fixed allowlist of connection metadata is persisted; no pairing codes, event contents or tokens. */
 export class AssessmentConnectionStore implements AssessmentStore {
 	private writes: Promise<void> = Promise.resolve();
-	constructor(private readonly state: Pick<Memento, 'get' | 'update'>, private readonly secrets: Pick<SecretStorage, 'get' | 'store'>) {}
+	constructor(private readonly state: Pick<Memento, 'get' | 'update'>, private readonly secrets: Pick<SecretStorage, 'get' | 'store'> & Partial<Pick<SecretStorage, 'delete'>>) {}
 	async load(): Promise<AssessmentMetadata | undefined> {
 		const raw = this.state.get<AssessmentMetadata>(ASSESSMENT_METADATA_KEY); if (raw === undefined) { return undefined; }
 		if (!raw || raw.version !== 1 || !validConnection(raw.connection) || !isUuid(raw.credentialId) || !isUuid(raw.submitRequestId)
@@ -53,13 +56,17 @@ export class AssessmentConnectionStore implements AssessmentStore {
 		return structuredClone(raw);
 	}
 	save(value: AssessmentMetadata): Promise<void> {
-		const { codingSessionId, apiOrigin, uploadEndpoint, mode } = value.connection;
+		const { codingSessionId, apiOrigin, uploadEndpoint, mode, credentialExpiresAt } = value.connection;
 		const { state, serverTime, startedAt, deadline, localRecordingSessionIds } = value.serverStatus;
-		const snapshot: AssessmentMetadata = { version: 1, connection: { codingSessionId, apiOrigin, uploadEndpoint, mode }, credentialId: value.credentialId,
+		const snapshot: AssessmentMetadata = { version: 1, connection: { codingSessionId, apiOrigin, uploadEndpoint, mode, ...(credentialExpiresAt ? { credentialExpiresAt } : {}) }, credentialId: value.credentialId,
 			phase: value.phase, localRecordingSessionIds: [...value.localRecordingSessionIds], submitRequestId: value.submitRequestId,
 			serverStatus: { codingSessionId, state, serverTime, ...(startedAt ? { startedAt } : {}), ...(deadline ? { deadline } : {}), localRecordingSessionIds: [...localRecordingSessionIds] } };
 		const write = this.writes.then(async () => { await this.state.update(ASSESSMENT_METADATA_KEY, snapshot); });
 		this.writes = write.catch(() => {}); return write;
+	}
+	async deleteCredential(id: string): Promise<void> {
+		if (!this.secrets.delete) { throw new AssessmentApiError('storage'); }
+		await this.secrets.delete(assessmentCredentialKey(id));
 	}
 	getCredential(id: string): Promise<string | undefined> { return Promise.resolve(this.secrets.get(assessmentCredentialKey(id))); }
 	async putCredential(id: string, credential: string): Promise<void> {

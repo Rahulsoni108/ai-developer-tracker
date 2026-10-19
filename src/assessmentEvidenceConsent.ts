@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { AssessmentApiError, type AssessmentAuthentication, type AssessmentServerStatus } from './assessmentApiClient';
 import { EVIDENCE_CONSENT_VERSION, type EvidenceConsentState } from './evidenceConsent';
 import type { EvidenceConsentApi } from './railsEvidenceConsentClient';
@@ -32,7 +32,7 @@ export class AssessmentEvidenceConsent implements AssessmentConsentLifecycle {
 					|| JSON.stringify([...state.request.approved_workspace_ids].sort()) !== JSON.stringify([...scope.workspaceIds].sort())
 					|| JSON.stringify([...state.request.event_types].sort()) !== JSON.stringify([...scope.eventTypes].sort())) { throw new AssessmentApiError('consent_required'); }
 			} else {
-				state = { version: 1, codingSessionId: status.codingSessionId, origin: auth.connection.apiOrigin,
+				state = { version: 1, credentialDigest: createHash('sha256').update(auth.credential).digest('hex'), codingSessionId: status.codingSessionId, origin: auth.connection.apiOrigin,
 					deadline: status.deadline, locallyRevoked: false, captureClosed: false, pendingAction: 'register',
 					request: { request_id: randomUUID(), local_recording_session_id: localSessionId,
 						approval_action: 'approve_upload', consent_version: EVIDENCE_CONSENT_VERSION, scope: 'assessment_evidence',
@@ -73,7 +73,8 @@ export class AssessmentEvidenceConsent implements AssessmentConsentLifecycle {
 		});
 	}
 	private checkOwner(state: EvidenceConsentState, auth: AssessmentAuthentication): void {
-		if (state.codingSessionId !== auth.connection.codingSessionId || state.origin !== auth.connection.apiOrigin) { throw new AssessmentApiError('authentication'); }
+		if (state.codingSessionId !== auth.connection.codingSessionId || state.origin !== auth.connection.apiOrigin
+			|| state.credentialDigest !== undefined && state.credentialDigest !== createHash('sha256').update(auth.credential).digest('hex')) { throw new AssessmentApiError('authentication'); }
 	}
 	private serial(operation: () => Promise<void>): Promise<void> {
 		const next = this.pending.then(operation); this.pending = next.catch(() => {}); return next;

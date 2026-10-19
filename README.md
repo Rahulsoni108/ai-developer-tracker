@@ -6,7 +6,7 @@ AI Developer Tracker is a VS Code extension for an AI-assisted developer assessm
 
 Candidates can currently use development recording commands in a local coding workspace. The intended integrated experience associates that evidence with an existing Rails coding-interview attempt, with separate recording/upload consent, a server-authorized start and reliable submission.
 
-**Current status:** recording, local storage, AI adapters and upload infrastructure are implemented and covered by automated tests. Assessment commands use a mockable API client; the Rails-backed candidate flow is **planned, not live**. Default assessment requests fail closed because no real Rails transport is implemented. This is not yet a production assessment deployment.
+**Current status:** recording, local storage, AI adapters and upload infrastructure are implemented and covered by automated tests. [E4.5](docs/rails-assessment-integration.md) adds real Rails pairing/start/status/consent APIs and scoped evidence uploads for the reviewed R4.2D contract. Configure a trusted HTTPS `assessment.apiOrigin` in user settings; it is empty/disabled by default. Finalization is unavailable, so real Stop & Submit stays pending. Live deployment verification is still required.
 
 ## 2. Technology Stack
 
@@ -39,10 +39,10 @@ These capabilities have implementation and automated coverage. That does not imp
 | Encrypted queue | New events use AES-256-GCM SQLite storage. Queue-first persistence preserves IDs, FIFO order, deduplication and acknowledgment state. |
 | Recovery and limits | Integrity checks, committed-event recovery, interrupted-session metadata, queue health and configurable capacity. Restart does not resume recording or restore consent. |
 | Delivery infrastructure | Persistent batch ownership, partial acknowledgments, valid HTTPS/TLS, timeouts/cancellation, exponential backoff with jitter, bounded Retry-After handling and authentication/configuration pauses. |
-| Assessment foundation | Pair, Start, Stop & Submit and Status commands; lifecycle/recovery states, separate Rails/local identities, immutable server-timing checks and acknowledgment-gated submission through a mocked API. |
+| Assessment foundation | Pair, Start, Stop & Submit and Status commands; lifecycle/recovery states, separate Rails/local identities, immutable server-timing checks and real Rails control/consent APIs and scoped approved-event uploads; explicit mock remains available, real finalization remains pending. |
 | Diagnostics | Queue health, latest-recording retained pending event-type counts, metadata-only JSONL and explicit cleanup controls. |
 
-**Live Claude CLI/model testing is pending.** Codex and Claude have automated coverage using representative records/hooks; installed-version compatibility still needs manual verification. No real Rails assessment integration is claimed.
+**Live Claude CLI/model testing is pending.** Codex and Claude have automated coverage using representative records/hooks; installed-version compatibility still needs manual verification. Real Rails deployment and candidate workflow verification remain pending.
 
 ## 4. Architecture
 
@@ -61,12 +61,12 @@ VS Code file/editor events    Codex approved JSONL    Claude approved hooks/tran
                                       |
                                 HTTPS delivery
                                       |
-                          Rails event API [PLANNED]
+                          Rails R4.2D event API [CONFIGURED HTTPS]
 ```
 
 Sanitized, successfully committed events also feed `ActivityCorrelator`; its relationship events pass through the same persistence path. JSONL diagnostics are metadata-only, not an evidence store or upload fallback.
 
-The uploader exists but is disabled by default and requires a trusted configured endpoint, authentication and separate endpoint-scoped consent. **Assessment-specific delivery is not connected:** the generic development uploader blocks assessment-bound evidence. Integration tests supply a test-only delivery adapter; the interactive mock never uploads or automatically acknowledges events.
+The uploader exists but is disabled by default and requires a trusted configured endpoint, authentication and separate endpoint-scoped consent. **Assessment-specific delivery is connected through the pinned R4.2D adapter:** it uses its paired credential and scoped durable approvals; the generic development uploader still blocks assessment-bound evidence. The explicit interactive mock never uploads or automatically acknowledges events.
 
 Details: [privacy filtering](docs/privacy-filter.md), [encrypted storage](docs/local-evidence-encryption.md), [correlation](docs/activity-correlation.md), [uploader integration](docs/vscode-upload-integration.md).
 
@@ -146,9 +146,11 @@ Command Palette titles and IDs match `package.json`.
 | AI Developer Tracker: Revoke Claude Code Capture | `ai-developer-tracker.revokeClaudeCapture` | Revoke Claude capture without stopping file recording or terminating Claude itself. |
 | AI Developer Tracker: Show Local Queue Health | `ai-developer-tracker.showQueueHealth` | Display pending counts, storage usage and recovery health. |
 | AI Developer Tracker: Show Recorded Event Summary | `ai-developer-tracker.showRecordedEventSummary` | Show event-type counts for the latest non-cancelled session's retained pending events. |
-| AI Developer Tracker: Pair Assessment | `ai-developer-tracker.pairAssessment` | Pair through the API seam; unavailable by default, or explicit local mock only. |
-| AI Developer Tracker: Start Assessment | `ai-developer-tracker.startAssessment` | Obtain authorization/binding and required consents before recording. Currently mocked. |
+| AI Developer Tracker: Pair Assessment | `ai-developer-tracker.pairAssessment` | Pair with configured trusted Rails HTTPS origin, or explicit local mock. |
+| AI Developer Tracker: Start Assessment | `ai-developer-tracker.startAssessment` | Obtain Rails authorization/binding and separate consents before recording. |
 | AI Developer Tracker: Stop & Submit Assessment | `ai-developer-tracker.stopAndSubmitAssessment` | Stop/drain; keep submission pending until acknowledgments and server finalization. |
+| AI Developer Tracker: Enable Assessment Uploads | `ai-developer-tracker.enableAssessmentUploads` | Fresh upload consent for retained approved evidence; never restarts recording or recreates approvals. |
+| AI Developer Tracker: Revoke Assessment Credential | `ai-developer-tracker.revokeAssessmentCredential` | Confirmed stop/revoke; preserve pending evidence and remove the revoked SecretStorage credential. |
 | AI Developer Tracker: Show Assessment Status | `ai-developer-tracker.showAssessmentStatus` | Show lifecycle state, last server timing snapshot and safe recovery reasons. |
 | AI Developer Tracker: Configure Upload Endpoint | `ai-developer-tracker.configureUploadEndpoint` | Configure validated HTTPS; changes require new consent. |
 | AI Developer Tracker: Configure Upload Authentication | `ai-developer-tracker.configureUploadAuthentication` | Configure/remove a token using masked input and SecretStorage. |
@@ -162,7 +164,7 @@ The event summary decrypts/validates inside the storage worker and returns only 
 
 ## 7. Candidate Assessment Workflow
 
-**Planned Rails-backed experience—not yet live:**
+**Implemented extension flow; deployed end-to-end verification is pending:**
 
 1. A recruiter sends an invitation through the existing Rails application.
 2. The candidate opens the link, verifies email OTP and claims the interview on the existing Next.js website without creating an account.
@@ -173,7 +175,7 @@ The event summary decrypts/validates inside the storage worker and returns only 
 7. The extension records approved workspace and AI activity through privacy filtering and encrypted storage.
 8. The candidate clicks **Stop & Submit Assessment**. Capture stops and flushes; durable event acknowledgments and server finalization are required before success. Network failure leaves submission pending.
 
-The existing browser interview workflow must remain compatible. Its current timer-at-OTP-claim behavior needs a deliberate Rails change or separate official assessment timing; this extension does not reset existing deadlines or implement that backend change.
+Rails R4.1A–D provides a prepared VS Code mode and server-authoritative Start while preserving browser interviews. This extension preserves original timing. Finalization is not implemented: real Stop & Submit remains pending even after valid event acknowledgments.
 
 ### Try the implemented local mock
 
@@ -192,7 +194,7 @@ Details: [assessment workflow/proposed contract](docs/assessment-workflow.md), [
 - **Encryption:** new SQLite events use AES-256-GCM with random nonces and authenticated metadata. Keys/credentials use SecretStorage; missing required keys fail closed. This is event encryption, not whole-database encryption or a tamper-proof ledger. Operational IDs/counts/status metadata remain accessible.
 - **Diagnostics:** new JSONL contains safe metadata, not prompts, code, diffs, tool arguments or sensitive paths. There is no raw-evidence logging switch. SQLite is authoritative; diagnostic failure does not undo capture.
 - **Retention/deletion:** default retention is 30 days for eligible closed, fully acknowledged sessions and disposable diagnostics. Pending evidence is never automatically deleted or acknowledged. Historical plaintext detection reports counts. Cleanup requires confirmation and cannot run during recording; whole-session cleanup can include encrypted/pending evidence. Deletion does not guarantee secure erasure from media, snapshots or backups.
-- **Durable upload approvals:** newly filtered events and exact-content approvals commit atomically in encrypted SQLite. Only authenticated approvals can survive restart; fresh upload consent is still required. Older/unverifiable events remain blocked, and a blocked FIFO head can block later evidence. [E4.4](docs/event-approval-contract.md) adds capture-time assessment envelopes and RFC 8785 digests; assessment transmission remains blocked until Rails implements that contract. See also [E4.3](docs/durable-evidence-approval.md).
+- **Durable upload approvals:** newly filtered events and exact-content approvals commit atomically in encrypted SQLite. Only authenticated approvals can survive restart; fresh upload consent is still required. Older/unverifiable events remain blocked, and a blocked FIFO head can block later evidence. [E4.4](docs/event-approval-contract.md) adds capture-time assessment envelopes and RFC 8785 digests; the real R4.2D adapter can transmit only with matching scoped consent, credential-generation evidence and those original approvals. See also [E4.3](docs/durable-evidence-approval.md).
 
 Workspace files and AI tools' original transcripts may contain plaintext outside the extension's store. Evidence exists transiently in memory. Encryption/filtering cannot protect against every leak, a compromised host or unsafe exports.
 

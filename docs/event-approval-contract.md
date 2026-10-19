@@ -1,5 +1,12 @@
 # E4.4 — assessment event approval contract v1
 
+E4.5 update: [real Rails assessment integration](rails-assessment-integration.md) now
+connects the documented R4.2D control APIs and scoped uploader, with fresh upload consent,
+exact capture-time approvals and credential-generation checks. The historical implementation
+notes below describe earlier tasks. The real path is pinned to R4.2D; generic/manual uploads
+remain unchanged, and no Rails finalization request is implemented.
+
+
 ## Availability and trust boundary
 
 This implements **extension-side capture, durable verification and request preparation**.

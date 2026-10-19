@@ -1,0 +1,40 @@
+{
+  "contract": "R4.1D/R4.2B/R4.2D",
+  "status": {
+    "coding_session_id": "42",
+    "state": "paired",
+    "server_time": "2030-01-01T10:00:00.000Z",
+    "local_recording_session_ids": []
+  },
+  "pair": {
+    "coding_session_id": "42",
+    "api_origin": "https://assessment.example.test",
+    "upload_endpoint": "https://assessment.example.test/api/v2/coding_session/extension/events",
+    "credential": "adt_ext_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "credential_expires_at": "2030-01-01T12:00:00.000Z",
+    "status": {}
+  },
+  "receipt": {
+    "consent_id": "33333333-3333-4333-8333-333333333333",
+    "local_recording_session_id": "22222222-2222-4222-8222-222222222222",
+    "consent_version": "assessment-evidence.v1",
+    "scope": "assessment_evidence",
+    "approved_workspace_ids": [
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    "event_types": [
+      "file.modified"
+    ],
+    "destination_origin": "https://assessment.example.test",
+    "consented_at": "2030-01-01T10:00:01.000Z",
+    "expires_at": "2030-01-01T11:00:00.000Z",
+    "server_time": "2030-01-01T10:00:01.000Z",
+    "state": "active",
+    "evidence_window": {
+      "starts_at": "2030-01-01T10:00:01.000Z",
+      "ends_at": "2030-01-01T11:00:00.000Z"
+    },
+    "upload_authorized": false,
+    "privacy_authorization": "unverified"
+  }
+}

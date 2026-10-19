@@ -1,7 +1,7 @@
 import { request, Agent } from 'node:https';
 
 export interface UploadHttpResponse { status: number; retryAfter?: string; contentType?: string; body: string }
-export interface UploadHttpRequest { endpoint: URL; token: string; body: string; signal: AbortSignal; method?: 'POST' | 'DELETE' }
+export interface UploadHttpRequest { endpoint: URL; token?: string; body: string; signal: AbortSignal; method?: 'POST' | 'DELETE' | 'GET' }
 export interface UploadTransport { send(request: UploadHttpRequest): Promise<UploadHttpResponse> }
 export class UploadTransportError extends Error {
 	constructor(readonly category: 'network' | 'configuration' | 'protocol') { super('HTTPS event request failed.'); }
@@ -24,11 +24,11 @@ export class HttpsEventTransport implements UploadTransport {
 	}
 	send(input: UploadHttpRequest): Promise<UploadHttpResponse> {
 		const endpoint = validatedUploadEndpoint(input.endpoint.href);
-		if (!/^[\x21-\x7e]{1,8192}$/.test(input.token)) { return Promise.reject(new UploadTransportError('configuration')); }
+		if (input.token !== undefined && !/^[\x21-\x7e]{1,8192}$/.test(input.token)) { return Promise.reject(new UploadTransportError('configuration')); }
 		return new Promise((resolve, reject) => {
 			const req = request(endpoint, { method: input.method ?? 'POST', agent: this.agent, rejectUnauthorized: true, signal: input.signal,
 				maxHeaderSize: 16384, headers: { 'Content-Type': 'application/json', 'Accept': 'application/json',
-					'Content-Length': Buffer.byteLength(input.body), 'Authorization': `Bearer ${input.token}` } }, response => {
+					'Content-Length': Buffer.byteLength(input.body), ...(input.token === undefined ? {} : { 'Authorization': `Bearer ${input.token}` }) } }, response => {
 				const chunks: Buffer[] = []; let bytes = 0;
 				response.on('data', (chunk: Buffer) => {
 					bytes += chunk.length;
