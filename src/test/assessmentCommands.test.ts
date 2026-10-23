@@ -16,4 +16,25 @@ suite('Assessment VS Code commands', () => {
 		assert.ok(text.includes('LOCAL MOCK ONLY')); assert.ok(text.includes('Submission is not complete'));
 		assert.ok(text.includes('offline time is unverified')); assert.equal(text.includes('codingSessionId'), false);
 	});
+	test('status distinguishes configured but unpaired Rails from missing configuration', () => {
+		const configured = formatAssessmentStatus({ state: 'unpaired', mode: 'rails', uploadConsent: false });
+		assert.ok(configured.includes('Rails assessment API configured. Use Pair Assessment to connect.'));
+		assert.equal(configured.includes('Configure assessment.apiOrigin'), false);
+		assert.equal(configured.includes('Rails assessment connected'), false);
+		assert.ok(formatAssessmentStatus({ state: 'unpaired', uploadConsent: false }).includes('Configure assessment.apiOrigin'));
+		assert.ok(formatAssessmentStatus({ state: 'unpaired', mode: 'mock', uploadConsent: false }).includes('LOCAL MOCK ONLY'));
+	});
+	test('registers the assessment origin in the active manifest and reads the user setting through the activation key', async () => {
+		const extension = vscode.extensions.all.find(candidate => candidate.packageJSON.name === 'ai-developer-tracker');
+		assert.ok(extension);
+		const contributed = extension.packageJSON.contributes.configuration.properties['ai-developer-tracker.assessment.apiOrigin'];
+		assert.equal(contributed.type, 'string'); assert.equal(contributed.scope, 'machine'); assert.equal(contributed.restricted, true);
+		const configuration = vscode.workspace.getConfiguration('ai-developer-tracker.assessment');
+		assert.equal(configuration.inspect<string>('apiOrigin')?.defaultValue, '');
+		const previous = configuration.inspect<string>('apiOrigin')?.globalValue;
+		try {
+			await configuration.update('apiOrigin', 'https://assessment.invalid', vscode.ConfigurationTarget.Global);
+			assert.equal(vscode.workspace.getConfiguration('ai-developer-tracker.assessment').inspect<string>('apiOrigin')?.globalValue, 'https://assessment.invalid');
+		} finally { await configuration.update('apiOrigin', previous, vscode.ConfigurationTarget.Global); }
+	});
 });

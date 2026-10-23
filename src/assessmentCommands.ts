@@ -9,7 +9,11 @@ export const REVOKE_ASSESSMENT_CREDENTIAL_COMMAND = 'ai-developer-tracker.revoke
 export const ASSESSMENT_STATUS_COMMAND = 'ai-developer-tracker.showAssessmentStatus';
 
 export function formatAssessmentStatus(view: AssessmentView): string {
-	const lines = [`Assessment: ${view.state.replace(/_/g, ' ')}`, view.mode === 'mock' ? 'LOCAL MOCK ONLY — no Rails backend connected.' : view.mode === 'rails' ? 'Rails assessment connected. Finalization is not available in this build.' : 'Configure assessment.apiOrigin in user settings and reload to pair with Rails.'];
+	const backendStatus = view.mode === 'mock' ? 'LOCAL MOCK ONLY — no Rails backend connected.'
+		: view.mode === 'rails' ? view.state === 'unpaired' ? 'Rails assessment API configured. Use Pair Assessment to connect.'
+			: 'Rails assessment connected. Finalization is not available in this build.'
+			: 'Configure assessment.apiOrigin in user settings and reload to pair with Rails.';
+	const lines = [`Assessment: ${view.state.replace(/_/g, ' ')}`, backendStatus];
 	if (view.uploadStatus) { lines.push(`Assessment delivery: ${view.uploadStatus}`); }
 	if (view.reason) { lines.push(`Status code: ${view.reason}`); }
 	if (view.deadline) { lines.push(`Server deadline: ${view.deadline}`, `Last server time: ${view.serverTime}`, 'Timing is the last server snapshot; offline time is unverified.'); }

@@ -4,6 +4,7 @@ import { RecordingController } from '../recording';
 import { AssessmentController, type AssessmentEvidence, type AssessmentView } from '../assessmentController';
 import { AssessmentConnectionStore, ASSESSMENT_METADATA_KEY, type AssessmentStore, type AssessmentMetadata } from '../assessmentStorage';
 import { AssessmentApiError, MockAssessmentApiClient, UnavailableAssessmentApiClient } from '../assessmentApiClient';
+import { RailsAssessmentApiClient } from '../railsAssessmentApiClient';
 
 suite('Assessment lifecycle foundation', () => {
 	let controller: AssessmentController; let recording: RecordingController; let mock: MockAssessmentApiClient; let store: AssessmentStore;
@@ -38,6 +39,20 @@ suite('Assessment lifecycle foundation', () => {
 		newRecording(); newController(); await controller.initialize();
 	});
 	teardown(async () => { await controller.dispose(); recording.dispose(); });
+
+	test('exposes the configured Rails mode before pairing without creating a connection or sending requests', async () => {
+		await controller.dispose();
+		let requests = 0;
+		const api = new RailsAssessmentApiClient('https://assessment.invalid', { send: async () => { requests++; throw new Error('Unexpected request'); } });
+		controller = new AssessmentController(api, store, recording, evidence, async () => true, view => views.push(view));
+		try {
+			await controller.initialize(); await controller.showStatus();
+			assert.equal(controller.mode, 'rails'); assert.equal(controller.view.state, 'unpaired');
+			assert.equal(controller.view.mode, 'rails'); assert.equal(views.at(-1)?.mode, 'rails');
+			assert.equal(controller.view.uploadConsent, false); assert.equal(recording.isRecording, false);
+			assert.equal(requests, 0); assert.equal(state.size, 0); assert.equal(secrets.size, 0);
+		} finally { api.dispose(); }
+	});
 
 	test('pairing preserves Rails identity, writes only allowlisted metadata and stores credentials only in SecretStorage', async () => {
 		await paired(); assert.equal(recording.isRecording, false); assert.equal(metadata().connection.codingSessionId, '42');

@@ -71,7 +71,8 @@ export class AssessmentController {
 	get mode(): AssessmentApiClient['mode'] { return this.api.mode; }
 	get view(): AssessmentView {
 		const status = this.metadata?.serverStatus;
-		return { state: this.phase, ...(this.metadata ? { mode: this.metadata.connection.mode } : {}), ...(this.reason ? { reason: this.reason } : {}),
+		const mode = this.metadata?.connection.mode ?? (this.api.mode === 'unavailable' ? undefined : this.api.mode);
+		return { state: this.phase, ...(mode ? { mode } : {}), ...(this.reason ? { reason: this.reason } : {}),
 			...(status ? { serverTime: status.serverTime, ...(status.deadline ? { deadline: status.deadline,
 				remainingMsAtLastCheck: Math.max(0, Date.parse(status.deadline) - Date.parse(status.serverTime)) } : {}) } : {}),
 			...(this.pendingEvents !== undefined ? { pendingEvents: this.pendingEvents } : {}), uploadConsent: this.consent, ...(this.delivery?.status ? { uploadStatus: this.delivery.status } : {}) };
