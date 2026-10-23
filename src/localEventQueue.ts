@@ -1,3 +1,4 @@
+import { validFinalizationRequest, type AssessmentFinalizationRequest, type FinalizationScope } from './assessmentFinalization';
 import { createAssessmentEventApproval, type AssessmentApprovalBinding } from './assessmentEventApproval';
 import { createEvidenceApproval, verifyEvidenceApproval, validOrigin, type EvidenceApproval } from './evidenceApproval';
 import { consentCoversEvent, validConsentState, utcTime, type EvidenceConsentState } from './evidenceConsent';
@@ -6,7 +7,7 @@ import type { UploadRetryState, UploadPauseReason } from './uploadState';
 import { MAX_DELIVERY_BATCH_BYTES, type PreparedEventBatch, type DeliveryStatus } from './eventBatchManager';
 import { constants } from 'node:fs';
 import { chmod, lstat, mkdir, open, realpath, stat } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { Uri } from 'vscode';
@@ -19,7 +20,7 @@ export const MAX_QUEUE_BATCH = 1000;
 // Allow JSON escaping overhead for diffs up to the common schema's 2 MiB limit.
 export const MAX_QUEUE_EVENT_BYTES = 16 * 1024 * 1024;
 export const DEFAULT_QUEUE_STORAGE_BYTES = 100 * 1024 * 1024;
-export const QUEUE_DATABASE_VERSION = 8;
+export const QUEUE_DATABASE_VERSION = 9;
 // Shared with the worker proxy to distinguish live threads from abandoned threads in this process.
 export const QUEUE_PROCESS_INSTANCE_ID = randomUUID();
 export const ACTIVE_QUEUE_OWNERS = new Set<string>();
@@ -173,7 +174,7 @@ export class LocalEventQueue {
 			database = new DatabaseSync(path, { allowExtension: false });
 			database.exec('PRAGMA busy_timeout = 1000; PRAGMA synchronous = FULL; PRAGMA trusted_schema = OFF;');
 			const version = database.prepare('PRAGMA user_version').get()?.user_version;
-			if (![0, 1, 2, 3, 4, 5, 6, 7, QUEUE_DATABASE_VERSION].includes(Number(version))) { throw new LocalEventQueueError('Unsupported queue database version.'); }
+			if (![0, 1, 2, 3, 4, 5, 6, 7, 8, QUEUE_DATABASE_VERSION].includes(Number(version))) { throw new LocalEventQueueError('Unsupported queue database version.'); }
 			const integrity = database.prepare('PRAGMA integrity_check(1)').all();
 			if (integrity.length !== 1 || integrity[0].integrity_check !== 'ok') {
 				throw new LocalEventQueueError('Queue database integrity check failed.', 'corrupt');
@@ -280,6 +281,12 @@ export class LocalEventQueue {
 						CREATE TABLE approval_revocations (session_id TEXT PRIMARY KEY, revocation_json TEXT NOT NULL) STRICT;
 						PRAGMA user_version = 8;`);
 				}
+				if (database.prepare('PRAGMA user_version').get()?.user_version === 8) {
+					database.exec(`CREATE TABLE assessment_finalizations (request_id TEXT PRIMARY KEY, snapshot_json TEXT NOT NULL) STRICT;
+						CREATE TABLE finalization_recordings (session_id TEXT PRIMARY KEY REFERENCES recording_sessions(session_id),
+						request_id TEXT NOT NULL REFERENCES assessment_finalizations(request_id)) STRICT;
+						PRAGMA user_version = 9;`);
+				}
 				queue.verifyCounters();
 				queue.verifyDeliveryState();
 				const pageSize = Number(database!.prepare('PRAGMA page_size').get()?.page_size);
@@ -337,6 +344,9 @@ export class LocalEventQueue {
 					if (!raced.acknowledged && this.database.prepare('SELECT 1 FROM event_approvals WHERE event_id = ?').get(eventId)
 						&& JSON.stringify(this.readStoredEvent(raced)) !== json) { throw new LocalEventQueueError('Conflicting approved event.'); }
 					return;
+				}
+				if (this.database.prepare('SELECT 1 FROM finalization_recordings WHERE session_id = ?').get(validation.event.sessionId)) {
+					throw new LocalEventQueueError('Recording evidence is frozen.');
 				}
 				let encryptedApproval: string | undefined;
 				if (proof && !this.isApprovalRevoked(validation.event.sessionId)) {
@@ -709,6 +719,65 @@ export class LocalEventQueue {
 		})));
 	}
 
+	/** Snapshot all original IDs (including acknowledged tombstones) on the storage worker.
+	 * No payload or event-ID list is returned. SQLite serializes freezing with collection and retention. */
+	freezeFinalization(scope: FinalizationScope, existingOnly = false): Promise<AssessmentFinalizationRequest> {
+		const selection = structuredClone(scope);
+		return this.schedule(async () => {
+			const ids = selection.localRecordingSessionIds;
+			if (!isUuid(selection.requestId) || selection.requestId !== selection.requestId.toLowerCase()
+				|| !/^[1-9][0-9]{0,19}$/.test(selection.codingSessionId) || !validOrigin(selection.origin)
+				|| !Array.isArray(ids) || !ids.length || ids.length > 32 || !ids.every(id => isUuid(id) && id === id.toLowerCase()) || new Set(ids).size !== ids.length) {
+				throw new LocalEventQueueError('Invalid finalization scope.');
+			}
+			if (!this.cipher) { throw new EvidenceEncryptionError('key_missing'); }
+			let request!: AssessmentFinalizationRequest;
+			await this.writeWithReservation(32768, () => {
+				this.assertCollectionAllowed();
+				request = { contract_version: 1, request_id: selection.requestId, recordings: [] };
+				for (const id of [...ids].sort()) {
+					const session = this.database.prepare('SELECT status FROM recording_sessions WHERE session_id = ?').get(id);
+					const consent = this.readEvidenceConsent(id);
+					if (!session || !['completed', 'interrupted', 'incomplete'].includes(String(session.status))
+						|| !consent || consent.codingSessionId !== selection.codingSessionId || consent.origin !== selection.origin
+						|| !consent.captureClosed || consent.locallyRevoked || consent.pendingAction || consent.receipt?.state !== 'stopped'
+						|| this.isApprovalRevoked(id)) { throw new LocalEventQueueError('Recording cannot be reconciled.'); }
+					const hash = createHash('sha256'); hash.update('['); let count = 0;
+					for (const row of this.database.prepare(`SELECT e.event_id, e.event_json, e.payload_format, e.session_id, e.acknowledged, a.approval_json
+						FROM queued_events e LEFT JOIN event_approvals a ON a.event_id = e.event_id WHERE e.session_id = ? ORDER BY e.event_id`).iterate(id)) {
+						const eventId = String(row.event_id);
+						if (!isUuid(eventId) || eventId !== eventId.toLowerCase() || !row.approval_json || row.payload_format !== 1) { throw new LocalEventQueueError('Unapproved evidence.'); }
+						const proof = this.cipher!.decrypt(eventId, JSON.parse(String(row.approval_json)), 'approval') as EvidenceApproval;
+						if (!row.acknowledged) { verifyEvidenceApproval(proof, this.readStoredEvent(row)); }
+						// Acknowledged payloads have been removed; their immutable, authenticated capture approvals remain.
+						const envelope = proof?.assessmentEventApproval;
+						if (proof?.version !== 2 || proof.eventId !== eventId || proof.sessionId !== id
+							|| proof.assessment?.codingSessionId !== selection.codingSessionId || proof.assessment.origin !== selection.origin
+							|| proof.assessment.consentId !== consent.receipt.consent_id || envelope?.eventId !== eventId
+							|| envelope.localRecordingSessionId !== id || envelope.consentReceiptId !== consent.receipt.consent_id
+							|| !consent.receipt.approved_workspace_ids.includes(proof.workspaceId) || !consent.receipt.event_types.includes(proof.eventType)) {
+							throw new LocalEventQueueError('Unapproved evidence.');
+						}
+						hash.update((count++ ? ',' : '') + JSON.stringify(eventId));
+					}
+					hash.update(']'); request.recordings.push({ local_recording_session_id: id, event_count: count, event_ids_sha256: hash.digest('hex') });
+				}
+				if (!validFinalizationRequest(request)) { throw new LocalEventQueueError('Invalid frozen manifest.'); }
+				const stored = this.database.prepare('SELECT snapshot_json FROM assessment_finalizations WHERE request_id = ?').get(selection.requestId);
+				const snapshot = { codingSessionId: selection.codingSessionId, origin: selection.origin, request };
+				if (stored) {
+					const previous = this.cipher!.decrypt(selection.requestId, JSON.parse(String(stored.snapshot_json)), 'finalization');
+					if (JSON.stringify(previous) !== JSON.stringify(snapshot)) { throw new LocalEventQueueError('Frozen manifest conflict.'); }
+				} else {
+					if (existingOnly) { throw new LocalEventQueueError('Frozen manifest unavailable.'); }
+					this.database.prepare('INSERT INTO assessment_finalizations VALUES (?, ?)').run(selection.requestId,
+						JSON.stringify(this.cipher!.encrypt(selection.requestId, JSON.stringify(snapshot), 'finalization')));
+					for (const id of ids) { this.database.prepare('INSERT INTO finalization_recordings VALUES (?, ?)').run(id, selection.requestId); }
+				}
+			}); return request;
+		});
+	}
+
 	/** Indexed metadata-only delivery check. Missing/retained-away recordings cannot prove delivery. */
 	getSessionEvidenceStatus(sessionIds: readonly string[]): Promise<{ totalEvents: number; pendingEvents: number; missingSessions: number }> {
 		return this.schedule(() => {
@@ -819,6 +888,7 @@ export class LocalEventQueue {
 				try {
 					this.database.prepare(`INSERT INTO cleanup_sessions SELECT session_id FROM recording_sessions s WHERE status != 'active'
 						AND ended_at IS NOT NULL AND ended_at < ?
+						AND NOT EXISTS (SELECT 1 FROM finalization_recordings f WHERE f.session_id = s.session_id)
 						AND NOT EXISTS (SELECT 1 FROM queued_events e WHERE e.session_id = s.session_id
 							AND (acknowledged = 0 OR acknowledged_at IS NULL OR acknowledged_at >= ?))`).run(cutoff, cutoff);
 					result = this.deleteSelectedSessions(false);
@@ -833,6 +903,8 @@ export class LocalEventQueue {
 			UPDATE delivery_members SET claimed = 0 WHERE batch_id IN (SELECT batch_id FROM delivery_batches WHERE status = 'released');
 			DELETE FROM delivery_members WHERE event_id IN (SELECT event_id FROM queued_events ${all ? '' : 'WHERE session_id IN (SELECT session_id FROM cleanup_sessions)'});
 			DELETE FROM delivery_batches WHERE NOT EXISTS (SELECT 1 FROM delivery_members m WHERE m.batch_id = delivery_batches.batch_id);`);
+		this.database.exec(`DELETE FROM finalization_recordings ${all ? '' : 'WHERE session_id IN (SELECT session_id FROM cleanup_sessions)'};
+			DELETE FROM assessment_finalizations WHERE NOT EXISTS (SELECT 1 FROM finalization_recordings f WHERE f.request_id = assessment_finalizations.request_id);`);
 		this.database.exec(`DELETE FROM event_approvals WHERE event_id IN (SELECT event_id FROM queued_events ${all ? '' : 'WHERE session_id IN (SELECT session_id FROM cleanup_sessions)'});
 			DELETE FROM evidence_consents ${all ? '' : 'WHERE session_id IN (SELECT session_id FROM cleanup_sessions)'};
 			DELETE FROM approval_revocations ${all ? '' : 'WHERE session_id IN (SELECT session_id FROM cleanup_sessions)'};`);

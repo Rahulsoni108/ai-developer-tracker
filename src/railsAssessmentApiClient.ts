@@ -1,3 +1,4 @@
+import { validFinalizationRequest, receiptMatches } from './assessmentFinalization';
 import { createHash } from 'node:crypto';
 import { isUuid } from './eventSchema';
 import { AssessmentApiError, type AssessmentApiClient, type AssessmentAuthentication, type AssessmentConnection, type AssessmentServerStatus } from './assessmentApiClient';
@@ -57,7 +58,16 @@ export class RailsAssessmentApiClient implements AssessmentApiClient, EvidenceCo
 		const data = await this.send('/credential', 'DELETE', {}, auth, signal);
 		if (!exactObject(data, ['revoked']) || data.revoked !== true) { throw new AssessmentApiError('protocol'); }
 	}
-	async submit(): Promise<never> { throw new AssessmentApiError('finalization_unavailable'); }
+	async submit(auth: AssessmentAuthentication, request: Parameters<AssessmentApiClient['submit']>[1], signal: AbortSignal): Promise<AssessmentServerStatus> {
+		const frozen = request.finalization;
+		if (!validFinalizationRequest(frozen) || frozen.request_id !== request.requestId
+			|| JSON.stringify(frozen.recordings.map(row => row.local_recording_session_id).sort()) !== JSON.stringify([...request.localRecordingSessionIds].sort())
+			|| frozen.recordings.reduce((sum, row) => sum + row.event_count, 0) !== request.retainedEventCount) { throw new AssessmentApiError('protocol'); }
+		const status = this.status(await this.send('/finalize', 'POST', frozen, auth, signal), auth.connection);
+		if (status.state !== 'submitted' || !receiptMatches(status.submission, frozen)
+			|| JSON.stringify([...status.localRecordingSessionIds].sort()) !== JSON.stringify([...request.localRecordingSessionIds].sort())) { throw new AssessmentApiError('protocol'); }
+		return status;
+	}
 	register(auth: AssessmentAuthentication, state: EvidenceConsentState, signal: AbortSignal) { this.checkAuth(auth); return this.consents.register(auth, state, signal); }
 	stop(auth: AssessmentAuthentication, state: EvidenceConsentState, signal: AbortSignal) { this.checkAuth(auth); return this.consents.stop(auth, state, signal); }
 	revoke(auth: AssessmentAuthentication, state: EvidenceConsentState, signal: AbortSignal) { this.checkAuth(auth); return this.consents.revoke(auth, state, signal); }
@@ -87,10 +97,10 @@ export class RailsAssessmentApiClient implements AssessmentApiClient, EvidenceCo
 			|| !/^adt_ext_[A-Za-z0-9_-]{43}$/.test(auth.credential)) { throw new AssessmentApiError('authentication'); }
 	}
 	private status(value: unknown, connection: AssessmentConnection): AssessmentServerStatus {
-		if (!exactObject(value, ['coding_session_id', 'state', 'server_time', 'local_recording_session_ids'], ['started_at', 'deadline'])
-			|| !['paired', 'active'].includes(value.state as string) || !utcTime(value.server_time)
+		if (!exactObject(value, ['coding_session_id', 'state', 'server_time', 'local_recording_session_ids'], ['started_at', 'deadline', 'submission'])
+			|| !['paired', 'active', 'submitted'].includes(value.state as string) || !utcTime(value.server_time)
 			|| value.started_at !== undefined && !utcTime(value.started_at) || value.deadline !== undefined && !utcTime(value.deadline)) { throw new AssessmentApiError('protocol'); }
-		const status = { codingSessionId: value.coding_session_id, state: value.state, serverTime: value.server_time,
+		const status = { ...(value.submission === undefined ? {} : { submission: value.submission }), codingSessionId: value.coding_session_id, state: value.state, serverTime: value.server_time,
 			localRecordingSessionIds: value.local_recording_session_ids, ...(value.started_at === undefined ? {} : { startedAt: value.started_at }),
 			...(value.deadline === undefined ? {} : { deadline: value.deadline }) } as AssessmentServerStatus;
 		if (!validServerStatus(status, connection) || status.state === 'paired' && (status.localRecordingSessionIds.length || status.startedAt !== undefined || status.deadline !== undefined)
@@ -104,7 +114,7 @@ export class RailsAssessmentApiClient implements AssessmentApiClient, EvidenceCo
 			const response = await this.transport.send({ endpoint: new URL(BASE + path, this.origin), method, ...(auth ? { token: auth.credential } : {}),
 				body: body === undefined ? '' : JSON.stringify(body), signal: AbortSignal.any([signal, AbortSignal.timeout(this.timeoutMs)]) });
 			if ([401, 403].includes(response.status)) { throw new AssessmentApiError('authentication'); }
-			if (response.status !== 200) { throw new AssessmentApiError(response.status === 409 || response.status === 422 ? 'rejected'
+			if (response.status !== 200) { throw new AssessmentApiError(response.status === 409 && path === '/finalize' ? 'evidence_pending' : response.status === 409 || response.status === 422 ? 'rejected'
 				: response.status >= 300 && response.status < 400 ? 'protocol' : 'unavailable'); }
 			if (!/^application\/json(?:\s*;|$)/i.test(response.contentType ?? '')) { throw new AssessmentApiError('protocol'); }
 			const envelope = parseRailsControlResponse(response.body);

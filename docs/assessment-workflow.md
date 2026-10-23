@@ -1,11 +1,9 @@
-> E4.3 update: see [durable approvals and the actual Rails consent contract](durable-evidence-approval.md). The control contract below is the older mock proposal; the real pairing/start/status adapter remains unavailable.
-
-E4.5 update: [real Rails assessment integration](rails-assessment-integration.md) now
-connects the documented R4.2D control APIs and scoped uploader, with fresh upload consent,
-exact capture-time approvals and credential-generation checks. The historical implementation
-notes below describe earlier tasks. The real path is pinned to R4.2D; generic/manual uploads
-remain unchanged, and no Rails finalization request is implemented.
-
+> Current implementation: [real Rails control/upload integration](rails-assessment-integration.md)
+> and [E4.6 durable finalization](assessment-finalization.md). The E4.1 text below is
+> historical design/test context; its proposed count-only `/submit` endpoint and mock
+> response shapes are not the production R4.3 contract. The extension sends `/finalize`
+> with frozen per-recording ID manifests and validates the immutable submission receipt.
+> Manual uploads and separate recording/upload/source consent remain unchanged.
 
 # Assessment workflow foundation — E4.1
 

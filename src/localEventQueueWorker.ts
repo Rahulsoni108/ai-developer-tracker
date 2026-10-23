@@ -1,3 +1,4 @@
+import type { FinalizationScope } from './assessmentFinalization';
 import type { AssessmentApprovalBinding } from './assessmentEventApproval';
 import type { UploadPrivacyContext } from './uploadPrivacyContext';
 import type { EvidenceConsentState } from './evidenceConsent';
@@ -59,6 +60,8 @@ async function run(): Promise<void> {
 			try {
 				let value: unknown;
 				switch (request.operation) {
+					case 'freezeFinalization': { const args = request.argument as { scope: FinalizationScope; existingOnly: boolean };
+						value = await queue.freezeFinalization(args.scope, args.existingOnly); break; }
 					case 'getUploadRetryState': value = await queue.getUploadRetryState(); break;
 					case 'configureUpload': await queue.configureUpload(request.argument as string); break;
 					case 'claimUploadAttempt': {

@@ -1,3 +1,4 @@
+import { validSubmissionReceipt } from './assessmentFinalization';
 import type { Memento, SecretStorage } from 'vscode';
 import { utcTime } from './evidenceConsent';
 import { isUuid } from './eventSchema';
@@ -33,6 +34,10 @@ export function validServerStatus(value: AssessmentServerStatus, connection: Ass
 		&& /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/.test(timestamp) && Number.isFinite(Date.parse(timestamp));
 	return !!value && value.codingSessionId === connection.codingSessionId && ['paired', 'active', 'submitted', 'expired', 'revoked'].includes(value.state)
 		&& utc(value.serverTime)
+		&& (value.submission === undefined ? connection.mode !== 'rails' || value.state !== 'submitted'
+			: value.state === 'submitted' && validSubmissionReceipt(value.submission) && utc(value.startedAt) && utc(value.deadline)
+				&& Date.parse(value.submission.submitted_at) >= Date.parse(value.startedAt) && Date.parse(value.submission.submitted_at) < Date.parse(value.deadline)
+				&& Date.parse(value.submission.submitted_at) <= Date.parse(value.serverTime) && value.submission.recording_count === value.localRecordingSessionIds?.length)
 		&& Array.isArray(value.localRecordingSessionIds) && value.localRecordingSessionIds.length <= 32 && value.localRecordingSessionIds.every(isUuid)
 		&& new Set(value.localRecordingSessionIds).size === value.localRecordingSessionIds.length
 		&& ((['paired', 'revoked', 'expired'].includes(value.state) && value.startedAt === undefined && value.deadline === undefined)
@@ -57,10 +62,10 @@ export class AssessmentConnectionStore implements AssessmentStore {
 	}
 	save(value: AssessmentMetadata): Promise<void> {
 		const { codingSessionId, apiOrigin, uploadEndpoint, mode, credentialExpiresAt } = value.connection;
-		const { state, serverTime, startedAt, deadline, localRecordingSessionIds } = value.serverStatus;
+		const { state, serverTime, startedAt, deadline, localRecordingSessionIds, submission } = value.serverStatus;
 		const snapshot: AssessmentMetadata = { version: 1, connection: { codingSessionId, apiOrigin, uploadEndpoint, mode, ...(credentialExpiresAt ? { credentialExpiresAt } : {}) }, credentialId: value.credentialId,
 			phase: value.phase, localRecordingSessionIds: [...value.localRecordingSessionIds], submitRequestId: value.submitRequestId,
-			serverStatus: { codingSessionId, state, serverTime, ...(startedAt ? { startedAt } : {}), ...(deadline ? { deadline } : {}), localRecordingSessionIds: [...localRecordingSessionIds] } };
+			serverStatus: { codingSessionId, state, serverTime, ...(startedAt ? { startedAt } : {}), ...(deadline ? { deadline } : {}), localRecordingSessionIds: [...localRecordingSessionIds], ...(submission ? { submission: structuredClone(submission) } : {}) } };
 		const write = this.writes.then(async () => { await this.state.update(ASSESSMENT_METADATA_KEY, snapshot); });
 		this.writes = write.catch(() => {}); return write;
 	}

@@ -1,13 +1,13 @@
-# E4.5 — real Rails control and scoped event delivery
+# Real Rails control and scoped event delivery (E4.5 / E4.6)
 
 The extension now has a real `RailsAssessmentApiClient` and an assessment-scoped
 `EventUploader` path for the inspected hiring-manager R4.1D/R4.2B/R4.2D contracts.
-No Rails/React files change, no new backend is introduced, and **finalization remains
-unimplemented**. Tests use a local mock HTTPS server, not real candidate accounts.
+E4.6 adds [durable R4.3 finalization](assessment-finalization.md).
+No Rails/React files change and no new backend is introduced. Tests use a local mock HTTPS server, not real candidate accounts.
 
 ## Setup and user workflow
 
-1. Deploy the reviewed Rails R4.2D release and migrations with its configured HTTPS
+1. Deploy the reviewed Rails R4.3 release (including R4.2D) and migrations with its configured HTTPS
    `BACKEND_URL` origin, TLS certificates and evidence-encryption keys. Configure the
    same trusted origin in **user settings** as `ai-developer-tracker.assessment.apiOrigin`,
    for example `https://assessment.example.com`, then reload VS Code. Empty/invalid
@@ -32,8 +32,9 @@ unimplemented**. Tests use a local mock HTTPS server, not real candidate account
    uploader runs asynchronously; network retries do not participate in collector writes.
 6. **Stop & Submit Assessment** stops and drains local producers, closes the Rails capture
    window and keeps eligible evidence delivery available while consent/credential/deadline
-   remain valid. Submission remains pending even after all valid acknowledgments: no Rails
-   submit/finalize endpoint exists, and the real client never invents one or reports success.
+   remain valid. E4.6 freezes encrypted manifests for all recordings and calls the documented
+   R4.3 `/finalize` endpoint only after all evidence is acknowledged. Success requires a
+   validated immutable submission receipt; outages leave submission pending.
 7. After restart, recording and upload consent remain off. Status/binding recovery and
    closure of an old capture window are read/reconciled using the original IDs/deadline.
    Use **Enable Assessment Uploads** for fresh destination consent to deliver retained
@@ -67,11 +68,11 @@ The generic development upload token is never copied or used for an assessment.
 | Close capture | POST `/api/v2/coding_session/extension/evidence_consents/stop` | Same two-field mutation | `{data:receipt}` with closed window |
 | Revoke credential | DELETE `/api/v2/coding_session/extension/credential` | `{}` | `{data:{revoked:true}}` |
 | Upload events | POST to the Rails-issued `/api/v2/coding_session/extension/events` | `{contractVersion:1,batchId,events,eventApprovals}` | Flat `{contractVersion:1,batchId,durablyAcceptedEventIds}` |
-| Finalize | **Unavailable** | No HTTP request | Local `finalization_unavailable`; submission pending |
+| Finalize | POST `/api/v2/coding_session/extension/finalize` | `{contract_version:1,request_id,recordings:[{local_recording_session_id,event_count,event_ids_sha256}]}` | `{data:status}` with validated immutable `submission` receipt |
 
 `status` uses exact snake_case Rails fields: `coding_session_id`, `state`, `server_time`,
 `local_recording_session_ids`, with `started_at` and `deadline` omitted when paired and
-required when active. Timing is canonical UTC with three fractional digits. Rails returns
+required when active or submitted. Submitted status includes the exact R4.3 `submission` receipt. Timing is canonical UTC with three fractional digits. Rails returns
 safe 401 errors for ineligible/expired/revoked/ended sessions, not invented terminal 200
 objects. The adapter translates names into the existing typed controller seam while
 preserving all wire names/bodies. Unknown fields/states, wrong owners, timing changes,
@@ -147,7 +148,7 @@ fixed status codes, not pairing codes, tokens, server bodies, source paths or ev
   Rails build, trusted `BACKEND_URL`/upload origin, TLS, encryption, migrations, browser
   OTP/pair-code UI and real VS Code source capture together. No live Rails/React changes
   or real candidate uploads are performed by these tests.
-- Finalization and upload grace do not exist. Stop never stops the official timer. Upload
+- R4.3 finalization is implemented; no upload grace exists. Stop never stops the official timer. Upload
   must complete before receipt/credential/assessment expiry; pending evidence is retained
   safely if authorization expires. There is no automatic acknowledgment or local timer reset.
 - Credential rotation invalidates prior receipt-generation authorization on both sides.
@@ -186,9 +187,9 @@ Modified files:
 - `docs/assessment-workflow.md`, `docs/durable-evidence-approval.md`,
   `docs/event-approval-contract.md`, `docs/event-uploader.md`.
 
-No normalized event,
-wire approval, flat acknowledgment, SQLite schema, encryption-key format or package
-dependency changes are introduced.
+E4.5 introduced no event/approval/acknowledgment, schema, key-format or dependency changes.
+E4.6 adds encrypted SQLite manifest metadata (schema v9), with unchanged normalized events,
+approval sidecars, flat acknowledgments, keys and dependencies. See the finalization document.
 
 Validation completed for E4.5:
 

@@ -59,6 +59,8 @@ export class AssessmentEvidenceConsent implements AssessmentConsentLifecycle {
 		return this.serial(async () => {
 			let state = await this.queue.getEvidenceConsent(localSessionId); if (!state) { return; }
 			this.checkOwner(state, auth);
+			// A confirmed closed receipt is durable across restarts; never mutate a submitted assessment.
+			if (action === 'stop' && state.captureClosed && !state.locallyRevoked && !state.pendingAction && state.receipt?.state === 'stopped') { return; }
 			state = { ...state, captureClosed: true, locallyRevoked: state.locallyRevoked || action === 'revoke',
 				pendingAction: state.locallyRevoked || action === 'revoke' ? 'revoke' : 'stop' };
 			await this.queue.setEvidenceConsent(state); // Survives network failure/restart; never pretend server success.

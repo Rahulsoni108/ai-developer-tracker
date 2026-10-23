@@ -11,7 +11,7 @@ export const ASSESSMENT_STATUS_COMMAND = 'ai-developer-tracker.showAssessmentSta
 export function formatAssessmentStatus(view: AssessmentView): string {
 	const backendStatus = view.mode === 'mock' ? 'LOCAL MOCK ONLY — no Rails backend connected.'
 		: view.mode === 'rails' ? view.state === 'unpaired' ? 'Rails assessment API configured. Use Pair Assessment to connect.'
-			: 'Rails assessment connected. Finalization is not available in this build.'
+			: 'Rails assessment connected. Submission requires durable evidence reconciliation and a verified server receipt.'
 			: 'Configure assessment.apiOrigin in user settings and reload to pair with Rails.';
 	const lines = [`Assessment: ${view.state.replace(/_/g, ' ')}`, backendStatus];
 	if (view.uploadStatus) { lines.push(`Assessment delivery: ${view.uploadStatus}`); }
@@ -19,7 +19,8 @@ export function formatAssessmentStatus(view: AssessmentView): string {
 	if (view.deadline) { lines.push(`Server deadline: ${view.deadline}`, `Last server time: ${view.serverTime}`, 'Timing is the last server snapshot; offline time is unverified.'); }
 	if (view.pendingEvents !== undefined) { lines.push(`Pending assessment events: ${view.pendingEvents}`); }
 	lines.push(`Assessment upload consent: ${view.uploadConsent ? 'granted for this run' : 'required'}`);
-	if (view.state === 'submission_pending') { lines.push('Submission is not complete. Pending evidence stays in encrypted SQLite.'); }
+	if (view.state === 'submission_pending') { lines.push(view.reason ? 'Submission is not complete and requires recovery. Use Stop & Submit again to retry the same submission; pending evidence remains encrypted.' : 'Submission is not complete; submission is in progress. Success requires a verified Rails receipt.'); }
+	if (view.state === 'submitted') { lines.push(view.mode === 'mock' ? 'Local mock submission completed (simulation).' : 'Assessment successfully submitted to the server. Assessment capture and uploads are stopped.'); }
 	return lines.join('\n');
 }
 

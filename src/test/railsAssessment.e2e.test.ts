@@ -1,3 +1,5 @@
+import { canonicalSha256 } from '../canonicalJson';
+import { validFinalizationRequest, type AssessmentFinalizationRequest, type AssessmentSubmissionReceipt } from '../assessmentFinalization';
 import * as assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:https';
 import type { ServerResponse } from 'node:http';
@@ -48,10 +50,11 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 	let received: UploadBody[]; let accepted: Set<string>; let serverBindings: string[]; let starts: Map<string, string>; let startedAt: string | undefined; let deadline: string | undefined;
 	let revoked: boolean; let codeUsed: boolean; let failStart: boolean; let uploadMode: string; let controlMutation: ((path: string, data: unknown) => unknown) | undefined;
 	let holdUpload: (() => void) | undefined; let failRegistration: boolean;
+	let submission: AssessmentSubmissionReceipt | undefined; let finalized: AssessmentFinalizationRequest | undefined; let finalizeMode: string;
 	const storage = () => ({ scheme: 'file', fsPath: join(root, 'queue') });
 	const metadata = () => state.get(ASSESSMENT_METADATA_KEY) as AssessmentMetadata;
 	const identity = async (): Promise<AssessmentAuthentication> => ({ connection: metadata().connection, credential: (await store.getCredential(metadata().credentialId))! });
-	const status = () => ({ ...fixture.status, server_time: stamp(), state: startedAt ? 'active' : 'paired',
+	const status = () => ({ ...fixture.status, server_time: stamp(), state: submission ? 'submitted' : startedAt ? 'active' : 'paired', ...(submission ? { submission } : {}),
 		local_recording_session_ids: [...serverBindings], ...(startedAt ? { started_at: startedAt, deadline } : {}) });
 	function json(response: ServerResponse, data: unknown, statusCode = 200): void {
 		response.writeHead(statusCode, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(data));
@@ -71,6 +74,7 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 			{ baseDelayMs: 100, maxDelayMs: 200, timeoutMs: 500, maxBytes: 16384 });
 		controller = new AssessmentController(api, store, recording, {
 			flushStopped: async id => { await persistence.flush(); await persistence.completeSession(id); },
+			freezeFinalization: (scope, existingOnly) => queue.freezeFinalization(scope, existingOnly),
 			getStatus: ids => queue.getSessionEvidenceStatus(ids), disableDevelopmentUploads: async () => {}
 		}, async hostname => { assert.equal(hostname, '127.0.0.1'); return uploadConsent; }, () => {}, 1500,
 		new AssessmentEvidenceConsent(queue, api, () => ({ workspaceIds: [WORKSPACE], eventTypes: ['file.modified', 'ai.prompt.submitted', 'ai.response.completed'] })), delivery);
@@ -100,6 +104,7 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 		receipts = new Map(); requests = []; received = []; accepted = new Set(); serverBindings = []; starts = new Map();
 		startedAt = undefined; deadline = undefined; revoked = false; codeUsed = false; failStart = false; uploadMode = 'success'; controlMutation = undefined;
 		uploadConsent = true; recordingConsent = true; holdUpload = undefined; failRegistration = false;
+		submission = undefined; finalized = undefined; finalizeMode = 'success';
 		server = createServer({ key, cert }, (request, response) => { void (async () => {
 			const chunks: Buffer[] = []; for await (const chunk of request) { chunks.push(Buffer.from(chunk)); }
 			const path = request.url!; const body = Buffer.concat(chunks).length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
@@ -114,6 +119,27 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 			}
 			if (!authenticated || revoked) { json(response, { error: 'Unauthorized.' }, 401); return; }
 			if (path === BASE + '/status') { assert.equal(request.method, 'GET'); assert.deepEqual(body, {}); control(status()); return; }
+			if (path === BASE + '/finalize') {
+				assert.equal(request.method, 'POST');
+				if (!validFinalizationRequest(body)) { json(response, { error: 'Invalid finalization.' }, 422); return; }
+				if (finalizeMode === 'offline') { request.socket.destroy(); return; }
+				if (finalizeMode === 'unavailable') { json(response, { error: 'Unavailable.' }, 503); return; }
+				if (finalized && JSON.stringify(finalized) !== JSON.stringify(body)) { json(response, { error: 'Conflict.' }, 409); return; }
+				if (!submission) {
+					if (Date.parse(deadline!) <= Date.now()) { json(response, { error: 'Expired.' }, 401); return; }
+					assert.deepEqual(body.recordings.map(row => row.local_recording_session_id).sort(), [...serverBindings].sort());
+					for (const row of body.recordings) {
+						const receipt = receipts.get(row.local_recording_session_id); assert.equal(receipt?.state, 'stopped');
+						const ids = [...accepted].filter(id => received.some(batch => batch.events.some(event => event.eventId === id && event.sessionId === row.local_recording_session_id))).sort();
+						if (row.event_count !== ids.length || row.event_ids_sha256 !== canonicalSha256(ids)) { json(response, { error: 'Evidence pending.' }, 409); return; }
+					}
+					finalized = structuredClone(body); submission = { contract_version: 1, request_id: body.request_id, submitted_at: stamp(),
+						event_count: body.recordings.reduce((sum, row) => sum + row.event_count, 0), recording_count: body.recordings.length };
+				}
+				if (finalizeMode === 'lost') { request.socket.destroy(); return; }
+				control(status()); return;
+			}
+			if (submission && path !== BASE + '/credential') { json(response, { error: 'Submitted.' }, 401); return; }
 			if (path === BASE + '/start') {
 				assert.deepEqual(Object.keys(body).sort(), ['local_recording_session_id', 'request_id']);
 				if (failStart) { json(response, { error: 'Temporarily unavailable.' }, 503); return; }
@@ -287,13 +313,138 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 		assert.equal(accepted.has(legacy.eventId), false); assert.equal(await queue.getPendingCount(), 2);
 	});
 
-	test('Stop and Submit closes capture, uploads eligible evidence, and never calls unsupported finalization', async () => {
-		await pairStart(); await captureFile(); await controller.stopAndSubmit();
-		assert.equal(recording.isRecording, false); assert.equal(controller.view.state, 'submission_pending');
-		await until(async () => await queue.getPendingCount() === 0, 'stopped evidence'); await controller.stopAndSubmit();
-		assert.equal(controller.view.state, 'submission_pending'); assert.equal(controller.view.reason, 'finalization_unavailable');
-		assert.equal([...receipts.values()][0].state, 'stopped');
-		assert.equal(requests.some(request => /submit|finaliz/.test(request.path)), false);
+	test('Stop and Submit closes capture, freezes all IDs including acknowledged events, and verifies durable Rails finalization', async () => {
+		await pairStart(); const first = await captureFile(); await until(() => accepted.has(first.eventId), 'early acknowledgment');
+		const last = await captureFile(); await controller.stopAndSubmit();
+		if (controller.view.state !== 'submitted') { await until(async () => await queue.getPendingCount() === 0, 'remaining uploads'); await controller.stopAndSubmit(); }
+		assert.equal(recording.isRecording, false); assert.equal(controller.view.state, 'submitted');
+		assert.equal([...receipts.values()][0].state, 'stopped'); assert.equal(delivery.status, 'disabled'); assert.equal(controller.view.uploadConsent, false);
+		assert.equal(finalized!.recordings[0].event_count, 2); assert.equal(finalized!.recordings[0].event_ids_sha256, canonicalSha256([first.eventId, last.eventId].sort()));
+		assert.equal(metadata().serverStatus.submission?.request_id, metadata().submitRequestId);
+		const calls = requests.filter(request => request.path.endsWith('/finalize')).length;
+		await controller.stopAndSubmit(); await controller.enableUploads(); await controller.start();
+		assert.equal(recording.isRecording, false); assert.equal(delivery.status, 'disabled');
+		assert.equal(requests.filter(request => request.path.endsWith('/finalize')).length, calls);
+	});
+
+	test('Stop drains a final producer checkpoint before capture closure and freezes every event', async () => {
+		await pairStart(); const captured = await captureFile(); let checkpoint: TrackerEvent | undefined;
+		const listener = recording.addLifecycleListener({ prepare: async () => {}, started: () => {}, cancelled: () => {}, stopped: id => {
+			checkpoint = createFileEvent({ sessionId: id, workspaceId: WORKSPACE, source: 'vscode', eventType: 'file.modified', payload: { relativePath: 'src/final.ts' } });
+			void persistence.write(checkpoint);
+		} });
+		try {
+			await controller.stopAndSubmit();
+			if (controller.view.state !== 'submitted') { await until(async () => await queue.getPendingCount() === 0, 'final checkpoint'); await controller.stopAndSubmit(); }
+			assert.equal(controller.view.state, 'submitted'); assert.ok(checkpoint); assert.equal(accepted.has(checkpoint.eventId), true);
+			assert.equal(finalized!.recordings[0].event_ids_sha256, canonicalSha256([captured.eventId, checkpoint.eventId].sort()));
+		} finally { listener.dispose(); }
+	});
+
+	test('server reconciliation failure preserves the identical manifest rather than shrinking it to accepted evidence', async () => {
+		await pairStart(); const captured = await captureFile(); await until(async () => accepted.has(captured.eventId) && await queue.getPendingCount() === 0, 'accepted event'); accepted.delete(captured.eventId);
+		await controller.stopAndSubmit(); assert.equal(controller.view.state, 'submission_pending'); assert.equal(controller.view.reason, 'evidence_pending');
+		const attempted = requests.find(request => request.path.endsWith('/finalize'))!.body;
+		assert.equal((attempted.recordings as { event_count: number }[])[0].event_count, 1);
+		accepted.add(captured.eventId); await controller.stopAndSubmit(); assert.equal(controller.view.state, 'submitted'); assert.deepEqual(finalized, attempted);
+	});
+
+	test('already-submitted status without a frozen local manifest never establishes success or creates approval', async () => {
+		await pairStart(); recording.stop(); await persistence.flush();
+		submission = { contract_version: 1, request_id: metadata().submitRequestId, submitted_at: stamp(), event_count: 0, recording_count: 1 };
+		await controller.showStatus(); assert.notEqual(controller.view.state, 'submitted'); assert.equal(controller.view.reason, 'recovery_required');
+		const scope = { codingSessionId: '42', origin, requestId: metadata().submitRequestId, localRecordingSessionIds: metadata().localRecordingSessionIds };
+		await assert.rejects(queue.freezeFinalization(scope, true));
+	});
+
+	test('revocation during submission upload cancels finalization and preserves unacknowledged evidence', async () => {
+		uploadMode = 'auth'; await pairStart(); await captureFile(); await until(() => received.length > 0, 'initial failed upload');
+		await delivery.disable(); uploadMode = 'hold';
+		const stopping = controller.stopAndSubmit(); await until(() => !!holdUpload, 'submission delivery');
+		await controller.revokeUploadConsent(); holdUpload!(); await stopping;
+		assert.equal(controller.view.uploadConsent, false); assert.equal(submission, undefined); assert.equal(recording.isRecording, false);
+		assert.equal(await queue.getPendingCount(), 1); assert.equal(requests.some(request => request.path.endsWith('/finalize')), false);
+	});
+
+	test('empty approved recording finalizes with the exact empty-array digest', async () => {
+		await pairStart(); await controller.stopAndSubmit(); assert.equal(controller.view.state, 'submitted');
+		assert.equal(finalized!.recordings[0].event_count, 0);
+		assert.equal(finalized!.recordings[0].event_ids_sha256, '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945');
+	});
+
+	for (const mode of ['offline', 'unavailable', 'lost']) {
+		test('durable finalization survives ' + mode + ' and restart without changing the request or manifest', async () => {
+			await pairStart(); await captureFile(); await until(async () => await queue.getPendingCount() === 0, 'acknowledgment');
+			finalizeMode = mode; await controller.stopAndSubmit(); assert.equal(controller.view.state, 'submission_pending');
+			const attempted = requests.find(request => request.path.endsWith('/finalize'))!.body;
+			const originalDeadline = metadata().serverStatus.deadline;
+			await stopPipeline(); finalizeMode = 'success'; await makePipeline();
+			if (mode !== 'lost') { assert.equal(controller.view.state, 'submission_pending'); await controller.stopAndSubmit(); }
+			assert.equal(controller.view.state, 'submitted'); assert.equal(recording.isRecording, false);
+			assert.deepEqual(finalized, attempted); assert.equal(metadata().serverStatus.deadline, originalDeadline);
+			assert.equal(controller.view.uploadConsent, false);
+			const before = requests.length; await controller.showStatus();
+			assert.equal(requests.slice(before).some(request => request.path.includes('/evidence_consents')), false);
+		});
+	}
+
+	test('partial/failed uploads cannot finalize and retries keep the frozen manifest and original IDs', async () => {
+		uploadMode = 'auth'; await pairStart(); const events = [await captureFile(), await captureFile()];
+		await until(() => received.length > 0, 'failed upload'); await controller.stopAndSubmit();
+		assert.equal(controller.view.state, 'submission_pending'); assert.equal(submission, undefined); assert.equal(await queue.getPendingCount(), 2);
+		const scope = { codingSessionId: '42', origin, requestId: metadata().submitRequestId, localRecordingSessionIds: metadata().localRecordingSessionIds };
+		const snapshot = await queue.freezeFinalization(scope, true);
+		uploadMode = 'partial'; await controller.enableUploads(); await until(async () => await queue.getPendingCount() < 2, 'partial acknowledgment');
+		uploadMode = 'success'; await until(async () => await queue.getPendingCount() === 0, 'full acknowledgment'); await controller.stopAndSubmit();
+		assert.equal(controller.view.state, 'submitted'); assert.deepEqual(finalized, snapshot);
+		assert.equal(finalized!.recordings[0].event_ids_sha256, canonicalSha256(events.map(event => event.eventId).sort()));
+	});
+
+	for (const field of ['request_id', 'event_count', 'recording_count', 'submitted_at', 'contract_version']) {
+		test('rejects invalid submission receipt ' + field + ' without claiming success', async () => {
+			await pairStart();
+			controlMutation = (path, data) => {
+				if (!path.endsWith('/finalize') && !path.endsWith('/status') || !(data as Record<string, unknown>).submission) { return data; }
+				return { ...(data as object), submission: { ...submission!, [field]: field === 'request_id' ? randomUUID() : field === 'submitted_at' ? '2099-01-01T00:00:00.000Z' : 999 } };
+			};
+			await controller.stopAndSubmit(); assert.equal(controller.view.state, 'submission_pending'); assert.equal(controller.view.reason, 'protocol');
+			controlMutation = undefined; await controller.showStatus(); assert.equal(controller.view.state, 'submitted');
+		});
+	}
+
+	test('an invalid status receipt cannot poison the accepted metadata or prevent later valid recovery', async () => {
+		await pairStart(); finalizeMode = 'lost'; await controller.stopAndSubmit(); assert.equal(controller.view.state, 'submission_pending');
+		controlMutation = (path, data) => path.endsWith('/status') ? { ...(data as object), submission: { ...submission!, event_count: 999 } } : data;
+		await controller.showStatus(); assert.equal(controller.view.reason, 'protocol'); assert.equal(metadata().serverStatus.submission, undefined);
+		controlMutation = undefined; await controller.showStatus(); assert.equal(controller.view.state, 'submitted');
+	});
+
+	test('missing runtime upload consent after restart cannot submit or upload, and expired/revoked credentials stay pending', async () => {
+		uploadMode = 'auth'; await pairStart(); await captureFile(); await until(() => received.length > 0, 'pending event');
+		await controller.stopAndSubmit(); await stopPipeline(); uploadConsent = false; uploadMode = 'success'; await makePipeline();
+		const before = received.length; await controller.stopAndSubmit();
+		assert.equal(controller.view.reason, 'consent_required'); assert.equal(received.length, before); assert.equal(submission, undefined);
+		uploadConsent = true; revoked = true; await controller.stopAndSubmit(); assert.equal(controller.view.reason, 'authentication');
+		assert.equal(await queue.getPendingCount(), 1); assert.equal(submission, undefined);
+	});
+
+	test('exact duplicate finalization and submitted status recover after the original deadline without uploads', async () => {
+		await pairStart(); await controller.stopAndSubmit(); assert.equal(controller.view.state, 'submitted');
+		const frozen = finalized!; const receipt = structuredClone(submission!); const auth = await identity(); const original = deadline!;
+		controlMutation = (_path, data) => ({ ...(data as object), server_time: new Date(Date.parse(original) + 1000).toISOString(),
+			submission: Object.fromEntries(Object.entries(receipt).reverse()) });
+		const result = await api.submit(auth, { requestId: frozen.request_id, localRecordingSessionIds: serverBindings, retainedEventCount: 0, finalization: frozen }, AbortSignal.timeout(1000));
+		assert.deepEqual(result.submission, receipt); await controller.showStatus(); assert.equal(controller.view.state, 'submitted');
+		await assert.rejects(api.submit(auth, { requestId: randomUUID(), localRecordingSessionIds: serverBindings, retainedEventCount: 0,
+			finalization: { ...frozen, request_id: randomUUID() } }, AbortSignal.timeout(1000)), AssessmentApiError);
+		assert.equal(received.length, 0); assert.equal(metadata().serverStatus.deadline, original);
+	});
+
+	test('deadline expiry never resets timing or reports successful submission', async () => {
+		await pairStart(); const originalDeadline = metadata().serverStatus.deadline;
+		controlMutation = (path, data) => path.endsWith('/status') ? { ...(data as object), server_time: originalDeadline } : data;
+		await controller.stopAndSubmit(); assert.equal(recording.isRecording, false); assert.notEqual(controller.view.state, 'submitted');
+		assert.equal(submission, undefined); assert.equal(metadata().serverStatus.deadline, originalDeadline);
 	});
 
 	test('safe credential revocation stops assessment capture/uploads and removes only its SecretStorage token', async () => {

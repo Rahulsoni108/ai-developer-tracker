@@ -43,12 +43,12 @@ export class EvidenceCipher {
 		finally { for (const entry of Array.isArray(material?.keys) ? material.keys : []) { if (entry?.bytes instanceof ArrayBuffer) { new Uint8Array(entry.bytes).fill(0); } } }
 	}
 	hasKey(keyId: string): boolean { return this.keys.has(keyId); }
-	private aad(eventId: string, keyId: string, domain: 'event' | 'approval' | 'consent' | 'revocation'): Buffer {
+	private aad(eventId: string, keyId: string, domain: 'event' | 'approval' | 'consent' | 'revocation' | 'finalization'): Buffer {
 		if (!isUuid(eventId)) { throw new EvidenceEncryptionError('authentication_failed'); }
 		// Domain separation and immutable indexing/format metadata. Mutable ack/sequence are not event payloads.
 		return Buffer.from(JSON.stringify([`ai-developer-tracker.sqlite-${domain}`, 1, 'AES-256-GCM', keyId, eventId]));
 	}
-	encrypt(eventId: string, plaintext: string, domain: 'event' | 'approval' | 'consent' | 'revocation' = 'event'): EncryptedEvidence {
+	encrypt(eventId: string, plaintext: string, domain: 'event' | 'approval' | 'consent' | 'revocation' | 'finalization' = 'event'): EncryptedEvidence {
 		const bytes = Buffer.from(plaintext, 'utf8');
 		try {
 			if (bytes.length > MAX_PLAINTEXT_BYTES) { throw new Error(); }
@@ -61,7 +61,7 @@ export class EvidenceCipher {
 		} catch { throw new EvidenceEncryptionError('authentication_failed'); }
 		finally { bytes.fill(0); }
 	}
-	decrypt(eventId: string, value: unknown, domain: 'event' | 'approval' | 'consent' | 'revocation' = 'event'): unknown {
+	decrypt(eventId: string, value: unknown, domain: 'event' | 'approval' | 'consent' | 'revocation' | 'finalization' = 'event'): unknown {
 		let plaintext: Buffer | undefined;
 		try {
 			if (!value || typeof value !== 'object' || Array.isArray(value)) { throw new Error(); }

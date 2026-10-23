@@ -1,3 +1,4 @@
+import type { AssessmentFinalizationRequest, AssessmentSubmissionReceipt } from './assessmentFinalization';
 import { randomUUID } from 'node:crypto';
 
 export type AssessmentServerState = 'paired' | 'active' | 'submitted' | 'expired' | 'revoked';
@@ -12,6 +13,7 @@ export interface AssessmentConnection {
 export interface AssessmentServerStatus {
 	codingSessionId: string;
 	state: AssessmentServerState;
+	submission?: AssessmentSubmissionReceipt;
 	serverTime: string;
 	startedAt?: string;
 	deadline?: string;
@@ -25,7 +27,7 @@ export interface AssessmentApiClient {
 	startOrResume(auth: AssessmentAuthentication, request: { requestId: string; localRecordingSessionId: string }, signal: AbortSignal): Promise<AssessmentServerStatus>;
 	revokeCredential?(auth: AssessmentAuthentication, signal: AbortSignal): Promise<void>;
 	getStatus(auth: AssessmentAuthentication, signal: AbortSignal): Promise<AssessmentServerStatus>;
-	submit(auth: AssessmentAuthentication, request: { requestId: string; localRecordingSessionIds: string[]; retainedEventCount: number }, signal: AbortSignal): Promise<AssessmentServerStatus>;
+	submit(auth: AssessmentAuthentication, request: { requestId: string; localRecordingSessionIds: string[]; retainedEventCount: number; finalization?: AssessmentFinalizationRequest }, signal: AbortSignal): Promise<AssessmentServerStatus>;
 }
 export type AssessmentFailure = 'unavailable' | 'rejected' | 'authentication' | 'protocol' | 'storage' | 'consent_required'
 	| 'finalization_unavailable' | 'recording_busy' | 'evidence_pending' | 'cancelled' | 'session_ended' | 'recovery_required';
@@ -80,7 +82,7 @@ export class MockAssessmentApiClient implements AssessmentApiClient {
 		run.status.state = 'active'; return structuredClone(run.status);
 	}
 	async getStatus(auth: AssessmentAuthentication, signal: AbortSignal) { return structuredClone(this.authorize(auth, signal).status); }
-	async submit(auth: AssessmentAuthentication, request: { requestId: string; localRecordingSessionIds: string[]; retainedEventCount: number }, signal: AbortSignal) {
+	async submit(auth: AssessmentAuthentication, request: { requestId: string; localRecordingSessionIds: string[]; retainedEventCount: number; finalization?: AssessmentFinalizationRequest }, signal: AbortSignal) {
 		const run = this.authorize(auth, signal);
 		if (run.status.state === 'submitted') { return structuredClone(run.status); }
 		if (run.status.state !== 'active' || JSON.stringify(request.localRecordingSessionIds) !== JSON.stringify(run.status.localRecordingSessionIds)

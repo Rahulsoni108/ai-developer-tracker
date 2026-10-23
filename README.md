@@ -6,7 +6,7 @@ AI Developer Tracker is a VS Code extension for an AI-assisted developer assessm
 
 Candidates can currently use development recording commands in a local coding workspace. The intended integrated experience associates that evidence with an existing Rails coding-interview attempt, with separate recording/upload consent, a server-authorized start and reliable submission.
 
-**Current status:** recording, local storage, AI adapters and upload infrastructure are implemented and covered by automated tests. [E4.5](docs/rails-assessment-integration.md) adds real Rails pairing/start/status/consent APIs and scoped evidence uploads for the reviewed R4.2D contract. Configure a trusted HTTPS `assessment.apiOrigin` in user settings; it is empty/disabled by default. Finalization is unavailable, so real Stop & Submit stays pending. Live deployment verification is still required.
+**Current status:** recording, local storage, AI adapters and upload infrastructure are implemented and covered by automated tests. [E4.5](docs/rails-assessment-integration.md) adds real Rails pairing/start/status/consent APIs and scoped evidence uploads for the reviewed R4.2D contract. Configure a trusted HTTPS `assessment.apiOrigin` in user settings; it is empty/disabled by default. [E4.6](docs/assessment-finalization.md) adds real Stop & Submit with frozen encrypted manifests, durable acknowledgment reconciliation and validated Rails R4.3 receipts. Live deployment verification is still required.
 
 ## 2. Technology Stack
 
@@ -39,7 +39,7 @@ These capabilities have implementation and automated coverage. That does not imp
 | Encrypted queue | New events use AES-256-GCM SQLite storage. Queue-first persistence preserves IDs, FIFO order, deduplication and acknowledgment state. |
 | Recovery and limits | Integrity checks, committed-event recovery, interrupted-session metadata, queue health and configurable capacity. Restart does not resume recording or restore consent. |
 | Delivery infrastructure | Persistent batch ownership, partial acknowledgments, valid HTTPS/TLS, timeouts/cancellation, exponential backoff with jitter, bounded Retry-After handling and authentication/configuration pauses. |
-| Assessment foundation | Pair, Start, Stop & Submit and Status commands; lifecycle/recovery states, separate Rails/local identities, immutable server-timing checks and real Rails control/consent APIs and scoped approved-event uploads; explicit mock remains available, real finalization remains pending. |
+| Assessment foundation | Pair, Start, Stop & Submit and Status commands; lifecycle/recovery states, separate Rails/local identities, immutable server-timing checks and real Rails control/consent APIs and scoped approved-event uploads; explicit mock remains available; R4.3 finalization freezes manifests and verifies server submission receipts. |
 | Diagnostics | Queue health, latest-recording retained pending event-type counts, metadata-only JSONL and explicit cleanup controls. |
 
 **Live Claude CLI/model testing is pending.** Codex and Claude have automated coverage using representative records/hooks; installed-version compatibility still needs manual verification. Real Rails deployment and candidate workflow verification remain pending.
@@ -175,7 +175,7 @@ The event summary decrypts/validates inside the storage worker and returns only 
 7. The extension records approved workspace and AI activity through privacy filtering and encrypted storage.
 8. The candidate clicks **Stop & Submit Assessment**. Capture stops and flushes; durable event acknowledgments and server finalization are required before success. Network failure leaves submission pending.
 
-Rails R4.1A–D provides a prepared VS Code mode and server-authoritative Start while preserving browser interviews. This extension preserves original timing. Finalization is not implemented: real Stop & Submit remains pending even after valid event acknowledgments.
+Rails R4.1A–D provides a prepared VS Code mode and server-authoritative Start while preserving browser interviews. This extension preserves original timing. Stop & Submit uses the [R4.3 finalization contract](docs/assessment-finalization.md). Partial uploads or unavailable authorization keep submission pending; only a verified receipt establishes success.
 
 ### Try the implemented local mock
 
@@ -237,7 +237,7 @@ For Claude, follow [the launch/consent procedure](docs/claude-code-integration.m
 - Rails assessment lifecycle changes and official-start timing compatible with existing interviews.
 - OTP-verified extension pairing and Rails-issued scoped upload credentials.
 - Rails event ingestion/storage, durable receipt/completeness verification and assessment-scoped delivery.
-- Real server-authoritative start/submission, including an explicit late-upload policy if needed.
+- Live verification of real server-authoritative start, approved evidence delivery and R4.3 finalization (no upload grace is assumed).
 - An agreed Rails event-privacy authorization protocol; old events without capture-time proofs remain blocked.
 - Next.js candidate pairing/onboarding/start/submission integration.
 - Recruiter evidence review and analytics UI.

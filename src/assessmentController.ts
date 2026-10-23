@@ -1,3 +1,4 @@
+import { receiptMatches, type AssessmentFinalizationRequest, type FinalizationScope } from './assessmentFinalization';
 import type { AssessmentDeliveryLifecycle } from './assessmentEventDelivery';
 import type { AssessmentConsentLifecycle } from './assessmentEvidenceConsent';
 import { randomUUID } from 'node:crypto';
@@ -11,6 +12,7 @@ export interface AssessmentEvidence {
 	flushStopped(localSessionId: string): Promise<void>;
 	getStatus(localSessionIds: readonly string[]): Promise<AssessmentEvidenceStatus>;
 	disableDevelopmentUploads(): Promise<void>;
+	freezeFinalization?(scope: FinalizationScope, existingOnly?: boolean): Promise<AssessmentFinalizationRequest>;
 }
 export interface AssessmentView {
 	state: AssessmentState; mode?: 'mock' | 'rails'; reason?: AssessmentFailure; serverTime?: string; deadline?: string;
@@ -31,6 +33,7 @@ export class AssessmentController {
 	private busy?: Promise<void>;
 	private request?: AbortController;
 	private starting = false;
+	private submitting = false;
 	private generation = 0;
 	private readonly lifecycle: { dispose(): void };
 	private consentWork: Promise<void> = Promise.resolve();
@@ -86,7 +89,7 @@ export class AssessmentController {
 		if (this.starting) { this.recording.stop(); }
 		this.set(this.phase, 'consent_required');
 		const auth = this.auth;
-		if (this.evidenceConsents && auth) {
+		if (this.evidenceConsents && auth && this.metadata?.serverStatus.state !== 'submitted') {
 			const tasks = (this.metadata?.localRecordingSessionIds ?? []).map(id => this.evidenceConsents!.revoke(auth, id, AbortSignal.timeout(this.requestTimeoutMs)));
 			this.consentWork = Promise.all(tasks).then(() => {}, () => { this.set(this.phase, 'recovery_required'); });
 		}
@@ -98,7 +101,7 @@ export class AssessmentController {
 			if (!this.metadata) { this.set('unpaired'); return; }
 			this.set('recovery'); await this.authenticate(); await this.refresh();
 			// A process restart cannot leave an old capture window implicitly open. No recording/upload is resumed.
-			if (this.evidenceConsents) {
+			if (this.evidenceConsents && this.metadata.serverStatus.state !== 'submitted') {
 				for (const id of this.metadata.localRecordingSessionIds) { await this.closeStoppedConsent(id); }
 			}
 		});
@@ -121,6 +124,7 @@ export class AssessmentController {
 	start(): Promise<void> {
 		const generation = this.generation;
 		return this.run(async () => {
+			if (this.phase === 'submitted') { return; }
 			if (this.recording.isRecording && this.isAssociatedSession(this.recording.sessionId!)) { this.set('active'); return; }
 			if (this.recording.isRecording || this.recording.isStarting) { throw new AssessmentApiError('recording_busy'); }
 			if (!this.metadata) { throw new AssessmentApiError('rejected'); }
@@ -150,40 +154,55 @@ export class AssessmentController {
 			if (!this.metadata.localRecordingSessionIds.length && this.metadata.serverStatus.state === 'paired') {
 				this.consent = false; await this.save('paired'); this.set('paired'); return;
 			}
-			const local = this.recording.sessionId;
-			this.set('stopping'); if (local) { this.recording.stop(); }
-			// Durable stop intent precedes drains/network; never restart a stopped assessment as a side effect of retry.
-			await this.save('submission_pending');
-			for (const id of this.metadata.localRecordingSessionIds) {
-				await this.evidence.flushStopped(id);
-				if (this.evidenceConsents && this.auth) { await this.closeStoppedConsent(id); }
-			}
-			await this.authenticate(); await this.refresh();
-			const delivery = await this.evidence.getStatus(this.metadata.localRecordingSessionIds); this.pendingEvents = delivery.pendingEvents;
-			if (delivery.pendingEvents || delivery.missingSessions || !this.metadata.localRecordingSessionIds.length) {
-				this.set('submission_pending', 'evidence_pending'); return;
-			}
-			if (!['active', 'submitted'].includes(this.metadata.serverStatus.state)) { this.set('submission_pending', 'session_ended'); return; }
-			if (!this.consent) {
-				const generation = this.generation;
-				const accepted = await this.confirmUpload(new URL(this.metadata.connection.uploadEndpoint).hostname);
-				if (!accepted || this.disposed || generation !== this.generation) {
-					this.consent = false; this.set('submission_pending', 'consent_required'); return;
+			this.submitting = true; const generation = this.generation;
+			try {
+				const local = this.recording.sessionId;
+				this.set('stopping'); if (local) { this.recording.stop(); }
+				await this.save('submission_pending'); // Durable intent prevents recording restart even if closure fails.
+				await this.delivery?.disable();
+				for (const id of this.metadata.localRecordingSessionIds) { await this.evidence.flushStopped(id); }
+				await this.authenticate(); await this.refresh();
+				if (this.metadata.serverStatus.state === 'submitted') { return; } // Verified recovery receipt, no consent mutations/uploads.
+				if (this.metadata.serverStatus.state !== 'active') { throw new AssessmentApiError('session_ended'); }
+				for (const id of this.metadata.localRecordingSessionIds) {
+					if (this.evidenceConsents) { await this.closeStoppedConsent(id); }
 				}
-				this.consent = true;
-			}
-			const status = await this.call(signal => this.api.submit(this.auth!, { requestId: this.metadata!.submitRequestId,
-				localRecordingSessionIds: [...this.metadata!.localRecordingSessionIds], retainedEventCount: delivery.totalEvents }, signal));
-			this.accept(status);
-			if (status.state !== 'submitted') { throw new AssessmentApiError('protocol'); }
-			await this.save('submitted'); this.set('submitted');
+				let frozen: AssessmentFinalizationRequest | undefined;
+				if (this.metadata.connection.mode === 'rails') { frozen = await this.freeze(); }
+				if (!this.consent) {
+					const generation = this.generation;
+					const accepted = await this.confirmUpload(new URL(this.metadata.connection.uploadEndpoint).hostname);
+					if (!accepted || this.disposed || generation !== this.generation) { throw new AssessmentApiError('consent_required'); }
+					this.consent = true;
+				}
+				await this.enableDelivery();
+				if (this.delivery?.drain) { await this.call(signal => this.delivery!.drain!(this.metadata!.localRecordingSessionIds, signal)); }
+				const evidence = await this.evidence.getStatus(this.metadata.localRecordingSessionIds); this.pendingEvents = evidence.pendingEvents;
+				if (evidence.pendingEvents || evidence.missingSessions || !this.metadata.localRecordingSessionIds.length) {
+					this.set('submission_pending', 'evidence_pending'); return;
+				}
+				// Stop the only delivery driver before reconciliation; no batches may race successful finalization.
+				await this.delivery?.disable();
+				if (frozen && (await this.freeze()).recordings.reduce((sum, row) => sum + row.event_count, 0) !== evidence.totalEvents) {
+					throw new AssessmentApiError('recovery_required');
+				}
+				if (!this.consent || generation !== this.generation || this.disposed) { throw new AssessmentApiError('consent_required'); }
+				const status = await this.call(signal => this.api.submit(this.auth!, { requestId: this.metadata!.submitRequestId,
+					localRecordingSessionIds: [...this.metadata!.localRecordingSessionIds], retainedEventCount: evidence.totalEvents,
+					...(frozen ? { finalization: frozen } : {}) }, signal));
+				this.accept(status);
+				if (status.state !== 'submitted' || frozen && !receiptMatches(status.submission, frozen)) { throw new AssessmentApiError('protocol'); }
+				this.consent = false; await this.save('submitted'); this.set('submitted');
+			} finally { this.submitting = false; }
+
 		}));
 	}
 	enableUploads(): Promise<void> {
 		return this.run(async () => {
+			if (this.phase === 'submitted') { return; }
 			if (!this.metadata || !this.delivery || this.metadata.connection.mode !== 'rails') { throw new AssessmentApiError('unavailable'); }
 			await this.authenticate(); await this.refresh();
-			if (!this.metadata.localRecordingSessionIds.length) { throw new AssessmentApiError('consent_required'); }
+			if (this.metadata.serverStatus.state !== 'active' || !this.metadata.localRecordingSessionIds.length) { throw new AssessmentApiError('consent_required'); }
 			const generation = this.generation;
 			const accepted = await this.confirmUpload(new URL(this.metadata.connection.uploadEndpoint).hostname);
 			if (!accepted || generation !== this.generation || this.disposed) { this.consent = false; await this.delivery?.disable(); this.set(this.phase, 'consent_required'); return; }
@@ -205,7 +224,7 @@ export class AssessmentController {
 		}));
 	}
 	private async enableDelivery(): Promise<void> {
-		if (this.disposed || !this.delivery || !this.metadata || !this.consent || this.metadata.connection.mode !== 'rails') { return; }
+		if (this.disposed || !this.delivery || !this.metadata || !this.consent || this.metadata.serverStatus.state !== 'active' || this.metadata.connection.mode !== 'rails') { return; }
 		try { await this.delivery.enable(this.metadata, () => this.consent && !this.disposed); }
 		catch { this.set(this.phase, 'evidence_pending'); } // Network delivery cannot stop or block local collectors.
 	}
@@ -218,7 +237,7 @@ export class AssessmentController {
 			await this.delivery?.disable();
 			await this.evidence.flushStopped(id);
 			if (auth && this.evidenceConsents) { await this.evidenceConsents.close(auth, id, AbortSignal.timeout(this.requestTimeoutMs)); }
-			await this.enableDelivery();
+			if (!this.submitting) { await this.enableDelivery(); }
 		})();
 		this.closingSessions.set(id, work);
 		this.consentWork = work.catch(() => { this.closingSessions.delete(id); this.set('submission_pending', 'recovery_required'); });
@@ -232,7 +251,12 @@ export class AssessmentController {
 		this.auth = { connection: this.metadata.connection, credential };
 	}
 	private async refresh(): Promise<void> {
-		const status = await this.call(signal => this.api.getStatus(this.auth!, signal)); this.accept(status);
+		const status = await this.call(signal => this.api.getStatus(this.auth!, signal));
+		// Verify recovery receipts before replacing the last accepted snapshot. A malformed
+		// status must not poison immutable receipt comparisons on the next retry.
+		if (this.metadata!.connection.mode === 'rails' && status.state === 'submitted'
+			&& !receiptMatches(status.submission, await this.freeze(true))) { throw new AssessmentApiError('protocol'); }
+		this.accept(status);
 		// Reconcile an interrupted start only after the server explicitly reports its durable bindings.
 		const unbound = this.metadata!.localRecordingSessionIds.filter(id => !status.localRecordingSessionIds.includes(id));
 		if (unbound.length) {
@@ -244,6 +268,7 @@ export class AssessmentController {
 			const id = this.recording.sessionId!; this.recording.stop(); await this.evidence.flushStopped(id);
 		}
 		if (status.state === 'submitted') {
+			await this.delivery?.disable(); this.consent = false;
 			const evidence = await this.evidence.getStatus(this.metadata!.localRecordingSessionIds);
 			if (evidence.pendingEvents || evidence.missingSessions || !this.metadata!.localRecordingSessionIds.length) {
 				this.pendingEvents = evidence.pendingEvents; await this.save('submission_pending'); this.set('submission_pending', 'evidence_pending'); return;
@@ -259,8 +284,17 @@ export class AssessmentController {
 		if (!validServerStatus(status, metadata.connection) || status.localRecordingSessionIds.some(id => !metadata.localRecordingSessionIds.includes(id))
 			|| metadata.serverStatus.localRecordingSessionIds.some(id => !status.localRecordingSessionIds.includes(id))
 			|| metadata.serverStatus.deadline && (status.deadline !== metadata.serverStatus.deadline || status.startedAt !== metadata.serverStatus.startedAt)
-			|| Date.parse(status.serverTime) < Date.parse(metadata.serverStatus.serverTime)) { throw new AssessmentApiError('protocol'); }
+			|| Date.parse(status.serverTime) < Date.parse(metadata.serverStatus.serverTime)
+			|| metadata.connection.mode === 'rails' && status.state === 'submitted' && status.submission?.request_id !== metadata.submitRequestId
+			|| metadata.serverStatus.submission && (!status.submission || Object.entries(metadata.serverStatus.submission).some(([key, value]) => status.submission![key as keyof typeof status.submission] !== value))) { throw new AssessmentApiError('protocol'); }
 		metadata.serverStatus = structuredClone(status);
+	}
+	private async freeze(existingOnly = false): Promise<AssessmentFinalizationRequest> {
+		if (!this.metadata || !this.evidence.freezeFinalization) { throw new AssessmentApiError('recovery_required'); }
+		try { return await this.evidence.freezeFinalization({ codingSessionId: this.metadata.connection.codingSessionId,
+			origin: this.metadata.connection.apiOrigin, requestId: this.metadata.submitRequestId,
+			localRecordingSessionIds: [...this.metadata.localRecordingSessionIds] }, existingOnly); }
+		catch { throw new AssessmentApiError('recovery_required'); }
 	}
 	private async save(phase: AssessmentState): Promise<void> {
 		this.metadata!.phase = phase;

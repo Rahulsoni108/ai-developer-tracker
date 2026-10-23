@@ -11,6 +11,7 @@ import type { UploadTransport } from './httpsEventTransport';
 export interface AssessmentDeliveryLifecycle {
 	enable(metadata: AssessmentMetadata, consent: () => boolean): Promise<void>;
 	disable(): Promise<void>;
+	drain?(sessionIds: readonly string[], signal: AbortSignal): Promise<boolean>;
 	readonly status?: string;
 }
 /** One delivery worker for one explicitly approved paired assessment. No global upload token/copy. */
@@ -74,6 +75,21 @@ export class AssessmentEventDelivery implements AssessmentDeliveryLifecycle {
 	}
 	/** Used by deterministic integration checks/manual retry without creating a second driver. */
 	uploadOnce(): Promise<UploadOutcome> { return this.driver?.uploadOnce() ?? Promise.resolve('disabled'); }
+	/** Bounded foreground progress using the same serialized driver/SQLite retry lease.
+	 * A retry delay or partial acknowledgment leaves submission pending, without resetting backoff. */
+	async drain(sessionIds: readonly string[], signal: AbortSignal): Promise<boolean> {
+		const driver = this.driver; if (!driver) { return false; }
+		const cancel = () => driver.cancel(); signal.addEventListener('abort', cancel, { once: true });
+		try {
+			for (let batches = 0; batches < 128 && !signal.aborted && this.driver === driver; batches++) {
+				const evidence = await this.queue.getSessionEvidenceStatus(sessionIds);
+				if (evidence.missingSessions) { return false; }
+				if (!evidence.pendingEvents) { return true; }
+				if (await driver.uploadOnce() !== 'delivered') { return false; }
+			}
+			return false;
+		} finally { signal.removeEventListener('abort', cancel); }
+	}
 	async disable(): Promise<void> {
 		++this.generation; const driver = this.driver; this.driver = undefined; this.outcome = 'disabled';
 		if (driver) { this.draining = Promise.all([this.draining, driver.dispose()]).then(() => {}); }
