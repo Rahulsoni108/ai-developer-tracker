@@ -342,10 +342,10 @@ export async function activate(context: vscode.ExtensionContext) {
 			confirm: async (scope, summary) => {
 				const pending = scope === 'all' ? summary.pendingCount : summary.legacyPendingDeletionCount;
 				const detail = scope === 'all'
-					? `Delete every SQLite event, including ${pending} pending events, recording-session and correlation evidence, privacy-health history, known historical assessment JSONL logs, and metadata diagnostics in this extension's current local storage?`
-					: `Delete historical plaintext assessment JSONL logs (${summary.legacyLogCount} detected), plus whole SQLite recording sessions containing plaintext events (${summary.legacySqliteCount} detected)? This also deletes encrypted events and correlation evidence in those same sessions, including ${pending} pending events.`;
+					? `Delete unarchived SQLite events (up to ${pending} pending events; archived events are excluded), recording-session and correlation evidence, privacy-health history, known historical assessment JSONL logs, and metadata diagnostics in this extension's current local storage?`
+					: `Delete historical plaintext assessment JSONL logs (${summary.legacyLogCount} detected), plus unarchived SQLite recording sessions containing plaintext events (${summary.legacySqliteCount} detected)? This also deletes encrypted events and correlation evidence in those same sessions, including up to ${pending} pending events; archived sessions are excluded.`;
 				return (await vscode.window.showWarningMessage('Delete selected local assessment evidence?', { modal: true,
-					detail: detail + '\n\nPending evidence in this scope will be permanently lost from the queue. Workspace source files, original Codex session files, other storage profiles/workspace logs, and encryption keys are not deleted. Deleting rows/files may not securely erase bytes from backups or storage media.' }, 'Delete Evidence')) === 'Delete Evidence';
+					detail: detail + '\n\nPending evidence in this scope will be permanently lost from the queue. Archived assessment connections and their SQLite evidence are retained and excluded from this cleanup. Workspace source files, original Codex session files, other storage profiles/workspace logs, and encryption keys are not deleted. Deleting rows/files may not securely erase bytes from backups or storage media.' }, 'Delete Evidence')) === 'Delete Evidence';
 			},
 			notice: reason => { output.appendLine(notices[reason]); if (reason !== 'cancelled') { void vscode.window.showWarningMessage(notices[reason]); } }
 		});
@@ -468,7 +468,10 @@ export async function activate(context: vscode.ExtensionContext) {
 			workspaceIds: tracker.getApprovedFolders().map(folder => createHash('sha256').update(folder.uri.toString()).digest('hex')),
 			eventTypes: [...PRIVACY_EVENT_TYPES]
 		})) : undefined;
-	const assessmentStore = new AssessmentConnectionStore(context.globalState, context.secrets);
+	const assessmentStore = new AssessmentConnectionStore(context.globalState, context.secrets, queue ?? {
+		archiveAssessment: async () => { throw new AssessmentApiError('storage'); },
+		getAssessmentArchiveIndex: async () => { throw new AssessmentApiError('storage'); }
+	});
 	const assessmentDelivery = queue && assessmentApi instanceof RailsAssessmentApiClient
 		? new AssessmentEventDelivery(queue, assessmentStore, assessmentApi, status => {
 			output.appendLine('Assessment delivery status: ' + status);
@@ -484,8 +487,8 @@ export async function activate(context: vscode.ExtensionContext) {
 		disableDevelopmentUploads: async () => { await activeUploads?.disable(); }
 	}, async hostname => (await vscode.window.showWarningMessage(`Allow assessment uploads to ${hostname}?`, { modal: true,
 		detail: `Separate upload consent: sanitized code, diffs, AI conversations and tool activity may be transmitted for this paired assessment. Recording consent alone does not allow uploads.\n\nSelected workspace identifiers: ${tracker.getApprovedFolders().map(folder => createHash('sha256').update(folder.uri.toString()).digest('hex')).join(', ')}\nEvent categories: ${PRIVACY_EVENT_TYPES.join(', ')}\nScope: assessment_evidence (assessment-evidence.v1), limited to this assessment/recording and destination. Expires at the earliest server assessment deadline, credential expiry or revocation. Disable Uploads revokes consent; Stop & Submit closes the capture window after local writes drain.\n\n${mockAssessments ? 'Local mock only: no evidence is transmitted.' : 'The pinned R4.2D Rails contract sends only encrypted-queue events with verifiable capture-time approvals and matching scoped receipts. A receipt alone never authorizes an event. Stop & Submit freezes evidence, closes capture windows, uploads approved events and requests Rails finalization. Success requires a verified durable submission receipt before the original deadline.'} Reload requires fresh upload consent; Codex/Claude content still requires separate source approval.` }, 'Allow Assessment Uploads')) === 'Allow Assessment Uploads',
-	view => { assessmentStatus.text = `Assessment: ${view.state.replace(/_/g, ' ')}${view.mode === 'mock' ? ' (mock)' : ''}`;
-		assessmentStatus.tooltip = formatAssessmentStatus(view); if (view.state === 'unpaired') { assessmentStatus.hide(); } else { assessmentStatus.show(); } }, 10000, assessmentConsents, assessmentDelivery);
+	view => { assessmentStatus.text = `Assessment: ${view.archiving ? 'archiving' : view.state === 'unpaired' && view.archivedCount ? 'ready to pair' : view.state.replace(/_/g, ' ')}${view.mode === 'mock' ? ' (mock)' : ''}`;
+		assessmentStatus.tooltip = formatAssessmentStatus(view); if (view.state === 'unpaired' && !view.archivedCount) { assessmentStatus.hide(); } else { assessmentStatus.show(); } }, 10000, assessmentConsents, assessmentDelivery);
 	activeAssessment = assessment;
 	await assessment.initialize();
 	context.subscriptions.push(assessmentStatus, ...registerAssessmentCommands(assessment, mockAssessments),

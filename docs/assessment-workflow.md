@@ -1,3 +1,7 @@
+> E4.7: [safe assessment archive and re-pair](assessment-archive.md) now provides explicit
+> local archival while retaining evidence and credentials. Historical E4.1 limitations
+> below are superseded by that documented workflow.
+>
 > Current implementation: [real Rails control/upload integration](rails-assessment-integration.md)
 > and [E4.6 durable finalization](assessment-finalization.md). The E4.1 text below is
 > historical design/test context; its proposed count-only `/submit` endpoint and mock

@@ -1,14 +1,14 @@
 import * as assert from 'node:assert/strict';
 import * as vscode from 'vscode';
-import { ASSESSMENT_STATUS_COMMAND, PAIR_ASSESSMENT_COMMAND, START_ASSESSMENT_COMMAND, SUBMIT_ASSESSMENT_COMMAND, formatAssessmentStatus } from '../assessmentCommands';
+import { ARCHIVE_ASSESSMENT_COMMAND, ASSESSMENT_STATUS_COMMAND, PAIR_ASSESSMENT_COMMAND, START_ASSESSMENT_COMMAND, SUBMIT_ASSESSMENT_COMMAND, formatAssessmentStatus } from '../assessmentCommands';
 import type { AssessmentView } from '../assessmentController';
 
 suite('Assessment VS Code commands', () => {
-	test('registers all four commands and defaults to an unpaired non-recording state without a backend', async function () {
+	test('registers assessment and archive commands and defaults to an unpaired non-recording state without a backend', async function () {
 		this.timeout(15000); const view = await vscode.commands.executeCommand<AssessmentView>(ASSESSMENT_STATUS_COMMAND);
 		assert.equal(view!.state, 'unpaired'); assert.equal(view!.uploadConsent, false);
 		const commands = await vscode.commands.getCommands();
-		for (const command of [ASSESSMENT_STATUS_COMMAND, PAIR_ASSESSMENT_COMMAND, START_ASSESSMENT_COMMAND, SUBMIT_ASSESSMENT_COMMAND]) { assert.ok(commands.includes(command)); }
+		for (const command of [ARCHIVE_ASSESSMENT_COMMAND, ASSESSMENT_STATUS_COMMAND, PAIR_ASSESSMENT_COMMAND, START_ASSESSMENT_COMMAND, SUBMIT_ASSESSMENT_COMMAND]) { assert.ok(commands.includes(command)); }
 	});
 	test('status text makes pending submission and mock timing limitations explicit without connection identifiers', () => {
 		const text = formatAssessmentStatus({ state: 'submission_pending', mode: 'mock', uploadConsent: false, pendingEvents: 2,
@@ -23,6 +23,12 @@ suite('Assessment VS Code commands', () => {
 		assert.equal(configured.includes('Rails assessment connected'), false);
 		assert.ok(formatAssessmentStatus({ state: 'unpaired', uploadConsent: false }).includes('Configure assessment.apiOrigin'));
 		assert.ok(formatAssessmentStatus({ state: 'unpaired', mode: 'mock', uploadConsent: false }).includes('LOCAL MOCK ONLY'));
+	});
+	test('archive status distinguishes retained unconfirmed evidence from active/submitted state without stale timing', () => {
+		const text = formatAssessmentStatus({ state: 'unpaired', mode: 'rails', uploadConsent: false, archivedCount: 1, archivedUnconfirmedCount: 1 });
+		assert.ok(text.includes('Ready to pair a new assessment')); assert.ok(text.includes('submission unconfirmed'));
+		assert.ok(text.includes('does not submit')); assert.equal(text.includes('Server deadline'), false); assert.equal(text.includes('successfully submitted'), false);
+		assert.ok(formatAssessmentStatus({ state: 'recovery', mode: 'rails', uploadConsent: false }).includes('does not prove'));
 	});
 	test('registers the assessment origin in the active manifest and reads the user setting through the activation key', async () => {
 		const extension = vscode.extensions.all.find(candidate => candidate.packageJSON.name === 'ai-developer-tracker');

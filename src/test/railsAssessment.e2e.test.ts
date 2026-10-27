@@ -50,11 +50,12 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 	let received: UploadBody[]; let accepted: Set<string>; let serverBindings: string[]; let starts: Map<string, string>; let startedAt: string | undefined; let deadline: string | undefined;
 	let revoked: boolean; let codeUsed: boolean; let failStart: boolean; let uploadMode: string; let controlMutation: ((path: string, data: unknown) => unknown) | undefined;
 	let holdUpload: (() => void) | undefined; let failRegistration: boolean;
+	let currentSessionId: string; let currentToken: string; let currentPairCode: string;
 	let submission: AssessmentSubmissionReceipt | undefined; let finalized: AssessmentFinalizationRequest | undefined; let finalizeMode: string;
 	const storage = () => ({ scheme: 'file', fsPath: join(root, 'queue') });
 	const metadata = () => state.get(ASSESSMENT_METADATA_KEY) as AssessmentMetadata;
 	const identity = async (): Promise<AssessmentAuthentication> => ({ connection: metadata().connection, credential: (await store.getCredential(metadata().credentialId))! });
-	const status = () => ({ ...fixture.status, server_time: stamp(), state: submission ? 'submitted' : startedAt ? 'active' : 'paired', ...(submission ? { submission } : {}),
+	const status = () => ({ ...fixture.status, coding_session_id: currentSessionId, server_time: stamp(), state: submission ? 'submitted' : startedAt ? 'active' : 'paired', ...(submission ? { submission } : {}),
 		local_recording_session_ids: [...serverBindings], ...(startedAt ? { started_at: startedAt, deadline } : {}) });
 	function json(response: ServerResponse, data: unknown, statusCode = 200): void {
 		response.writeHead(statusCode, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(data));
@@ -69,7 +70,7 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 		store = new AssessmentConnectionStore({ get: <T>(name: string, fallback?: T) => (state.get(name) ?? fallback) as T,
 			update: async (name, value) => { state.set(name, structuredClone(value)); } }, {
 			get: async name => secrets.get(name), store: async (name, value) => { secrets.set(name, value); }, delete: async name => { secrets.delete(name); }
-		});
+		}, queue);
 		delivery = new AssessmentEventDelivery(queue, store, api, () => {}, () => new HttpsEventTransport(cert),
 			{ baseDelayMs: 100, maxDelayMs: 200, timeoutMs: 500, maxBytes: 16384 });
 		controller = new AssessmentController(api, store, recording, {
@@ -104,17 +105,17 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 		receipts = new Map(); requests = []; received = []; accepted = new Set(); serverBindings = []; starts = new Map();
 		startedAt = undefined; deadline = undefined; revoked = false; codeUsed = false; failStart = false; uploadMode = 'success'; controlMutation = undefined;
 		uploadConsent = true; recordingConsent = true; holdUpload = undefined; failRegistration = false;
-		submission = undefined; finalized = undefined; finalizeMode = 'success';
+		submission = undefined; finalized = undefined; finalizeMode = 'success'; currentSessionId = '42'; currentToken = TOKEN; currentPairCode = PAIR_CODE;
 		server = createServer({ key, cert }, (request, response) => { void (async () => {
 			const chunks: Buffer[] = []; for await (const chunk of request) { chunks.push(Buffer.from(chunk)); }
 			const path = request.url!; const body = Buffer.concat(chunks).length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
-			const authenticated = request.headers.authorization === 'Bearer ' + TOKEN;
+			const authenticated = request.headers.authorization === 'Bearer ' + currentToken;
 			requests.push({ path, method: request.method!, body, authenticated });
 			const control = (data: unknown) => json(response, { data: controlMutation ? controlMutation(path, data) : data });
 			if (path === BASE + '/pair') {
-				if (body.pairing_code !== PAIR_CODE || codeUsed) { json(response, { error: 'Pairing rejected.' }, 401); return; }
+				if (body.pairing_code !== currentPairCode || codeUsed) { json(response, { error: 'Pairing rejected.' }, 401); return; }
 				assert.equal(request.headers.authorization, undefined); codeUsed = true;
-				control({ ...fixture.pair, api_origin: origin, upload_endpoint: origin + BASE + '/events', credential: TOKEN,
+				control({ ...fixture.pair, coding_session_id: currentSessionId, api_origin: origin, upload_endpoint: origin + BASE + '/events', credential: currentToken,
 					credential_expires_at: new Date(Date.now() + 7200000).toISOString(), status: status() }); return;
 			}
 			if (!authenticated || revoked) { json(response, { error: 'Unauthorized.' }, 401); return; }
@@ -445,6 +446,72 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 		controlMutation = (path, data) => path.endsWith('/status') ? { ...(data as object), server_time: originalDeadline } : data;
 		await controller.stopAndSubmit(); assert.equal(recording.isRecording, false); assert.notEqual(controller.view.state, 'submitted');
 		assert.equal(submission, undefined); assert.equal(metadata().serverStatus.deadline, originalDeadline);
+	});
+
+	test('archiving cancels the old in-flight HTTPS upload, retains its credential/evidence, and new pairing uploads/finalizes only its own events', async () => {
+		uploadMode = 'hold'; await pairStart(); const oldEvent = await captureFile(); await until(() => !!holdUpload, 'old upload held');
+		const oldMetadata = structuredClone(metadata()); const oldToken = await store.getCredential(oldMetadata.credentialId);
+		await controller.archive(async summary => { assert.equal(summary.submissionConfirmed, false); return true; });
+		assert.equal(controller.view.state, 'unpaired'); assert.equal(delivery.status, 'disabled'); assert.equal(await queue.getPendingCount(), 1);
+		assert.equal(await store.getCredential(oldMetadata.credentialId), oldToken); assert.equal(controller.allowsDevelopmentUpload(oldEvent.sessionId), false);
+		holdUpload!(); await until(() => accepted.has(oldEvent.eventId), 'late old server completion'); await wait(40);
+		assert.equal(await queue.getPendingCount(), 1); // A late server response never acknowledges abandoned client delivery.
+		currentSessionId = '3'; currentToken = 'adt_ext_' + 'b'.repeat(43); currentPairCode = 'RSTU-VWXY-Z234-5678';
+		codeUsed = false; serverBindings = []; startedAt = undefined; deadline = undefined; uploadMode = 'success';
+		await controller.pair(currentPairCode); assert.equal(metadata().connection.codingSessionId, '3'); assert.equal(controller.view.deadline, undefined);
+		assert.equal(controller.view.uploadConsent, false); assert.equal(recording.isRecording, false);
+		await controller.start(); assert.equal(controller.view.state, 'active'); const fresh = await captureFile();
+		await until(() => accepted.has(fresh.eventId), 'new event upload');
+		await controller.stopAndSubmit(); if (controller.view.state !== 'submitted') {
+			await until(async () => (await queue.getSessionEvidenceStatus([fresh.sessionId])).pendingEvents === 0, 'new local ack'); await controller.stopAndSubmit();
+		}
+		assert.equal(controller.view.state, 'submitted'); assert.equal(finalized!.recordings.length, 1);
+		assert.equal(finalized!.recordings[0].local_recording_session_id, fresh.sessionId); assert.equal(finalized!.recordings[0].event_count, 1);
+		assert.equal(await queue.getPendingCount(), 1); assert.deepEqual(await queue.getPending(10), [oldEvent]);
+		assert.equal(await store.getCredential(oldMetadata.credentialId), oldToken);
+		assert.equal((await queue.getAssessmentArchiveIndex()).archives[0].archiveId, oldMetadata.credentialId);
+		await stopPipeline(); await makePipeline(); assert.equal(controller.view.state, 'submitted'); assert.equal(controller.view.archivedUnconfirmedCount, 1);
+		assert.equal(controller.allowsDevelopmentUpload(oldEvent.sessionId), false); assert.equal(await queue.prepareBatch(100, 100000, oldEvent.sessionId), null);
+	});
+
+	test('an archived frozen submission manifest, approvals and request ID are preserved byte-for-byte while new pairing proceeds', async () => {
+		uploadMode = 'auth'; await pairStart(); const captured = await captureFile(); await until(() => received.length > 0, 'retained approved event');
+		await controller.stopAndSubmit(); assert.equal(controller.view.state, 'submission_pending'); const previous = structuredClone(metadata());
+		const { DatabaseSync } = await import('node:sqlite'); const db = new DatabaseSync(join(storage().fsPath, LOCAL_QUEUE_FILENAME));
+		try {
+			const manifest = db.prepare('SELECT snapshot_json FROM assessment_finalizations WHERE request_id = ?').get(previous.submitRequestId)!.snapshot_json;
+			const proof = db.prepare('SELECT approval_json FROM event_approvals WHERE event_id = ?').get(captured.eventId)!.approval_json;
+			const consent = db.prepare('SELECT consent_json FROM evidence_consents WHERE session_id = ?').get(captured.sessionId)!.consent_json;
+			await controller.archive(async () => true);
+			assert.equal(db.prepare('SELECT snapshot_json FROM assessment_finalizations WHERE request_id = ?').get(previous.submitRequestId)!.snapshot_json, manifest);
+			assert.equal(db.prepare('SELECT approval_json FROM event_approvals WHERE event_id = ?').get(captured.eventId)!.approval_json, proof);
+			assert.equal(db.prepare('SELECT consent_json FROM evidence_consents WHERE session_id = ?').get(captured.sessionId)!.consent_json, consent);
+			await assert.rejects(queue.setEvidenceConsent((await queue.getEvidenceConsent(captured.sessionId))!));
+			await assert.rejects(queue.revokeEvidenceApprovals(captured.sessionId));
+			assert.equal(await queue.getAssessmentUploadContext(captured, { codingSessionId: '42', origin,
+				consentReceiptId: (await queue.getEvidenceConsent(captured.sessionId))!.receipt!.consent_id, serverTime: stamp() }), undefined);
+			await assert.rejects(queue.freezeFinalization({ codingSessionId: '42', origin, requestId: previous.submitRequestId, localRecordingSessionIds: [captured.sessionId] }));
+		} finally { db.close(); }
+	});
+
+	test('unknown same-assessment recording scopes block archival and archived identities cannot register a new recording scope', async () => {
+		await pairStart(); const firstId = recording.sessionId!; const original = (await queue.getEvidenceConsent(firstId))!;
+		const extraId = randomUUID(); const extra = { ...original, request: { ...original.request, request_id: randomUUID(), local_recording_session_id: extraId },
+			receipt: { ...original.receipt!, consent_id: randomUUID(), local_recording_session_id: extraId } };
+		await queue.setEvidenceConsent(extra); await controller.archive(async () => true); assert.equal(controller.view.state, 'recovery');
+		assert.equal((await queue.getAssessmentArchiveIndex()).archives.length, 0);
+		const { DatabaseSync } = await import('node:sqlite'); const db = new DatabaseSync(join(storage().fsPath, LOCAL_QUEUE_FILENAME));
+		try { db.prepare('DELETE FROM evidence_consents WHERE session_id = ?').run(extraId); } finally { db.close(); }
+		await controller.archive(async () => true); assert.equal(controller.view.state, 'unpaired');
+		await assert.rejects(queue.setEvidenceConsent(extra));
+	});
+
+	test('archiving a verified submitted connection retains its receipt and never calls Rails revocation', async () => {
+		await pairStart(); await controller.stopAndSubmit(); assert.equal(controller.view.state, 'submitted'); const previous = structuredClone(metadata()); const count = requests.length;
+		await controller.archive(async summary => { assert.equal(summary.submissionConfirmed, true); return true; });
+		assert.equal(controller.view.state, 'unpaired'); assert.equal(controller.view.archivedUnconfirmedCount, 0);
+		assert.equal((await queue.getAssessmentArchiveIndex()).archives[0].submissionConfirmed, true);
+		assert.equal(await store.getCredential(previous.credentialId), TOKEN); assert.equal(requests.length, count);
 	});
 
 	test('safe credential revocation stops assessment capture/uploads and removes only its SecretStorage token', async () => {

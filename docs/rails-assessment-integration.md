@@ -1,4 +1,4 @@
-# Real Rails control and scoped event delivery (E4.5 / E4.6)
+# Real Rails control, delivery and recovery (E4.5 / E4.6 / E4.7)
 
 The extension now has a real `RailsAssessmentApiClient` and an assessment-scoped
 `EventUploader` path for the inspected hiring-manager R4.1D/R4.2B/R4.2D contracts.
@@ -51,6 +51,22 @@ upload consent and require reload; changing origins never forwards an old creden
 the new origin. Existing manual recording and the generic uploader remain available with
 their original separate consent/token configuration. Start Assessment drains/disables the
 manual uploader; both paths share the existing exclusive SQLite upload-attempt lease.
+
+## Archive an old connection and pair another
+
+Use **AI Developer Tracker: Archive Assessment Connection** and explicitly select
+**Archive Connection**. The extension stops/drains associated capture and delivery,
+commits an encrypted local archive and quarantine, then releases the pairing slot.
+It retains events, approvals, recording metadata, manifests, request IDs, receipts and
+the unchanged SecretStorage credential. Submission remains unconfirmed unless already
+verified; authentication failure is never treated as proof of server deletion.
+
+Once status says **Ready to pair a new assessment**, obtain a fresh OTP-verified pairing
+code and run **Pair Assessment**. A new Start requires fresh recording/workspace and
+upload consent. No old recordings, credentials, approvals or deadlines are transferred.
+Archival makes no Rails call and does not change any endpoint contract. For exact manual
+steps, crash recovery, isolation and retention limitations, see
+[E4.7 safe archive and re-pair](assessment-archive.md).
 
 ## Exact endpoint mappings
 
@@ -152,10 +168,10 @@ fixed status codes, not pairing codes, tokens, server bodies, source paths or ev
   must complete before receipt/credential/assessment expiry; pending evidence is retained
   safely if authorization expires. There is no automatic acknowledgment or local timer reset.
 - Credential rotation invalidates prior receipt-generation authorization on both sides.
-  The controller still refuses replacing an already paired attempt or adopting unknown
-  server bindings. A separate controlled re-pair/reconciliation UX is needed for expired/
-  revoked credentials or lost local connection metadata; this task does not transfer old
-  approvals, delete pending evidence or silently adopt another assessment.
+  The controller refuses silently replacing an attempt or adopting unknown server bindings.
+  E4.7 permits explicit local archival followed by normal fresh pairing; it does not
+  restore archived uploads, replace old credentials, transfer approvals, delete pending
+  evidence or silently adopt another assessment. Lost/corrupt local metadata still fails closed.
 - A lost registration response followed by withdrawal cannot be reconciled through a
   nonexistent read-only receipt lookup. Local denial persists; the adapter never replays
   approval after withdrawal merely to discover a receipt. Recovery remains explicit.

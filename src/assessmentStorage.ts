@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import type { AssessmentArchive, AssessmentArchiveIndex, AssessmentArchiveStorage } from './assessmentArchive';
 import { validSubmissionReceipt } from './assessmentFinalization';
 import type { Memento, SecretStorage } from 'vscode';
 import { utcTime } from './evidenceConsent';
@@ -18,6 +20,12 @@ export interface AssessmentStore {
 	getCredential(id: string): Promise<string | undefined>;
 	putCredential(id: string, credential: string): Promise<void>;
 	deleteCredential?(id: string): Promise<void>;
+	archive?(value: AssessmentArchive): Promise<void>;
+	getArchiveIndex?(): Promise<AssessmentArchiveIndex>;
+}
+
+export function assessmentArchiveKey(connection: Pick<AssessmentConnection, 'apiOrigin' | 'codingSessionId'>): string {
+	return createHash('sha256').update(JSON.stringify([connection.apiOrigin, connection.codingSessionId])).digest('hex');
 }
 
 export function validConnection(value: AssessmentConnection): boolean {
@@ -46,18 +54,27 @@ export function validServerStatus(value: AssessmentServerStatus, connection: Ass
 				&& Date.parse(value.deadline) > Date.parse(value.startedAt));
 }
 
+export function validAssessmentMetadata(raw: AssessmentMetadata): boolean {
+	try {
+		return !!raw && raw.version === 1 && validConnection(raw.connection) && isUuid(raw.credentialId) && isUuid(raw.submitRequestId)
+			&& ['paired', 'starting', 'active', 'stopping', 'submission_pending', 'submitted', 'recovery', 'error'].includes(raw.phase)
+			&& Array.isArray(raw.localRecordingSessionIds) && raw.localRecordingSessionIds.length <= 32 && raw.localRecordingSessionIds.every(isUuid)
+			&& new Set(raw.localRecordingSessionIds).size === raw.localRecordingSessionIds.length && validServerStatus(raw.serverStatus, raw.connection)
+			&& raw.serverStatus.localRecordingSessionIds.every(id => raw.localRecordingSessionIds.includes(id))
+			&& Object.keys(raw).every(key => ['version', 'connection', 'credentialId', 'phase', 'localRecordingSessionIds', 'serverStatus', 'submitRequestId'].includes(key))
+			&& Object.keys(raw.connection).every(key => ['codingSessionId', 'apiOrigin', 'uploadEndpoint', 'mode', 'credentialExpiresAt'].includes(key))
+			&& Object.keys(raw.serverStatus).every(key => ['codingSessionId', 'state', 'serverTime', 'startedAt', 'deadline', 'localRecordingSessionIds', 'submission'].includes(key));
+	} catch { return false; }
+}
+
 /** Only a fixed allowlist of connection metadata is persisted; no pairing codes, event contents or tokens. */
 export class AssessmentConnectionStore implements AssessmentStore {
 	private writes: Promise<void> = Promise.resolve();
-	constructor(private readonly state: Pick<Memento, 'get' | 'update'>, private readonly secrets: Pick<SecretStorage, 'get' | 'store'> & Partial<Pick<SecretStorage, 'delete'>>) {}
+	constructor(private readonly state: Pick<Memento, 'get' | 'update'>, private readonly secrets: Pick<SecretStorage, 'get' | 'store'> & Partial<Pick<SecretStorage, 'delete'>>, private readonly archives?: AssessmentArchiveStorage) {}
 	async load(): Promise<AssessmentMetadata | undefined> {
 		const raw = this.state.get<AssessmentMetadata>(ASSESSMENT_METADATA_KEY); if (raw === undefined) { return undefined; }
-		if (!raw || raw.version !== 1 || !validConnection(raw.connection) || !isUuid(raw.credentialId) || !isUuid(raw.submitRequestId)
-			|| !['paired', 'starting', 'active', 'stopping', 'submission_pending', 'submitted', 'recovery', 'error'].includes(raw.phase)
-			|| !Array.isArray(raw.localRecordingSessionIds) || raw.localRecordingSessionIds.length > 32 || !raw.localRecordingSessionIds.every(isUuid)
-			|| new Set(raw.localRecordingSessionIds).size !== raw.localRecordingSessionIds.length || !validServerStatus(raw.serverStatus, raw.connection)) {
-			throw new AssessmentApiError('storage');
-		}
+		if (!validAssessmentMetadata(raw)) { throw new AssessmentApiError('storage'); }
+		if (this.archives && (await this.getArchiveIndex()).archives.some(item => item.archiveId === raw.credentialId || item.assessmentKey === assessmentArchiveKey(raw.connection))) { return undefined; }
 		return structuredClone(raw);
 	}
 	save(value: AssessmentMetadata): Promise<void> {
@@ -66,11 +83,26 @@ export class AssessmentConnectionStore implements AssessmentStore {
 		const snapshot: AssessmentMetadata = { version: 1, connection: { codingSessionId, apiOrigin, uploadEndpoint, mode, ...(credentialExpiresAt ? { credentialExpiresAt } : {}) }, credentialId: value.credentialId,
 			phase: value.phase, localRecordingSessionIds: [...value.localRecordingSessionIds], submitRequestId: value.submitRequestId,
 			serverStatus: { codingSessionId, state, serverTime, ...(startedAt ? { startedAt } : {}), ...(deadline ? { deadline } : {}), localRecordingSessionIds: [...localRecordingSessionIds], ...(submission ? { submission: structuredClone(submission) } : {}) } };
-		const write = this.writes.then(async () => { await this.state.update(ASSESSMENT_METADATA_KEY, snapshot); });
+		const write = this.writes.then(async () => {
+			if (!validAssessmentMetadata(snapshot) || this.archives && (await this.getArchiveIndex()).archives.some(item => item.archiveId === snapshot.credentialId || item.assessmentKey === assessmentArchiveKey(snapshot.connection))) { throw new AssessmentApiError('storage'); }
+			await this.state.update(ASSESSMENT_METADATA_KEY, snapshot);
+		});
+		this.writes = write.catch(() => {}); return write;
+	}
+	getArchiveIndex(): Promise<AssessmentArchiveIndex> { return this.archives?.getAssessmentArchiveIndex() ?? Promise.resolve({ archives: [] }); }
+	archive(value: AssessmentArchive): Promise<void> {
+		const snapshot = structuredClone(value);
+		const write = this.writes.then(async () => {
+			if (!this.archives) { throw new AssessmentApiError('storage'); }
+			await this.archives.archiveAssessment(snapshot);
+			// The encrypted archive is the terminal marker. Never clear globalState in a
+			// second write: load() ignores this old pointer after a crash, and normal pair
+			// replaces it only after obtaining a fresh credential. No credential is deleted.
+		});
 		this.writes = write.catch(() => {}); return write;
 	}
 	async deleteCredential(id: string): Promise<void> {
-		if (!this.secrets.delete) { throw new AssessmentApiError('storage'); }
+		if (!this.secrets.delete || this.archives && (await this.getArchiveIndex()).archives.some(item => item.archiveId === id)) { throw new AssessmentApiError('storage'); }
 		await this.secrets.delete(assessmentCredentialKey(id));
 	}
 	getCredential(id: string): Promise<string | undefined> { return Promise.resolve(this.secrets.get(assessmentCredentialKey(id))); }

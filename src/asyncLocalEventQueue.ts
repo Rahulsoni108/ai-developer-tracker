@@ -1,3 +1,4 @@
+import type { AssessmentArchive, AssessmentArchiveIndex } from './assessmentArchive';
 import type { AssessmentFinalizationRequest, FinalizationScope } from './assessmentFinalization';
 import type { AssessmentApprovalBinding } from './assessmentEventApproval';
 import type { UploadPrivacyContext } from './uploadPrivacyContext';
@@ -16,7 +17,7 @@ import type { PrivacyReasonCode } from './privacyFilter';
 import { EvidenceEncryptionError, type EncryptionKeys, type EncryptionRequirements } from './evidenceEncryption';
 import { supplyEvidenceKeys, type EvidenceSecretStorage } from './evidenceKeyStorage';
 
-export type QueueOperation = 'freezeFinalization' | 'getAssessmentUploadContext' | 'enqueueApproved' | 'getUploadPrivacyContext' | 'revokeEvidenceApprovals' | 'getEvidenceConsent' | 'setEvidenceConsent' | 'getSessionEvidenceStatus' | 'getRecordedEventSummary' | 'getUploadRetryState' | 'configureUpload' | 'claimUploadAttempt' | 'finishUploadAttempt' | 'prepareBatch' | 'markDelivered' | 'releaseBatch' | 'getDeliveryStatus' | 'enqueue' | 'getPending' | 'markAcknowledged' | 'getPendingCount' | 'getHealth' | 'beginSession' | 'finishSession' | 'getRecordingSessions' | 'recordPrivacyRejection' | 'getPrivacyHealth' | 'getLocalDataSummary' | 'acquireMaintenance' | 'releaseMaintenance' | 'deleteEvidence' | 'expireAcknowledged' | 'close';
+export type QueueOperation = 'archiveAssessment' | 'getAssessmentArchiveIndex' | 'freezeFinalization' | 'getAssessmentUploadContext' | 'enqueueApproved' | 'getUploadPrivacyContext' | 'revokeEvidenceApprovals' | 'getEvidenceConsent' | 'setEvidenceConsent' | 'getSessionEvidenceStatus' | 'getRecordedEventSummary' | 'getUploadRetryState' | 'configureUpload' | 'claimUploadAttempt' | 'finishUploadAttempt' | 'prepareBatch' | 'markDelivered' | 'releaseBatch' | 'getDeliveryStatus' | 'enqueue' | 'getPending' | 'markAcknowledged' | 'getPendingCount' | 'getHealth' | 'beginSession' | 'finishSession' | 'getRecordingSessions' | 'recordPrivacyRejection' | 'getPrivacyHealth' | 'getLocalDataSummary' | 'acquireMaintenance' | 'releaseMaintenance' | 'deleteEvidence' | 'expireAcknowledged' | 'close';
 export interface LocalStorageSummary extends LocalDataSummary { legacyLogCount: number; diagnosticFileCount: number }
 export interface LocalCleanupResult extends CleanupResult { deletedFiles: number; filesFailed: boolean; storageFailed?: boolean }
 export interface QueueRequest { id: number; operation: QueueOperation; argument?: unknown }
@@ -100,6 +101,8 @@ export class AsyncLocalEventQueue {
 		}
 	}
 
+	async archiveAssessment(value: AssessmentArchive): Promise<void> { await this.request('archiveAssessment', value); }
+	async getAssessmentArchiveIndex(): Promise<AssessmentArchiveIndex> { return await this.request('getAssessmentArchiveIndex') as AssessmentArchiveIndex; }
 	async getUploadRetryState(): Promise<UploadRetryState | null> { return await this.request('getUploadRetryState') as UploadRetryState | null; }
 	async configureUpload(endpointHash: string): Promise<void> { await this.request('configureUpload', endpointHash); }
 	async claimUploadAttempt(endpointHash: string, now: number, recoveryAt: number): Promise<UploadRetryState | null> {

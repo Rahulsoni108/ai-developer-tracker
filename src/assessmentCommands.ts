@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import type { AssessmentController, AssessmentView } from './assessmentController';
 
+export const ARCHIVE_ASSESSMENT_COMMAND = 'ai-developer-tracker.archiveAssessmentConnection';
 export const PAIR_ASSESSMENT_COMMAND = 'ai-developer-tracker.pairAssessment';
 export const START_ASSESSMENT_COMMAND = 'ai-developer-tracker.startAssessment';
 export const SUBMIT_ASSESSMENT_COMMAND = 'ai-developer-tracker.stopAndSubmitAssessment';
@@ -13,7 +14,13 @@ export function formatAssessmentStatus(view: AssessmentView): string {
 		: view.mode === 'rails' ? view.state === 'unpaired' ? 'Rails assessment API configured. Use Pair Assessment to connect.'
 			: 'Rails assessment connected. Submission requires durable evidence reconciliation and a verified server receipt.'
 			: 'Configure assessment.apiOrigin in user settings and reload to pair with Rails.';
-	const lines = [`Assessment: ${view.state.replace(/_/g, ' ')}`, backendStatus];
+	const lines = [`Assessment: ${view.archiving ? 'archiving connection' : view.state.replace(/_/g, ' ')}`, backendStatus];
+	if (view.state === 'recovery') { lines.push('Recovery required. Authentication failure does not prove the server assessment was deleted.'); }
+	if (view.archivedCount) {
+		lines.push(`Archived assessments retained locally: ${view.archivedCount}. Archiving does not submit an assessment.`);
+		if (view.archivedUnconfirmedCount) { lines.push(`Archived assessment (submission unconfirmed): ${view.archivedUnconfirmedCount}.`); }
+		if (view.state === 'unpaired' && !view.archiving) { lines.push('Ready to pair a new assessment. Archived evidence remains isolated.'); }
+	}
 	if (view.uploadStatus) { lines.push(`Assessment delivery: ${view.uploadStatus}`); }
 	if (view.reason) { lines.push(`Status code: ${view.reason}`); }
 	if (view.deadline) { lines.push(`Server deadline: ${view.deadline}`, `Last server time: ${view.serverTime}`, 'Timing is the last server snapshot; offline time is unverified.'); }
@@ -26,6 +33,13 @@ export function formatAssessmentStatus(view: AssessmentView): string {
 
 export function registerAssessmentCommands(controller: AssessmentController, mockEnabled: boolean): vscode.Disposable[] {
 	return [
+		vscode.commands.registerCommand(ARCHIVE_ASSESSMENT_COMMAND, async () => {
+			let accepted = false;
+			await controller.archive(async summary => { accepted = (await vscode.window.showWarningMessage('Archive this assessment connection?', { modal: true,
+				detail: `${summary.submissionConfirmed ? 'A server submission receipt was previously verified.' : 'Submission is UNCONFIRMED. This does not submit or finalize the assessment.'}\n\nStops and drains associated capture and disables delivery. Retains the complete connection, encrypted evidence, recording metadata, manifests, request IDs, receipts and SecretStorage credential locally. The server may still consider the assessment active; archiving does not revoke credentials, close server windows or prove deletion. Archived evidence cannot upload or move to a new assessment. There is no restore/purge command in this release. Only after durable archival succeeds can you pair another assessment.` }, 'Archive Connection')) === 'Archive Connection'; return accepted; });
+			if (accepted && controller.view.state === 'unpaired' && controller.view.archivedCount) { void vscode.window.showInformationMessage('Assessment connection archived locally. Submission is not implied. Ready to pair a new assessment; old evidence and credentials were retained.'); }
+			else if (accepted) { void vscode.window.showWarningMessage('Archive could not be confirmed. The connection remains blocked for recovery; evidence and credentials were preserved. Check Assessment Status, resolve local storage or active operations, and retry or reload.'); }
+		}),
 		vscode.commands.registerCommand(PAIR_ASSESSMENT_COMMAND, async () => {
 			if (controller.mode === 'unavailable') {
 				void vscode.window.showWarningMessage('Configure a trusted HTTPS assessment.apiOrigin in user settings and reload. No mock fallback is used.'); return;

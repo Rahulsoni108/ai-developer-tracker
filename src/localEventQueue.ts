@@ -1,3 +1,4 @@
+import { assessmentArchiveKey, validAssessmentArchive, MAX_ASSESSMENT_ARCHIVES, type AssessmentArchive, type AssessmentArchiveIndex } from './assessmentArchive';
 import { validFinalizationRequest, type AssessmentFinalizationRequest, type FinalizationScope } from './assessmentFinalization';
 import { createAssessmentEventApproval, type AssessmentApprovalBinding } from './assessmentEventApproval';
 import { createEvidenceApproval, verifyEvidenceApproval, validOrigin, type EvidenceApproval } from './evidenceApproval';
@@ -20,7 +21,7 @@ export const MAX_QUEUE_BATCH = 1000;
 // Allow JSON escaping overhead for diffs up to the common schema's 2 MiB limit.
 export const MAX_QUEUE_EVENT_BYTES = 16 * 1024 * 1024;
 export const DEFAULT_QUEUE_STORAGE_BYTES = 100 * 1024 * 1024;
-export const QUEUE_DATABASE_VERSION = 9;
+export const QUEUE_DATABASE_VERSION = 10;
 // Shared with the worker proxy to distinguish live threads from abandoned threads in this process.
 export const QUEUE_PROCESS_INSTANCE_ID = randomUUID();
 export const ACTIVE_QUEUE_OWNERS = new Set<string>();
@@ -174,7 +175,7 @@ export class LocalEventQueue {
 			database = new DatabaseSync(path, { allowExtension: false });
 			database.exec('PRAGMA busy_timeout = 1000; PRAGMA synchronous = FULL; PRAGMA trusted_schema = OFF;');
 			const version = database.prepare('PRAGMA user_version').get()?.user_version;
-			if (![0, 1, 2, 3, 4, 5, 6, 7, 8, QUEUE_DATABASE_VERSION].includes(Number(version))) { throw new LocalEventQueueError('Unsupported queue database version.'); }
+			if (![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, QUEUE_DATABASE_VERSION].includes(Number(version))) { throw new LocalEventQueueError('Unsupported queue database version.'); }
 			const integrity = database.prepare('PRAGMA integrity_check(1)').all();
 			if (integrity.length !== 1 || integrity[0].integrity_check !== 'ok') {
 				throw new LocalEventQueueError('Queue database integrity check failed.', 'corrupt');
@@ -287,6 +288,13 @@ export class LocalEventQueue {
 						request_id TEXT NOT NULL REFERENCES assessment_finalizations(request_id)) STRICT;
 						PRAGMA user_version = 9;`);
 				}
+				if (database.prepare('PRAGMA user_version').get()?.user_version === 9) {
+					database.exec(`CREATE TABLE assessment_archives (archive_id TEXT PRIMARY KEY, assessment_key TEXT NOT NULL, archive_json TEXT NOT NULL) STRICT;
+						CREATE INDEX archived_assessments ON assessment_archives(assessment_key);
+						CREATE TABLE assessment_archive_recordings (session_id TEXT PRIMARY KEY, archive_id TEXT NOT NULL REFERENCES assessment_archives(archive_id)) STRICT;
+						CREATE INDEX archive_recordings ON assessment_archive_recordings(archive_id); PRAGMA user_version = 10;`);
+				}
+				queue.readAssessmentArchiveIndex();
 				queue.verifyCounters();
 				queue.verifyDeliveryState();
 				const pageSize = Number(database!.prepare('PRAGMA page_size').get()?.page_size);
@@ -345,7 +353,7 @@ export class LocalEventQueue {
 						&& JSON.stringify(this.readStoredEvent(raced)) !== json) { throw new LocalEventQueueError('Conflicting approved event.'); }
 					return;
 				}
-				if (this.database.prepare('SELECT 1 FROM finalization_recordings WHERE session_id = ?').get(validation.event.sessionId)) {
+				if (this.isArchivedRecording(validation.event.sessionId) || this.database.prepare('SELECT 1 FROM finalization_recordings WHERE session_id = ?').get(validation.event.sessionId)) {
 					throw new LocalEventQueueError('Recording evidence is frozen.');
 				}
 				let encryptedApproval: string | undefined;
@@ -378,7 +386,7 @@ export class LocalEventQueue {
 		const snapshot = JSON.stringify(validated.event);
 		return this.schedule(() => {
 			const current = JSON.parse(snapshot) as TrackerEvent;
-			if (this.isApprovalRevoked(current.sessionId) || this.readEvidenceConsent(current.sessionId)) { return undefined; }
+			if (this.isArchivedRecording(current.sessionId) || this.isApprovalRevoked(current.sessionId) || this.readEvidenceConsent(current.sessionId)) { return undefined; }
 			const row = this.database.prepare(`SELECT e.event_id, e.event_json, e.payload_format, e.session_id, a.approval_json
 				FROM queued_events e JOIN event_approvals a ON a.event_id = e.event_id WHERE e.event_id = ? AND e.acknowledged = 0`).get(current.eventId);
 			if (!row) { return undefined; }
@@ -403,8 +411,9 @@ export class LocalEventQueue {
 		const json = JSON.stringify(validation.event); const target = { ...binding };
 		return this.schedule(() => {
 			const current = JSON.parse(json) as TrackerEvent;
-			if (this.isApprovalRevoked(current.sessionId)) { return undefined; }
+			if (this.isArchivedRecording(current.sessionId) || this.isApprovalRevoked(current.sessionId)) { return undefined; }
 			const scope = this.readEvidenceConsent(current.sessionId); const receipt = scope?.receipt;
+			if (scope && this.isArchivedAssessment(scope.codingSessionId, scope.origin)) { return undefined; }
 			if (!scope || !receipt || scope.locallyRevoked || scope.pendingAction || !['active', 'stopped'].includes(receipt.state)
 				|| scope.captureClosed && receipt.state !== 'stopped' || scope.codingSessionId !== target.codingSessionId || scope.origin !== target.origin
 				|| receipt.consent_id !== target.consentReceiptId || receipt.destination_origin !== target.origin
@@ -432,6 +441,7 @@ export class LocalEventQueue {
 			if (!this.cipher) { throw new EvidenceEncryptionError('key_missing'); }
 			const encrypted = JSON.stringify(this.cipher.encrypt(sessionId, JSON.stringify({ version: 1, sessionId, revoked: true }), 'revocation'));
 			await this.writeWithReservation(Buffer.byteLength(encrypted), () => {
+				if (this.isArchivedRecording(sessionId)) { throw new LocalEventQueueError('Archived evidence scope is immutable.'); }
 				this.database.prepare('INSERT INTO approval_revocations VALUES (?, ?) ON CONFLICT(session_id) DO NOTHING').run(sessionId, encrypted);
 			});
 		});
@@ -461,9 +471,11 @@ export class LocalEventQueue {
 		catch { return Promise.reject(new LocalEventQueueError('Invalid evidence consent.')); }
 		return this.schedule(async () => {
 			const id = snapshot.request.local_recording_session_id;
+			if (this.isArchivedRecording(id) || this.isArchivedAssessment(snapshot.codingSessionId, snapshot.origin)) { throw new LocalEventQueueError('Archived evidence scope is immutable.'); }
 			if (!this.cipher) { throw new EvidenceEncryptionError('key_missing'); }
 			const encrypted = JSON.stringify(this.cipher.encrypt(id, JSON.stringify(snapshot), 'consent'));
 			await this.writeWithReservation(Buffer.byteLength(encrypted), () => {
+				if (this.isArchivedRecording(id) || this.isArchivedAssessment(snapshot.codingSessionId, snapshot.origin)) { throw new LocalEventQueueError('Archived evidence scope is immutable.'); }
 				const previous = this.readEvidenceConsent(id);
 				if (previous && (previous.codingSessionId !== snapshot.codingSessionId || previous.origin !== snapshot.origin
 					|| JSON.stringify(previous.request) !== JSON.stringify(snapshot.request) || previous.deadline !== snapshot.deadline
@@ -505,6 +517,7 @@ export class LocalEventQueue {
 			const update = this.database.prepare('UPDATE queued_events SET acknowledged = 1, event_json = NULL, acknowledged_at = COALESCE(acknowledged_at, ?) WHERE event_id = ?');
 			const now = new Date().toISOString();
 			for (const id of ids) {
+				this.assertUnarchivedEvent(id);
 				if (this.database.prepare('SELECT 1 FROM delivery_members WHERE event_id = ? AND claimed = 1').get(id)) {
 					throw new LocalEventQueueError('Claimed events require batch acknowledgment.');
 				}
@@ -520,7 +533,7 @@ export class LocalEventQueue {
 		}
 		return this.schedule(async () => {
 			let batch: PreparedEventBatch | null = null;
-			const scope = localSessionId === undefined ? '' : 'AND e.session_id = ?';
+			const scope = `AND NOT EXISTS (SELECT 1 FROM assessment_archive_recordings a WHERE a.session_id = e.session_id) ${localSessionId === undefined ? '' : 'AND e.session_id = ?'}`;
 			const parameters = localSessionId === undefined ? [] : [localSessionId];
 			this.assertCollectionAllowed();
 			if (!this.database.prepare(`SELECT 1 FROM queued_events e WHERE e.acknowledged = 0 ${scope} AND NOT EXISTS
@@ -560,6 +573,7 @@ export class LocalEventQueue {
 			const batch = this.ownedBatch(batchId);
 			if (!['active', 'delivered'].includes(String(batch.status))) { throw new LocalEventQueueError('Delivery batch is no longer active.'); }
 			for (const id of ids) {
+				this.assertUnarchivedEvent(id);
 				const member = this.database.prepare('SELECT claimed, delivered FROM delivery_members WHERE batch_id = ? AND event_id = ?').get(batchId, id);
 				if (!member || !member.claimed && !member.delivered) { throw new LocalEventQueueError('Acknowledgment does not belong to this batch.'); }
 			}
@@ -696,6 +710,7 @@ export class LocalEventQueue {
 			this.assertCollectionAllowed();
 			await this.writeWithReservation(1024, () => {
 				this.assertCollectionAllowed();
+				if (this.isArchivedRecording(sessionId)) { throw new LocalEventQueueError('Archived recording is closed.'); }
 				this.database.prepare(`INSERT INTO recording_sessions(session_id, status, started_at, owner_id)
 					VALUES (?, 'active', ?, ?)`).run(sessionId, new Date().toISOString(), this.ownerId);
 			});
@@ -719,6 +734,82 @@ export class LocalEventQueue {
 		})));
 	}
 
+	private isArchivedAssessment(codingSessionId: string, origin: string): boolean {
+		return !!this.database.prepare('SELECT 1 FROM assessment_archives WHERE assessment_key = ?').get(assessmentArchiveKey({ codingSessionId, apiOrigin: origin }));
+	}
+	private isArchivedRecording(sessionId: string): boolean {
+		return !!this.database.prepare('SELECT 1 FROM assessment_archive_recordings WHERE session_id = ?').get(sessionId);
+	}
+	private assertUnarchivedEvent(eventId: string): void {
+		if (this.database.prepare(`SELECT 1 FROM queued_events e JOIN assessment_archive_recordings a ON a.session_id = e.session_id WHERE e.event_id = ?`).get(eventId)) {
+			throw new LocalEventQueueError('Archived evidence cannot be delivered.');
+		}
+	}
+	private readAssessmentArchive(id: string, ciphertext: string): AssessmentArchive {
+		const value = this.cipher?.decrypt(id, JSON.parse(ciphertext), 'archive');
+		if (!validAssessmentArchive(value) || value.archiveId !== id
+			|| this.database.prepare('SELECT assessment_key FROM assessment_archives WHERE archive_id = ?').get(id)?.assessment_key !== assessmentArchiveKey(value.metadata.connection)) { throw new EvidenceEncryptionError('authentication_failed'); }
+		const indexed = this.database.prepare('SELECT session_id FROM assessment_archive_recordings WHERE archive_id = ? ORDER BY session_id').all(id).map(row => String(row.session_id));
+		if (JSON.stringify(indexed) !== JSON.stringify([...value.metadata.localRecordingSessionIds].sort())) { throw new EvidenceEncryptionError('authentication_failed'); }
+		return value;
+	}
+	private readAssessmentArchiveIndex(): AssessmentArchiveIndex {
+		const rows = this.database.prepare('SELECT archive_id, archive_json FROM assessment_archives LIMIT ?').all(MAX_ASSESSMENT_ARCHIVES + 1);
+		if (rows.length > MAX_ASSESSMENT_ARCHIVES) { throw new LocalEventQueueError('Archive capacity exceeded.'); }
+		if (this.database.prepare('SELECT 1 FROM assessment_archive_recordings r WHERE NOT EXISTS (SELECT 1 FROM assessment_archives a WHERE a.archive_id = r.archive_id) LIMIT 1').get()) {
+			throw new EvidenceEncryptionError('authentication_failed');
+		}
+		return { archives: rows.map(row => {
+			const value = this.readAssessmentArchive(String(row.archive_id), String(row.archive_json));
+			return { archiveId: value.archiveId, assessmentKey: assessmentArchiveKey(value.metadata.connection), recordingSessionIds: [...value.metadata.localRecordingSessionIds], submissionConfirmed: value.submissionConfirmed };
+		}) };
+	}
+	getAssessmentArchiveIndex(): Promise<AssessmentArchiveIndex> { return this.schedule(() => this.readAssessmentArchiveIndex()); }
+	/** Commit the complete connection and permanent upload quarantine atomically. No credentials, events,
+	 * approvals, receipts, manifests or acknowledgment flags are changed. */
+	archiveAssessment(input: AssessmentArchive): Promise<void> {
+		let snapshot: AssessmentArchive;
+		try { snapshot = structuredClone(input); if (!validAssessmentArchive(snapshot)) { throw new Error(); } }
+		catch { return Promise.reject(new LocalEventQueueError('Invalid assessment archive.')); }
+		return this.schedule(async () => {
+			if (!this.cipher) { throw new EvidenceEncryptionError('key_missing'); }
+			const encrypted = JSON.stringify(this.cipher.encrypt(snapshot.archiveId, JSON.stringify(snapshot), 'archive'));
+			await this.writeWithReservation(Buffer.byteLength(encrypted) + snapshot.metadata.localRecordingSessionIds.length * 256, () => {
+				this.assertCollectionAllowed();
+				const existing = this.database.prepare('SELECT archive_json FROM assessment_archives WHERE archive_id = ?').get(snapshot.archiveId);
+				if (existing) {
+					const original = this.readAssessmentArchive(snapshot.archiveId, String(existing.archive_json));
+					// A retry after an unknown commit outcome never replaces the original audit snapshot.
+					if (JSON.stringify(original.metadata.connection) !== JSON.stringify(snapshot.metadata.connection)
+						|| original.metadata.submitRequestId !== snapshot.metadata.submitRequestId
+						|| JSON.stringify([...original.metadata.localRecordingSessionIds].sort()) !== JSON.stringify([...snapshot.metadata.localRecordingSessionIds].sort())) {
+						throw new LocalEventQueueError('Conflicting assessment archive.');
+					} return;
+				}
+				if (Number(this.database.prepare('SELECT COUNT(*) AS count FROM assessment_archives').get()!.count) >= MAX_ASSESSMENT_ARCHIVES) { throw new LocalEventQueueError('Archive capacity reached.'); }
+				for (const id of snapshot.metadata.localRecordingSessionIds) {
+					const scope = this.readEvidenceConsent(id);
+					const frozen = this.database.prepare('SELECT request_id FROM finalization_recordings WHERE session_id = ?').get(id);
+					if (scope && (scope.codingSessionId !== snapshot.metadata.connection.codingSessionId || scope.origin !== snapshot.metadata.connection.apiOrigin)
+						|| frozen && frozen.request_id !== snapshot.metadata.submitRequestId) { throw new LocalEventQueueError('Assessment archive ownership conflict.'); }
+					if (this.database.prepare("SELECT 1 FROM recording_sessions WHERE session_id = ? AND status = 'active'").get(id)
+						|| this.database.prepare(`SELECT 1 FROM delivery_members m JOIN queued_events e ON e.event_id = m.event_id WHERE e.session_id = ? AND m.claimed = 1`).get(id)) {
+						throw new LocalEventQueueError('Recording or delivery still active.', 'locked');
+					}
+				}
+				// Another window may know additional recordings. Refuse incomplete ownership
+				// coverage rather than silently attaching them to this archive or leaving them live.
+				for (const row of this.database.prepare('SELECT session_id FROM evidence_consents').iterate()) {
+					const id = String(row.session_id); const scope = this.readEvidenceConsent(id)!;
+					if (scope.codingSessionId === snapshot.metadata.connection.codingSessionId && scope.origin === snapshot.metadata.connection.apiOrigin
+						&& !snapshot.metadata.localRecordingSessionIds.includes(id)) { throw new LocalEventQueueError('Assessment recording coverage requires recovery.'); }
+				}
+				this.database.prepare('INSERT INTO assessment_archives VALUES (?, ?, ?)').run(snapshot.archiveId, assessmentArchiveKey(snapshot.metadata.connection), encrypted);
+				for (const id of snapshot.metadata.localRecordingSessionIds) { this.database.prepare('INSERT INTO assessment_archive_recordings VALUES (?, ?)').run(id, snapshot.archiveId); }
+			});
+		});
+	}
+
 	/** Snapshot all original IDs (including acknowledged tombstones) on the storage worker.
 	 * No payload or event-ID list is returned. SQLite serializes freezing with collection and retention. */
 	freezeFinalization(scope: FinalizationScope, existingOnly = false): Promise<AssessmentFinalizationRequest> {
@@ -736,6 +827,7 @@ export class LocalEventQueue {
 				this.assertCollectionAllowed();
 				request = { contract_version: 1, request_id: selection.requestId, recordings: [] };
 				for (const id of [...ids].sort()) {
+					if (!existingOnly && this.isArchivedRecording(id)) { throw new LocalEventQueueError('Archived assessment cannot finalize.'); }
 					const session = this.database.prepare('SELECT status FROM recording_sessions WHERE session_id = ?').get(id);
 					const consent = this.readEvidenceConsent(id);
 					if (!session || !['completed', 'interrupted', 'incomplete'].includes(String(session.status))
@@ -868,9 +960,9 @@ export class LocalEventQueue {
 				this.assertMaintenance();
 				this.database.exec('CREATE TEMP TABLE cleanup_sessions(session_id TEXT PRIMARY KEY)');
 				try {
-					this.database.exec(scope === 'all' ? 'INSERT INTO cleanup_sessions SELECT session_id FROM recording_sessions'
-						: 'INSERT INTO cleanup_sessions SELECT DISTINCT session_id FROM queued_events WHERE payload_format = 0 AND acknowledged = 0');
-					result = this.deleteSelectedSessions(scope === 'all');
+					this.database.exec(scope === 'all' ? 'INSERT INTO cleanup_sessions SELECT session_id FROM recording_sessions s WHERE NOT EXISTS (SELECT 1 FROM assessment_archive_recordings a WHERE a.session_id = s.session_id)'
+						: 'INSERT INTO cleanup_sessions SELECT DISTINCT session_id FROM queued_events e WHERE payload_format = 0 AND acknowledged = 0 AND NOT EXISTS (SELECT 1 FROM assessment_archive_recordings a WHERE a.session_id = e.session_id)');
+					result = this.deleteSelectedSessions(scope === 'all' && !this.database.prepare('SELECT 1 FROM assessment_archives LIMIT 1').get());
 				} finally { this.database.exec('DROP TABLE cleanup_sessions'); }
 			});
 			return result;
@@ -889,6 +981,7 @@ export class LocalEventQueue {
 					this.database.prepare(`INSERT INTO cleanup_sessions SELECT session_id FROM recording_sessions s WHERE status != 'active'
 						AND ended_at IS NOT NULL AND ended_at < ?
 						AND NOT EXISTS (SELECT 1 FROM finalization_recordings f WHERE f.session_id = s.session_id)
+						AND NOT EXISTS (SELECT 1 FROM assessment_archive_recordings a WHERE a.session_id = s.session_id)
 						AND NOT EXISTS (SELECT 1 FROM queued_events e WHERE e.session_id = s.session_id
 							AND (acknowledged = 0 OR acknowledged_at IS NULL OR acknowledged_at >= ?))`).run(cutoff, cutoff);
 					result = this.deleteSelectedSessions(false);

@@ -104,7 +104,9 @@ The old count-only `/submit` mock proposal is **not** sent to Rails.
   messages, tokens, source paths and payloads never enter status/errors.
 - Automatic retention skips frozen recording sets, including acknowledged tombstones,
   to preserve exact recovery. They remain until explicit existing local-evidence cleanup;
-  this conservative pin also applies after success. Cleanup can make receipt recovery
+  this conservative pin also applies after success. E4.7 archived assessments and their
+  evidence additionally remain pinned against broad local cleanup; see [archive recovery](assessment-archive.md).
+  Cleanup of unarchived assessments can make receipt recovery
   impossible and never grants a new approval. Encryption keys are unchanged.
 - A receipt reconciles declared evidence with committed Rails IDs. It does not attest
   trusted execution of the extension or prove undisclosed local events never existed.
