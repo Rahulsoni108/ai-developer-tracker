@@ -6,7 +6,9 @@ export const STOP_RECORDING_COMMAND = 'ai-developer-tracker.stopRecording';
 
 type RecordingStatusBar = Pick<StatusBarItem, 'text' | 'tooltip' | 'command' | 'show' | 'dispose'>;
 
+export type RecordingPreparation = 'local_storage' | 'diff_baseline' | 'assessment_authorization';
 export interface RecordingLifecycle {
+	readonly preparation?: RecordingPreparation;
 	prepare(sessionId: string, isCurrentRequest: () => boolean): Promise<void>;
 	started(sessionId: string): void;
 	stopped(sessionId: string): void;
@@ -24,7 +26,8 @@ export class RecordingController {
 	constructor(
 		private readonly statusBar: RecordingStatusBar,
 		private readonly requestConsent: (isCurrentRequest: () => boolean) => PromiseLike<boolean>,
-		private readonly now: () => Date = () => new Date()
+		private readonly now: () => Date = () => new Date(),
+		private readonly onPrepare: (step: RecordingPreparation) => void = () => {}
 	) {
 		this.updateStatusBar();
 		this.statusBar.show();
@@ -62,6 +65,7 @@ export class RecordingController {
 			if (consent && isCurrentRequest()) {
 				preparedSessionId = randomUUID();
 				for (const listener of this.lifecycle) {
+					if (listener.preparation) { try { this.onPrepare(listener.preparation); } catch { /* Diagnostics cannot authorize or interrupt recording. */ } }
 					await listener.prepare(preparedSessionId, isCurrentRequest);
 					if (!isCurrentRequest()) {
 						return;

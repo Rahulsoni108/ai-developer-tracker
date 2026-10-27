@@ -1,3 +1,4 @@
+import { describeAssessmentStart } from './assessmentStartDiagnostics';
 import * as vscode from 'vscode';
 import type { AssessmentController, AssessmentView } from './assessmentController';
 
@@ -21,6 +22,7 @@ export function formatAssessmentStatus(view: AssessmentView): string {
 		if (view.archivedUnconfirmedCount) { lines.push(`Archived assessment (submission unconfirmed): ${view.archivedUnconfirmedCount}.`); }
 		if (view.state === 'unpaired' && !view.archiving) { lines.push('Ready to pair a new assessment. Archived evidence remains isolated.'); }
 	}
+	if (view.lastStart) { lines.push('Last start attempt: ' + describeAssessmentStart(view.lastStart)); }
 	if (view.uploadStatus) { lines.push(`Assessment delivery: ${view.uploadStatus}`); }
 	if (view.reason) { lines.push(`Status code: ${view.reason}`); }
 	if (view.deadline) { lines.push(`Server deadline: ${view.deadline}`, `Last server time: ${view.serverTime}`, 'Timing is the last server snapshot; offline time is unverified.'); }
@@ -55,7 +57,10 @@ export function registerAssessmentCommands(controller: AssessmentController, moc
 			if (await vscode.window.showWarningMessage('Revoke this assessment extension credential?', { modal: true,
 				detail: 'Stops local assessment recording and uploads, revokes evidence consent and the current Rails credential. Pending evidence stays encrypted and unacknowledged. This does not submit or finalize the assessment.' }, 'Revoke Credential') === 'Revoke Credential') { await controller.revokeCredential(); }
 		}),
-		vscode.commands.registerCommand(START_ASSESSMENT_COMMAND, () => controller.start()),
+		vscode.commands.registerCommand(START_ASSESSMENT_COMMAND, async () => {
+			await controller.start(); const diagnostic = controller.view.lastStart;
+			if (diagnostic?.status === 'failed') { void vscode.window.showWarningMessage(describeAssessmentStart(diagnostic) + ' See Output → AI Developer Tracker for the prerequisite sequence.'); }
+		}),
 		vscode.commands.registerCommand(SUBMIT_ASSESSMENT_COMMAND, () => controller.stopAndSubmit()),
 		vscode.commands.registerCommand(ASSESSMENT_STATUS_COMMAND, async () => {
 			await controller.showStatus(); const view = controller.view;

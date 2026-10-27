@@ -177,6 +177,8 @@ The event summary decrypts/validates inside the storage worker and returns only 
 7. The extension records approved workspace and AI activity through privacy filtering and encrypted storage.
 8. The candidate clicks **Stop & Submit Assessment**. Capture stops and flushes; durable event acknowledgments and server finalization are required before success. Network failure leaves submission pending.
 
+If Start Assessment stops after recording confirmation, inspect **Output → AI Developer Tracker** and **Show Assessment Status** for the last start prerequisite. Recording confirmation is followed by workspace/storage/baseline preparation, separate upload consent and Rails authorization. See [safe start diagnostics and retry steps](docs/assessment-start-diagnostics.md).
+
 For an expired, revoked, deleted or otherwise unrecoverable old connection, run **Archive Assessment Connection**, review the unconfirmed-submission warning, and explicitly choose **Archive Connection**. After status says **Ready to pair a new assessment**, run **Pair Assessment** with a new code and approve recording/workspaces/uploads afresh when starting. Old evidence and credentials remain retained and isolated; archiving never implies submission. See [exact archive/re-pair and recovery instructions](docs/assessment-archive.md).
 
 Rails R4.1A–D provides a prepared VS Code mode and server-authoritative Start while preserving browser interviews. This extension preserves original timing. Stop & Submit uses the [R4.3 finalization contract](docs/assessment-finalization.md). Partial uploads or unavailable authorization keep submission pending; only a verified receipt establishes success.

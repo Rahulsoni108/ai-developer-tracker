@@ -1,3 +1,4 @@
+import { approveRecordingWorkspaces, describeAssessmentStart, type AssessmentStartStep } from './assessmentStartDiagnostics';
 import { AssessmentEvidenceConsent } from './assessmentEvidenceConsent';
 import { RailsAssessmentApiClient } from './railsAssessmentApiClient';
 import { AssessmentEventDelivery } from './assessmentEventDelivery';
@@ -82,42 +83,47 @@ export async function activate(context: vscode.ExtensionContext) {
 	output.appendLine('SQLite is the authoritative encrypted event store. JSONL diagnostics contain safe metadata only.');
 	const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left);
 	statusBar.name = 'AI Developer Tracker';
-	const recording = new RecordingController(statusBar, async isCurrentRequest => {
+	const traceRecordingStart = (step: AssessmentStartStep) => {
+		output.appendLine('Recording start prerequisite: ' + step); activeAssessment?.reportStartPrerequisite(step);
+	};
+	const recording: RecordingController = new RecordingController(statusBar, async (isCurrentRequest): Promise<boolean> => {
 		if (activeLocalData?.busy) {
+			traceRecordingStart('maintenance_active');
 			void vscode.window.showWarningMessage('Local data maintenance is in progress. Retry Start Recording afterward.'); return false;
 		}
 		if (queueDegraded) {
+			traceRecordingStart('storage_unavailable');
 			void vscode.window.showErrorMessage('AI Developer Tracker cannot record because its local event queue is unavailable. Resolve the storage problem and reload the extension.');
 			return false;
 		}
 		const folders = vscode.workspace.workspaceFolders;
 		if (!folders?.length) {
+			traceRecordingStart('workspace_required');
 			await vscode.window.showWarningMessage('Open a workspace folder before starting recording.');
 			return false;
 		}
 		try { await LocalEventQueue.assertStorageOutsideWorkspaces(queueStorageUri, folders); }
 		catch {
+			traceRecordingStart('workspace_storage_overlap');
 			void vscode.window.showErrorMessage('AI Developer Tracker cannot record a workspace containing its local event queue. Open another workspace.');
 			return false;
 		}
+		traceRecordingStart('recording_consent');
 		const consent = await vscode.window.showInformationMessage(
 			'Start recording file activity in all workspace folders?',
 			{ modal: true, detail: `Folders: ${folders.map(folder => folder.name).join(', ')}\n\nFile activity metadata, initial code baselines, and incremental source-code diffs are saved locally in encrypted SQLite after privacy filtering. Captured code is sensitive. JSONL diagnostics contain safe metadata only. Sensitive/generated paths and configured size limits are excluded. Recording consent does not authorize uploads. Transmitting sanitized evidence requires separate endpoint-scoped upload consent.\n\nWhen enabled, local Codex session metadata is discovered only during recording. Associations require separate confirmation. Conversation and tool content is captured only after a separate explicit consent dialog.` },
 			'Start Recording'
 		);
 		if (consent !== 'Start Recording' || !isCurrentRequest()) {
-			return false;
+			traceRecordingStart(isCurrentRequest() ? 'recording_consent_declined' : 'request_cancelled'); return false;
 		}
 		try {
-			await tracker.selectWorkspaces(folders);
-			const currentFolders = vscode.workspace.workspaceFolders ?? [];
-			return isCurrentRequest() && currentFolders.length === folders.length
-				&& folders.every(folder => currentFolders.some(current => current.uri.toString() === folder.uri.toString()));
+			return await approveRecordingWorkspaces(folders, tracker, isCurrentRequest, () => vscode.workspace.workspaceFolders, traceRecordingStart);
 		} catch (error) {
 			reportError(error);
 			return false;
 		}
-	});
+	}, () => new Date(), traceRecordingStart);
 	activeRecording = recording;
 	let privacyDiscovery: CodexSessionDiscovery | undefined;
 	let privacyParser: CodexEventParser | undefined;
@@ -488,7 +494,7 @@ export async function activate(context: vscode.ExtensionContext) {
 	}, async hostname => (await vscode.window.showWarningMessage(`Allow assessment uploads to ${hostname}?`, { modal: true,
 		detail: `Separate upload consent: sanitized code, diffs, AI conversations and tool activity may be transmitted for this paired assessment. Recording consent alone does not allow uploads.\n\nSelected workspace identifiers: ${tracker.getApprovedFolders().map(folder => createHash('sha256').update(folder.uri.toString()).digest('hex')).join(', ')}\nEvent categories: ${PRIVACY_EVENT_TYPES.join(', ')}\nScope: assessment_evidence (assessment-evidence.v1), limited to this assessment/recording and destination. Expires at the earliest server assessment deadline, credential expiry or revocation. Disable Uploads revokes consent; Stop & Submit closes the capture window after local writes drain.\n\n${mockAssessments ? 'Local mock only: no evidence is transmitted.' : 'The pinned R4.2D Rails contract sends only encrypted-queue events with verifiable capture-time approvals and matching scoped receipts. A receipt alone never authorizes an event. Stop & Submit freezes evidence, closes capture windows, uploads approved events and requests Rails finalization. Success requires a verified durable submission receipt before the original deadline.'} Reload requires fresh upload consent; Codex/Claude content still requires separate source approval.` }, 'Allow Assessment Uploads')) === 'Allow Assessment Uploads',
 	view => { assessmentStatus.text = `Assessment: ${view.archiving ? 'archiving' : view.state === 'unpaired' && view.archivedCount ? 'ready to pair' : view.state.replace(/_/g, ' ')}${view.mode === 'mock' ? ' (mock)' : ''}`;
-		assessmentStatus.tooltip = formatAssessmentStatus(view); if (view.state === 'unpaired' && !view.archivedCount) { assessmentStatus.hide(); } else { assessmentStatus.show(); } }, 10000, assessmentConsents, assessmentDelivery);
+		assessmentStatus.tooltip = formatAssessmentStatus(view); if (view.state === 'unpaired' && !view.archivedCount) { assessmentStatus.hide(); } else { assessmentStatus.show(); } }, 10000, assessmentConsents, assessmentDelivery, value => output.appendLine(describeAssessmentStart(value)));
 	activeAssessment = assessment;
 	await assessment.initialize();
 	context.subscriptions.push(assessmentStatus, ...registerAssessmentCommands(assessment, mockAssessments),
@@ -536,6 +542,7 @@ export async function activate(context: vscode.ExtensionContext) {
 		}),
 		vscode.commands.registerCommand(START_RECORDING_COMMAND, async () => {
 			try {
+				output.appendLine('Manual Start Recording command invoked. Use Start Assessment for the Rails lifecycle.');
 				await recording.start();
 			} catch (error) {
 				reportError(error);

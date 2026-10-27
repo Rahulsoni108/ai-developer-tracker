@@ -88,6 +88,7 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 	async function pairStart(): Promise<void> {
 		await controller.pair(PAIR_CODE); assert.equal(controller.view.state, 'paired');
 		await controller.start(); assert.equal(controller.view.state, 'active'); assert.equal(recording.isRecording, true);
+		assert.equal(controller.view.lastStart?.step, 'assessment_active'); assert.equal(controller.view.lastStart?.status, 'active');
 	}
 	async function stopPipeline(): Promise<void> {
 		await controller?.dispose(); await delivery?.disable(); recording?.dispose(); await persistence?.flush(); await queue?.close();
@@ -229,6 +230,7 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 	test('registration failure prevents capture and never fabricates a receipt or approval', async () => {
 		await controller.pair(PAIR_CODE); failRegistration = true; await controller.start();
 		assert.equal(recording.isRecording, false); assert.equal(received.length, 0);
+		assert.equal(controller.view.lastStart?.step, 'evidence_consent'); assert.equal(controller.view.lastStart?.status, 'failed');
 		const id = metadata().localRecordingSessionIds[0]; const consent = await queue.getEvidenceConsent(id);
 		assert.equal(consent?.receipt, undefined); assert.equal(await queue.getPendingCount(), 0);
 	});
@@ -259,6 +261,7 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 	test('network loss during start never starts local recording or invents a server session', async () => {
 		await controller.pair(PAIR_CODE); failStart = true; await controller.start();
 		assert.equal(recording.isRecording, false); assert.equal(serverBindings.length, 0); assert.equal(controller.view.state, 'recovery');
+		assert.equal(controller.view.lastStart?.step, 'rails_start'); assert.equal(controller.view.lastStart?.status, 'failed');
 	});
 
 	for (const failure of ['malformed', 'auth', '429', '503', 'disconnect', 'timeout']) {

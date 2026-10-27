@@ -1,3 +1,4 @@
+import type { AssessmentStartDiagnostic, AssessmentStartStep } from './assessmentStartDiagnostics';
 import { assessmentArchiveKey, type AssessmentArchive, type AssessmentArchiveIndex } from './assessmentArchive';
 import { receiptMatches, type AssessmentFinalizationRequest, type FinalizationScope } from './assessmentFinalization';
 import type { AssessmentDeliveryLifecycle } from './assessmentEventDelivery';
@@ -20,7 +21,7 @@ export interface AssessmentView {
 	/** Display only; measured at the last server response, never from the host's wall clock. */
 	remainingMsAtLastCheck?: number; pendingEvents?: number;
 	uploadConsent: boolean; uploadStatus?: string;
-	archiving?: boolean; archivedCount?: number; archivedUnconfirmedCount?: number;
+	lastStart?: AssessmentStartDiagnostic; archiving?: boolean; archivedCount?: number; archivedUnconfirmedCount?: number;
 }
 
 /** Assessment workflow only. RecordingController remains the sole recording-state owner. */
@@ -29,6 +30,7 @@ export class AssessmentController {
 	private phase: AssessmentState = 'unpaired';
 	private reason?: AssessmentFailure;
 	private pendingEvents?: number;
+	private lastStart?: AssessmentStartDiagnostic;
 	private consent = false;
 	private initialized = false;
 	private disposed = false;
@@ -48,24 +50,29 @@ export class AssessmentController {
 		private readonly recording: RecordingController, private readonly evidence: AssessmentEvidence,
 		private readonly confirmUpload: (hostname: string) => Promise<boolean>,
 		private readonly onChange: (view: AssessmentView) => void = () => {}, private readonly requestTimeoutMs = 10000,
-		private readonly evidenceConsents?: AssessmentConsentLifecycle, private readonly delivery?: AssessmentDeliveryLifecycle) {
+		private readonly evidenceConsents?: AssessmentConsentLifecycle, private readonly delivery?: AssessmentDeliveryLifecycle,
+		private readonly onStartDiagnostic: (value: AssessmentStartDiagnostic) => void = () => {}) {
 		this.lifecycle = recording.addLifecycleListener({
+			preparation: 'assessment_authorization',
 			prepare: async (id, current) => {
 				if (!this.starting) { return; }
 				const generation = this.generation; const metadata = this.metadata!;
+				this.startStep('upload_consent');
 				this.consent = await this.confirmUpload(new URL(metadata.connection.uploadEndpoint).hostname);
 				if (!this.consent) { throw new AssessmentApiError('consent_required'); }
 				await this.evidence.disableDevelopmentUploads();
 				if (!current() || this.disposed || generation !== this.generation) { throw new AssessmentApiError('cancelled'); }
 				if (metadata.localRecordingSessionIds.length >= 32) { throw new AssessmentApiError('recovery_required'); }
+				this.startStep('binding_write');
 				metadata.localRecordingSessionIds.push(id); await this.save('starting');
+				this.startStep('rails_start');
 				const status = await this.call(signal => this.api.startOrResume(this.auth!, { requestId: id, localRecordingSessionId: id }, signal));
-				this.accept(status);
+				this.startStep('binding_validation'); this.accept(status);
 				if (status.state !== 'active' || !status.localRecordingSessionIds.includes(id)
 					|| Date.parse(status.deadline!) <= Date.parse(status.serverTime)) { throw new AssessmentApiError('session_ended'); }
 				// Persist binding/deadline BEFORE RecordingController activates any collector.
 				await this.save('starting');
-				if (this.evidenceConsents) { await this.call(signal => this.evidenceConsents!.approve(this.auth!, id, status, signal)); }
+				if (this.evidenceConsents) { this.startStep('evidence_consent'); await this.call(signal => this.evidenceConsents!.approve(this.auth!, id, status, signal)); }
 				if (!current() || this.disposed || generation !== this.generation) { throw new AssessmentApiError('cancelled'); }
 			},
 			started: () => {}, cancelled: id => {
@@ -81,7 +88,7 @@ export class AssessmentController {
 	get view(): AssessmentView {
 		const status = this.metadata?.serverStatus;
 		const mode = this.metadata?.connection.mode ?? (this.api.mode === 'unavailable' ? undefined : this.api.mode);
-		return { state: this.phase, ...(this.archiving ? { archiving: true } : {}),
+		return { state: this.phase, ...(this.lastStart ? { lastStart: { ...this.lastStart } } : {}), ...(this.archiving ? { archiving: true } : {}),
 			...(this.archiveIndex.archives.length ? { archivedCount: this.archiveIndex.archives.length, archivedUnconfirmedCount: this.archiveIndex.archives.filter(item => !item.submissionConfirmed).length } : {}), ...(mode ? { mode } : {}), ...(this.reason ? { reason: this.reason } : {}),
 			...(status ? { serverTime: status.serverTime, ...(status.deadline ? { deadline: status.deadline,
 				remainingMsAtLastCheck: Math.max(0, Date.parse(status.deadline) - Date.parse(status.serverTime)) } : {}) } : {}),
@@ -124,6 +131,7 @@ export class AssessmentController {
 			if (this.archiveIndex.archives.some(item => item.assessmentKey === assessmentArchiveKey(result.connection)) || !validConnection(result.connection) || result.connection.mode !== this.api.mode || !validServerStatus(result.status, result.connection)
 				|| result.status.localRecordingSessionIds.length || !/^[\x21-\x7e]{1,8192}$/.test(result.credential)) { throw new AssessmentApiError('protocol'); }
 			const credentialId = randomUUID();
+			this.lastStart = undefined;
 			this.metadata = { version: 1, connection: result.connection, credentialId, phase: 'paired',
 				localRecordingSessionIds: [], serverStatus: result.status, submitRequestId: randomUUID() };
 			await this.store.putCredential(credentialId, result.credential); await this.save('paired');
@@ -134,20 +142,23 @@ export class AssessmentController {
 		const generation = this.generation;
 		return this.run(async () => {
 			if (this.archiving || this.phase === 'submitted') { return; }
-			if (this.recording.isRecording && this.isAssociatedSession(this.recording.sessionId!)) { this.set('active'); return; }
+			this.startStep('requested');
+			if (this.recording.isRecording && this.isAssociatedSession(this.recording.sessionId!)) { this.startStep('assessment_active', 'active'); this.set('active'); return; }
 			if (this.recording.isRecording || this.recording.isStarting) { throw new AssessmentApiError('recording_busy'); }
 			if (!this.metadata) { throw new AssessmentApiError('rejected'); }
 			if (['submission_pending', 'stopping', 'submitted'].includes(this.metadata.phase)) { throw new AssessmentApiError('recovery_required'); }
-			await this.authenticate(); await this.refresh();
+			this.startStep('credential_check'); await this.authenticate();
+			this.startStep('server_status'); await this.refresh();
 			if (this.disposed || generation !== this.generation) { throw new AssessmentApiError('cancelled'); }
 			if (this.recording.isRecording || this.recording.isStarting) { throw new AssessmentApiError('recording_busy'); }
 			if (!['paired', 'active'].includes(this.metadata.serverStatus.state)) { throw new AssessmentApiError('session_ended'); }
 			this.set('starting'); this.starting = true;
 			try {
 				// Existing dialog/workspace selection is unchanged. Rails gate runs in prepare after consent.
-				await this.recording.start();
+				this.startStep('recording_consent'); await this.recording.start();
 				if (!this.recording.isRecording || !this.isAssociatedSession(this.recording.sessionId!)) { throw new AssessmentApiError('consent_required'); }
-				await this.save('active'); this.set('active'); await this.enableDelivery();
+				this.startStep('recording_activation'); await this.save('active');
+				this.startStep('assessment_active', 'active'); this.set('active'); await this.enableDelivery();
 			} finally { this.starting = false; }
 		});
 	}
@@ -270,7 +281,7 @@ export class AssessmentController {
 					await this.store.archive(snapshot); // Atomic encrypted snapshot + quarantine, BEFORE clearing memory.
 					await this.loadArchiveIndex();
 					if (!this.archiveIndex.archives.some(item => item.archiveId === connectionId)) { throw new AssessmentApiError('storage'); }
-					this.metadata = undefined; this.auth = undefined; this.pendingEvents = undefined; this.closingSessions.clear();
+					this.metadata = undefined; this.auth = undefined; this.pendingEvents = undefined; this.lastStart = undefined; this.closingSessions.clear();
 					this.initialized = true; this.set('unpaired');
 				} catch {
 					// Even an unknown commit outcome keeps this host blocked until retry/reload
@@ -288,12 +299,20 @@ export class AssessmentController {
 		for (const entry of index.archives) { for (const id of entry.recordingSessionIds) { this.archivedRecordings.add(id); } }
 	}
 
+	/** Production recording/workspace diagnostics apply only to an ongoing assessment start. */
+	reportStartPrerequisite(step: AssessmentStartStep): void { if (this.starting) { this.startStep(step); } }
+	private startStep(step: AssessmentStartStep, status: AssessmentStartDiagnostic['status'] = 'running', reason?: AssessmentFailure): void {
+		this.lastStart = { step, status, ...(reason ? { reason } : {}) };
+		try { this.onStartDiagnostic({ ...this.lastStart }); } catch { /* Fixed diagnostic observers cannot change authorization. */ }
+	}
 	private async enableDelivery(): Promise<void> {
 		if (this.archiving || this.disposed || !this.delivery || !this.metadata || !this.consent || this.metadata.serverStatus.state !== 'active' || this.metadata.connection.mode !== 'rails') { return; }
 		try { await this.delivery.enable(this.metadata, () => this.consent && !this.disposed); }
 		catch { this.set(this.phase, 'evidence_pending'); } // Network delivery cannot stop or block local collectors.
 	}
-	showStatus(): Promise<void> { if (this.archiving) { return this.archiveWork ?? Promise.resolve(); } return this.run(async () => { if (this.metadata) { await this.authenticate(); await this.refresh();
+	showStatus(): Promise<void> {
+		if (this.starting && this.lastStart?.status === 'running') { this.set(this.phase, this.reason); return Promise.resolve(); }
+		if (this.archiving) { return this.archiveWork ?? Promise.resolve(); } return this.run(async () => { if (this.metadata) { await this.authenticate(); await this.refresh();
 			if (this.metadata.connection.mode === 'rails') { this.pendingEvents = (await this.evidence.getStatus(this.metadata.localRecordingSessionIds)).pendingEvents; } } else { this.set('unpaired'); } }); }
 	private closeStoppedConsent(id: string): Promise<void> {
 		const previous = this.closingSessions.get(id); if (previous) { return previous; }
@@ -383,6 +402,7 @@ export class AssessmentController {
 		if (this.disposed) { return Promise.resolve(); }
 		const operation = Promise.resolve().then(action).catch(async error => {
 			const reason: AssessmentFailure = error instanceof AssessmentApiError ? error.code : 'unavailable';
+			if (this.lastStart?.status === 'running') { this.startStep(this.lastStart.step, 'failed', reason); }
 			if (this.recording.isRecording && this.isAssociatedSession(this.recording.sessionId!)) {
 				const id = this.recording.sessionId!; this.recording.stop(); try { await this.evidence.flushStopped(id); } catch { /* Recovery remains required. */ }
 			}

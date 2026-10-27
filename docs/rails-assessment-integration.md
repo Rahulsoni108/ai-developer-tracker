@@ -68,6 +68,10 @@ Archival makes no Rails call and does not change any endpoint contract. For exac
 steps, crash recovery, isolation and retention limitations, see
 [E4.7 safe archive and re-pair](assessment-archive.md).
 
+For a paired assessment that stops after the recording confirmation, see the
+[production start prerequisite trace and manual diagnostic steps](assessment-start-diagnostics.md).
+The first confirmation does not replace upload consent or Rails start authorization.
+
 ## Exact endpoint mappings
 
 All paths use the configured/pair-verified origin and no query strings. Authenticated

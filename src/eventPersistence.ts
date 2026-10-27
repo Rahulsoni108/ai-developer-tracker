@@ -51,6 +51,7 @@ export class EventPersistence implements ActivityWriter {
 	})): { dispose(): void } {
 		this.recording = recording; this.approvals = approvals;
 		return recording.addLifecycleListener({
+			preparation: 'local_storage',
 			prepare: async sessionId => {
 				try { await this.queue.beginSession?.(sessionId); if (this.queue.beginSession) { this.sessions.add(sessionId); } }
 				catch (error) { this.diagnostic('queue_failed', safeQueueError(error).code); throw new EventPersistenceError(); }
