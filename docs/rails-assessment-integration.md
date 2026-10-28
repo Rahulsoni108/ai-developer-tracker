@@ -227,3 +227,11 @@ delivery, partial/invalid acknowledgments, 403/429/503, interruption/timeouts, r
 restart recovery, credential-generation isolation, malformed responses, redirects and
 certificate rejection. Only private test agents trust the local test certificate. These
 results do not establish compatibility with a live deployed Rails instance.
+
+## E4.8 disclosure consent boundary
+
+[Independent disclosure consent](assessment-disclosure-consent.md) documents the exact
+R4.6 grant/status/revoke integration, encrypted receipt recovery and candidate commands.
+Recording, upload and disclosure choices remain separate. Raw disclosure is disabled:
+current v1 events/sidecars, flat acknowledgments and finalization contracts are unchanged.
+Joint capture-time approval and Rails content-release contracts remain required.

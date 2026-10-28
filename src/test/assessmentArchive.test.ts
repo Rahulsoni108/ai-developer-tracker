@@ -210,7 +210,7 @@ suite('Safe assessment archive and re-pair', function () {
 	});
 	test('schema v9 migration retains pre-existing evidence and does not manufacture archives', async () => {
 		const id = await active(); const captured = file(); await writer.write(captured); await close(); const db = database();
-		db.exec('DROP TABLE assessment_archive_recordings; DROP TABLE assessment_archives; PRAGMA user_version = 9;'); db.close();
+		db.exec('DROP TABLE disclosure_consents; DROP TABLE assessment_archive_recordings; DROP TABLE assessment_archives; PRAGMA user_version = 9;'); db.close();
 		await open(); assert.equal(controller.view.state, 'recovery'); assert.equal(controller.isAssociatedSession(id), true);
 		assert.deepEqual(await queue.getPending(10), [captured]); assert.equal((await queue.getAssessmentArchiveIndex()).archives.length, 0);
 		await controller.archive(async () => true); assert.equal(controller.view.state, 'unpaired');

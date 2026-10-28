@@ -1,3 +1,4 @@
+import type { DisclosureContext } from './assessmentDisclosureConsent';
 import type { AssessmentStartDiagnostic, AssessmentStartStep } from './assessmentStartDiagnostics';
 import { assessmentArchiveKey, type AssessmentArchive, type AssessmentArchiveIndex } from './assessmentArchive';
 import { receiptMatches, type AssessmentFinalizationRequest, type FinalizationScope } from './assessmentFinalization';
@@ -314,6 +315,20 @@ export class AssessmentController {
 		if (this.starting && this.lastStart?.status === 'running') { this.set(this.phase, this.reason); return Promise.resolve(); }
 		if (this.archiving) { return this.archiveWork ?? Promise.resolve(); } return this.run(async () => { if (this.metadata) { await this.authenticate(); await this.refresh();
 			if (this.metadata.connection.mode === 'rails') { this.pendingEvents = (await this.evidence.getStatus(this.metadata.localRecordingSessionIds)).pendingEvents; } } else { this.set('unpaired'); } }); }
+	/** Optional disclosure actions must never invoke run(), stop capture or replace assessment recovery state. */
+	async withDisclosureContext<T>(grant: boolean, operation: (context: DisclosureContext) => Promise<T>): Promise<T> {
+		const available = () => this.initialized && !this.disposed && !this.archiving && !this.starting && !this.submitting && !this.busy
+			&& this.metadata?.connection.mode === 'rails';
+		if (!available()) { throw new AssessmentApiError('recovery_required'); }
+		await this.authenticate();
+		const metadata = this.metadata!; const generation = this.generation;
+		const currentRecording = this.recording.isRecording && this.isAssociatedSession(this.recording.sessionId!) ? this.recording.sessionId : undefined;
+		const current = () => !!available() && this.metadata === metadata && this.generation === generation
+			&& (!grant || this.phase === 'active' && this.consent && currentRecording !== undefined && this.recording.isRecording && this.recording.sessionId === currentRecording);
+		if (!current()) { throw new AssessmentApiError('consent_required'); }
+		return operation({ auth: this.auth!, localSessionIds: [...metadata.localRecordingSessionIds], currentRecording, current });
+	}
+
 	private closeStoppedConsent(id: string): Promise<void> {
 		const previous = this.closingSessions.get(id); if (previous) { return previous; }
 		const auth = this.auth;

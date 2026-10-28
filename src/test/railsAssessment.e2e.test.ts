@@ -1,3 +1,6 @@
+import { AssessmentDisclosureConsent } from '../assessmentDisclosureConsent';
+import { RailsDisclosureConsentClient } from '../railsDisclosureConsentClient';
+import { validDisclosureRequest, type DisclosureReceipt } from '../assessmentDisclosure';
 import { canonicalSha256 } from '../canonicalJson';
 import { validFinalizationRequest, type AssessmentFinalizationRequest, type AssessmentSubmissionReceipt } from '../assessmentFinalization';
 import * as assert from 'node:assert/strict';
@@ -49,6 +52,7 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 	let receipts: Map<string, Record<string, unknown>>; let requests: { path: string; method: string; body: Record<string, unknown>; authenticated: boolean }[];
 	let received: UploadBody[]; let accepted: Set<string>; let serverBindings: string[]; let starts: Map<string, string>; let startedAt: string | undefined; let deadline: string | undefined;
 	let revoked: boolean; let codeUsed: boolean; let failStart: boolean; let uploadMode: string; let controlMutation: ((path: string, data: unknown) => unknown) | undefined;
+	let disclosures: Map<string, DisclosureReceipt>;
 	let holdUpload: (() => void) | undefined; let failRegistration: boolean;
 	let currentSessionId: string; let currentToken: string; let currentPairCode: string;
 	let submission: AssessmentSubmissionReceipt | undefined; let finalized: AssessmentFinalizationRequest | undefined; let finalizeMode: string;
@@ -103,7 +107,7 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 	suiteTeardown(async () => { await rm(certificates, { recursive: true, force: true }); });
 	setup(async () => {
 		root = await mkdtemp(join(tmpdir(), 'rails-assessment-')); state = new Map(); secrets = new Map();
-		receipts = new Map(); requests = []; received = []; accepted = new Set(); serverBindings = []; starts = new Map();
+		receipts = new Map(); disclosures = new Map(); requests = []; received = []; accepted = new Set(); serverBindings = []; starts = new Map();
 		startedAt = undefined; deadline = undefined; revoked = false; codeUsed = false; failStart = false; uploadMode = 'success'; controlMutation = undefined;
 		uploadConsent = true; recordingConsent = true; holdUpload = undefined; failRegistration = false;
 		submission = undefined; finalized = undefined; finalizeMode = 'success'; currentSessionId = '42'; currentToken = TOKEN; currentPairCode = PAIR_CODE;
@@ -150,6 +154,22 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 				if (!startedAt) { startedAt = stamp(); deadline = new Date(Date.now() + 3600000).toISOString(); }
 				if (!serverBindings.includes(body.local_recording_session_id)) { serverBindings.push(body.local_recording_session_id); }
 				control(status()); return;
+			}
+			if (path.startsWith(BASE + '/disclosure_consents')) {
+				const upload = receipts.get(body.local_recording_session_id);
+				if (!upload) { json(response, { error: 'Forbidden.' }, 403); return; }
+				let receipt = disclosures.get(body.request_id ?? body.consent_id);
+				if (request.method === 'POST' && path === BASE + '/disclosure_consents') {
+					if (!validDisclosureRequest(body) || body.upload_consent_id !== upload.consent_id || upload.state !== 'active') { json(response, { error: 'Forbidden.' }, 403); return; }
+					if (!receipt) { receipt = { consent_id: randomUUID(), upload_consent_id: body.upload_consent_id,
+						local_recording_session_id: body.local_recording_session_id, consent_version: body.consent_version,
+						audience: body.audience, purpose: body.purpose, categories: body.categories, approved_workspace_ids: body.approved_workspace_ids,
+						approved_source_sessions: body.approved_source_sessions, consented_at: stamp(), expires_at: deadline!, revoked_at: null,
+						server_time: stamp(), state: 'active', upload_scope_state: 'active', raw_disclosure_enabled: false, event_authorization: 'capture_approval_contract_required' };
+						disclosures.set(body.request_id, receipt); disclosures.set(receipt.consent_id, receipt); }
+				} else if (!receipt || receipt.local_recording_session_id !== body.local_recording_session_id) { json(response, { error: 'Forbidden.' }, 403); return; }
+				if (request.method === 'DELETE') { receipt!.revoked_at ??= stamp(); receipt!.state = 'revoked'; }
+				receipt!.server_time = stamp(); receipt!.upload_scope_state = upload.state as DisclosureReceipt['upload_scope_state']; control(receipt); return;
 			}
 			if (path.startsWith(BASE + '/evidence_consents')) {
 				if (failRegistration) { json(response, { error: 'Temporarily unavailable.' }, 503); return; }
@@ -200,6 +220,67 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 	teardown(async () => {
 		holdUpload?.(); await stopPipeline(); api.dispose(); server.closeAllConnections();
 		await new Promise<void>(resolve => server.close(() => resolve())); await rm(root, { recursive: true, force: true });
+	});
+
+	test('disclosure HTTPS grant/status/revoke stays separate from capture, protocol-1 uploads and finalization', async () => {
+		await pairStart();
+		const client = new RailsDisclosureConsentClient(new HttpsEventTransport(cert), 1000);
+		const disclosure = new AssessmentDisclosureConsent(queue, client, () => [{ workspaceId: WORKSPACE, session: { source: 'claude', source_session_id: 'dummy-claude' } }]);
+		try {
+			const before = await captureFile();
+			const grant = await controller.withDisclosureContext(true, context => disclosure.grant(context, {
+				categories: ['ai_interactions', 'code_changes', 'tool_activity'], workspaceIds: [WORKSPACE], sourceSessions: [{ source: 'claude', source_session_id: 'dummy-claude' }]
+			}, AbortSignal.timeout(2000)));
+			assert.equal(grant.receipt!.raw_disclosure_enabled, false);
+			await controller.withDisclosureContext(false, context => disclosure.inspect(context, grant, AbortSignal.timeout(2000)));
+			await controller.withDisclosureContext(false, context => disclosure.revoke(context, grant, AbortSignal.timeout(2000)));
+			assert.equal(recording.isRecording, true); assert.equal(controller.view.uploadConsent, true); assert.equal(controller.view.state, 'active');
+			const after = await captureFile(); await until(() => accepted.has(before.eventId) && accepted.has(after.eventId), 'protocol-1 upload');
+			assert.ok(received.flatMap(batch => batch.eventApprovals).every(approval => approval.approvalProtocolVersion === 1));
+			assert.equal(JSON.stringify(received).includes('disclosureConsentReceiptId'), false);
+			await until(async () => await queue.getPendingCount() === 0, 'local durable acknowledgment before finalization');
+			await controller.stopAndSubmit(); assert.equal(controller.view.state, 'submitted'); assert.ok(submission);
+		} finally { client.dispose(); }
+	});
+
+	test('disclosure restart inspection cannot resume recording or promote protocol-1 evidence', async () => {
+		await pairStart();
+		const client = new RailsDisclosureConsentClient(new HttpsEventTransport(cert), 1000);
+		const disclosure = new AssessmentDisclosureConsent(queue, client, () => []);
+		try {
+			const grant = await controller.withDisclosureContext(true, context => disclosure.grant(context, { categories: ['code_changes'], workspaceIds: [WORKSPACE], sourceSessions: [] }, AbortSignal.timeout(2000)));
+			await stopPipeline(); await makePipeline();
+			const restored = new AssessmentDisclosureConsent(queue, client, () => []);
+			assert.equal(recording.isRecording, false); assert.equal(controller.view.uploadConsent, false);
+			const state = await controller.withDisclosureContext(false, context => restored.inspect(context, grant, AbortSignal.timeout(2000)));
+			assert.equal(state.receipt!.upload_scope_state, 'stopped'); assert.equal(state.receipt!.raw_disclosure_enabled, false);
+			await assert.rejects(controller.withDisclosureContext(true, context => restored.grant(context, { categories: ['code_changes'], workspaceIds: [WORKSPACE], sourceSessions: [] }, AbortSignal.timeout(2000))));
+			assert.equal(recording.isRecording, false);
+		} finally { client.dispose(); }
+	});
+
+	test('optional disclosure failure never stops recording; archival isolates receipts and invalidates held contexts', async () => {
+		await pairStart();
+		const client = new RailsDisclosureConsentClient(new HttpsEventTransport(cert), 1000);
+		const disclosure = new AssessmentDisclosureConsent(queue, client, () => []);
+		try {
+			const held = await controller.withDisclosureContext(true, async context => context);
+			controlMutation = (path, data) => path.endsWith('/disclosure_consents') ? { ...data as object, raw_disclosure_enabled: true } : data;
+			await assert.rejects(disclosure.grant(held, { categories: ['code_changes'], workspaceIds: [WORKSPACE], sourceSessions: [] }, AbortSignal.timeout(2000)));
+			assert.equal(recording.isRecording, true); assert.equal(controller.view.state, 'active');
+			controlMutation = undefined;
+			const grant = await disclosure.grant(held, { categories: ['code_changes'], workspaceIds: [WORKSPACE], sourceSessions: [] }, AbortSignal.timeout(2000));
+			await controller.archive(async () => true); assert.equal(controller.view.state, 'unpaired'); assert.equal(held.current(), false);
+			await assert.rejects(disclosure.revoke(held, grant, AbortSignal.timeout(2000)));
+			await assert.rejects(queue.setDisclosureConsent(grant));
+			await assert.rejects(controller.withDisclosureContext(false, context => disclosure.list(context)));
+			assert.equal((await queue.getDisclosureConsents(grant.request.local_recording_session_id)).length, 1);
+			currentSessionId = '3'; currentToken = 'adt_ext_' + 'b'.repeat(43); currentPairCode = 'RSTU-VWXY-Z234-5678';
+			codeUsed = false; serverBindings = []; startedAt = undefined; deadline = undefined;
+			await controller.pair(currentPairCode); await controller.start(); assert.equal(controller.view.state, 'active');
+			assert.deepEqual(await controller.withDisclosureContext(false, context => disclosure.list(context)), []);
+			await controller.withDisclosureContext(false, async context => { await assert.rejects(disclosure.inspect(context, grant, AbortSignal.timeout(2000))); });
+		} finally { client.dispose(); }
 	});
 
 	test('pairs, binds, registers consent, filters and encrypts sources, uploads approval sidecars and acknowledges exact IDs', async () => {

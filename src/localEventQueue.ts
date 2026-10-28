@@ -1,3 +1,4 @@
+import { validDisclosureState, type DisclosureState } from './assessmentDisclosure';
 import { assessmentArchiveKey, validAssessmentArchive, MAX_ASSESSMENT_ARCHIVES, type AssessmentArchive, type AssessmentArchiveIndex } from './assessmentArchive';
 import { validFinalizationRequest, type AssessmentFinalizationRequest, type FinalizationScope } from './assessmentFinalization';
 import { createAssessmentEventApproval, type AssessmentApprovalBinding } from './assessmentEventApproval';
@@ -21,7 +22,7 @@ export const MAX_QUEUE_BATCH = 1000;
 // Allow JSON escaping overhead for diffs up to the common schema's 2 MiB limit.
 export const MAX_QUEUE_EVENT_BYTES = 16 * 1024 * 1024;
 export const DEFAULT_QUEUE_STORAGE_BYTES = 100 * 1024 * 1024;
-export const QUEUE_DATABASE_VERSION = 10;
+export const QUEUE_DATABASE_VERSION = 11;
 // Shared with the worker proxy to distinguish live threads from abandoned threads in this process.
 export const QUEUE_PROCESS_INSTANCE_ID = randomUUID();
 export const ACTIVE_QUEUE_OWNERS = new Set<string>();
@@ -175,7 +176,7 @@ export class LocalEventQueue {
 			database = new DatabaseSync(path, { allowExtension: false });
 			database.exec('PRAGMA busy_timeout = 1000; PRAGMA synchronous = FULL; PRAGMA trusted_schema = OFF;');
 			const version = database.prepare('PRAGMA user_version').get()?.user_version;
-			if (![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, QUEUE_DATABASE_VERSION].includes(Number(version))) { throw new LocalEventQueueError('Unsupported queue database version.'); }
+			if (![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, QUEUE_DATABASE_VERSION].includes(Number(version))) { throw new LocalEventQueueError('Unsupported queue database version.'); }
 			const integrity = database.prepare('PRAGMA integrity_check(1)').all();
 			if (integrity.length !== 1 || integrity[0].integrity_check !== 'ok') {
 				throw new LocalEventQueueError('Queue database integrity check failed.', 'corrupt');
@@ -293,6 +294,10 @@ export class LocalEventQueue {
 						CREATE INDEX archived_assessments ON assessment_archives(assessment_key);
 						CREATE TABLE assessment_archive_recordings (session_id TEXT PRIMARY KEY, archive_id TEXT NOT NULL REFERENCES assessment_archives(archive_id)) STRICT;
 						CREATE INDEX archive_recordings ON assessment_archive_recordings(archive_id); PRAGMA user_version = 10;`);
+				}
+				if (database.prepare('PRAGMA user_version').get()?.user_version === 10) {
+					database.exec(`CREATE TABLE disclosure_consents (request_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, state_json TEXT NOT NULL) STRICT;
+						CREATE INDEX disclosure_recordings ON disclosure_consents(session_id); PRAGMA user_version = 11;`);
 				}
 				queue.readAssessmentArchiveIndex();
 				queue.verifyCounters();
@@ -494,6 +499,52 @@ export class LocalEventQueue {
 					throw new LocalEventQueueError('Evidence scope must precede capture.');
 				}
 				this.database.prepare('INSERT INTO evidence_consents VALUES (?, ?) ON CONFLICT(session_id) DO UPDATE SET consent_json = excluded.consent_json').run(id, encrypted);
+			});
+		});
+	}
+
+	getDisclosureConsents(sessionId: string): Promise<DisclosureState[]> {
+		if (!isUuid(sessionId)) { return Promise.reject(new LocalEventQueueError('Invalid disclosure scope.')); }
+		return this.schedule(() => this.readDisclosureConsents(sessionId));
+	}
+	private readDisclosureConsents(sessionId: string): DisclosureState[] {
+		return this.database.prepare('SELECT request_id, state_json FROM disclosure_consents WHERE session_id = ? ORDER BY rowid LIMIT 129').all(sessionId).map(row => {
+			const value = this.cipher?.decrypt(String(row.request_id), JSON.parse(String(row.state_json)), 'disclosure') as DisclosureState;
+			if (!validDisclosureState(value) || value.request.request_id !== row.request_id || value.request.local_recording_session_id !== sessionId) { throw new EvidenceEncryptionError('authentication_failed'); }
+			return value;
+		});
+	}
+	/** Disclosure receipts do not create or change event approvals. Archived scopes remain immutable. */
+	setDisclosureConsent(state: DisclosureState): Promise<void> {
+		let snapshot: DisclosureState;
+		try { snapshot = JSON.parse(JSON.stringify(state)); if (!validDisclosureState(snapshot)) { throw new Error(); } }
+		catch { return Promise.reject(new LocalEventQueueError('Invalid disclosure consent.')); }
+		return this.schedule(async () => {
+			if (!this.cipher) { throw new EvidenceEncryptionError('key_missing'); }
+			const id = snapshot.request.local_recording_session_id;
+			const encrypted = JSON.stringify(this.cipher.encrypt(snapshot.request.request_id, JSON.stringify(snapshot), 'disclosure'));
+			await this.writeWithReservation(Buffer.byteLength(encrypted), () => {
+				if (this.isArchivedRecording(id) || this.isArchivedAssessment(snapshot.codingSessionId, snapshot.origin)) { throw new LocalEventQueueError('Archived evidence scope is immutable.'); }
+				const upload = this.readEvidenceConsent(id);
+				if (!upload || upload.codingSessionId !== snapshot.codingSessionId || upload.origin !== snapshot.origin
+					|| upload.credentialDigest !== snapshot.credentialDigest || upload.deadline !== snapshot.deadline
+					|| upload.receipt?.consent_id !== snapshot.request.upload_consent_id
+					|| snapshot.request.approved_workspace_ids.some(w => !upload.request.approved_workspace_ids.includes(w))
+					|| snapshot.receipt && (Date.parse(snapshot.receipt.expires_at) > Date.parse(upload.receipt!.expires_at)
+						|| Date.parse(snapshot.receipt.consented_at) < Date.parse(upload.receipt!.consented_at))) { throw new LocalEventQueueError('Conflicting disclosure scope.'); }
+				const states = this.readDisclosureConsents(id);
+				const previous = states.find(s => s.request.request_id === snapshot.request.request_id);
+				if (!previous && (states.length >= 128 || upload.locallyRevoked || upload.captureClosed || upload.pendingAction || upload.receipt.state !== 'active')) { throw new LocalEventQueueError('Disclosure scope unavailable.'); }
+				if (previous && (JSON.stringify({ ...previous, receipt: undefined, pendingAction: undefined, locallyRevoked: false }) !== JSON.stringify({ ...snapshot, receipt: undefined, pendingAction: undefined, locallyRevoked: false })
+					|| previous.locallyRevoked && !snapshot.locallyRevoked
+					|| previous.receipt && (!snapshot.receipt || previous.receipt.consent_id !== snapshot.receipt.consent_id
+						|| previous.receipt.consented_at !== snapshot.receipt.consented_at || previous.receipt.expires_at !== snapshot.receipt.expires_at
+						|| Date.parse(snapshot.receipt.server_time) < Date.parse(previous.receipt.server_time)
+						|| previous.receipt.revoked_at !== null && snapshot.receipt.revoked_at !== previous.receipt.revoked_at))) { throw new LocalEventQueueError('Conflicting disclosure consent.'); }
+				this.database.prepare('INSERT INTO disclosure_consents VALUES (?, ?, ?) ON CONFLICT(request_id) DO UPDATE SET state_json = excluded.state_json WHERE session_id = excluded.session_id')
+					.run(snapshot.request.request_id, id, encrypted);
+				const saved = this.database.prepare('SELECT session_id FROM disclosure_consents WHERE request_id = ?').get(snapshot.request.request_id);
+				if (saved?.session_id !== id) { throw new LocalEventQueueError('Conflicting disclosure scope.'); }
 			});
 		});
 	}
@@ -1000,6 +1051,7 @@ export class LocalEventQueue {
 			DELETE FROM assessment_finalizations WHERE NOT EXISTS (SELECT 1 FROM finalization_recordings f WHERE f.request_id = assessment_finalizations.request_id);`);
 		this.database.exec(`DELETE FROM event_approvals WHERE event_id IN (SELECT event_id FROM queued_events ${all ? '' : 'WHERE session_id IN (SELECT session_id FROM cleanup_sessions)'});
 			DELETE FROM evidence_consents ${all ? '' : 'WHERE session_id IN (SELECT session_id FROM cleanup_sessions)'};
+			DELETE FROM disclosure_consents ${all ? '' : 'WHERE session_id IN (SELECT session_id FROM cleanup_sessions)'};
 			DELETE FROM approval_revocations ${all ? '' : 'WHERE session_id IN (SELECT session_id FROM cleanup_sessions)'};`);
 		const deletedRecords = Number(this.database.prepare('DELETE FROM queued_events'  + (all ? '' : ' WHERE session_id IN (SELECT session_id FROM cleanup_sessions)')).run().changes);
 		this.database.exec('DELETE FROM recording_privacy_health WHERE session_id IN (SELECT session_id FROM cleanup_sessions)');
@@ -1172,7 +1224,7 @@ export class LocalEventQueue {
 			'count_interrupted_insert', 'count_interrupted_update', 'pending_events', 'session_owners', 'session_history', 'recording_privacy_health', 'queue_encryption_keys',
 			'queue_maintenance', 'retention_events', 'count_event_delete', 'count_session_delete',
 			'delivery_batches', 'delivery_members', 'delivery_owners', 'delivery_claims', 'upload_retry_state',
-			'event_approvals', 'evidence_consents', 'approval_revocations'];
+			'event_approvals', 'evidence_consents', 'approval_revocations', 'disclosure_consents', 'disclosure_recordings'];
 		const schema = new Set(this.database.prepare('SELECT name FROM sqlite_master').all().map(row => row.name));
 		if (required.some(name => !schema.has(name))) { throw new LocalEventQueueError('Queue schema integrity check failed.', 'corrupt'); }
 		const counters = this.database.prepare('SELECT * FROM queue_health WHERE singleton = 1').get();

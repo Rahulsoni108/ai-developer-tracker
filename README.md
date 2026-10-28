@@ -8,6 +8,8 @@ Candidates can currently use development recording commands in a local coding wo
 
 **Current status:** recording, local storage, AI adapters and upload infrastructure are implemented and covered by automated tests. [E4.5](docs/rails-assessment-integration.md) adds real Rails pairing/start/status/consent APIs and scoped evidence uploads for the reviewed R4.2D contract. Configure a trusted HTTPS `assessment.apiOrigin` in user settings; it is empty/disabled by default. [E4.6](docs/assessment-finalization.md) adds real Stop & Submit with frozen encrypted manifests, durable acknowledgment reconciliation and validated Rails R4.3 receipts. [E4.7](docs/assessment-archive.md) adds explicit encrypted archival and fresh pairing while retaining old evidence and credentials. Live deployment verification is still required.
 
+**E4.8 disclosure consent:** [Configure, inspect and revoke independent recruiter disclosure scope](docs/assessment-disclosure-consent.md). All category, workspace and confirmed AI-session choices are explicit and unselected by default. Rails currently registers scope only; raw code/conversation disclosure remains disabled and existing v1 events cannot gain permission retroactively.
+
 ## 2. Technology Stack
 
 | Area | Implementation |

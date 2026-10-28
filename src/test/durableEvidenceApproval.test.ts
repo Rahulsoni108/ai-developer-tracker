@@ -110,7 +110,7 @@ suite('Durable exact-event evidence approvals', function () {
 	test('migrates version-7 queues without manufacturing approvals for existing encrypted evidence', async () => {
 		const historical = file(); await queue.enqueue(historical); await writer.close();
 		const db = new DatabaseSync(join(storage().fsPath, LOCAL_QUEUE_FILENAME));
-		db.exec('DROP TABLE assessment_archive_recordings; DROP TABLE assessment_archives; DROP TABLE finalization_recordings; DROP TABLE assessment_finalizations; DROP TABLE event_approvals; DROP TABLE evidence_consents; DROP TABLE approval_revocations; PRAGMA user_version = 7;'); db.close();
+		db.exec('DROP TABLE disclosure_consents; DROP TABLE assessment_archive_recordings; DROP TABLE assessment_archives; DROP TABLE finalization_recordings; DROP TABLE assessment_finalizations; DROP TABLE event_approvals; DROP TABLE evidence_consents; DROP TABLE approval_revocations; PRAGMA user_version = 7;'); db.close();
 		queue = await openTestWorkerQueue(storage(), []); writer = openWriter(); await writer.write(historical);
 		assert.equal(await writer.resolveUploadPrivacyContext(historical), undefined); assert.deepEqual(await queue.getPending(10), [historical]);
 	});

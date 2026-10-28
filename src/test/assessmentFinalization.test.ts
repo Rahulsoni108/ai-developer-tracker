@@ -115,7 +115,7 @@ suite('Assessment frozen finalization manifests', function () {
 	test('upgrading schema v8 preserves evidence and does not manufacture frozen manifests', async () => {
 		const captured = event(); await queue.enqueueApproved(captured, context()); await closed(); await queue.close();
 		const db = new DatabaseSync(join(storage().fsPath, LOCAL_QUEUE_FILENAME));
-		db.exec('DROP TABLE assessment_archive_recordings; DROP TABLE assessment_archives; DROP TABLE finalization_recordings; DROP TABLE assessment_finalizations; PRAGMA user_version = 8;'); db.close();
+		db.exec('DROP TABLE disclosure_consents; DROP TABLE assessment_archive_recordings; DROP TABLE assessment_archives; DROP TABLE finalization_recordings; DROP TABLE assessment_finalizations; PRAGMA user_version = 8;'); db.close();
 		queue = await openTestWorkerQueue(storage(), []); assert.deepEqual(await queue.getPending(10), [captured]);
 		await assert.rejects(queue.freezeFinalization(scope, true)); assert.equal((await queue.freezeFinalization(scope)).recordings[0].event_count, 1);
 	});

@@ -1,3 +1,4 @@
+import type { DisclosureState } from './assessmentDisclosure';
 import type { AssessmentArchive } from './assessmentArchive';
 import type { FinalizationScope } from './assessmentFinalization';
 import type { AssessmentApprovalBinding } from './assessmentEventApproval';
@@ -95,6 +96,8 @@ async function run(): Promise<void> {
 					}
 					case 'getUploadPrivacyContext': value = await queue.getUploadPrivacyContext(request.argument as TrackerEvent); break;
 					case 'revokeEvidenceApprovals': await queue.revokeEvidenceApprovals(request.argument as string); break;
+					case 'getDisclosureConsents': value = await queue.getDisclosureConsents(request.argument as string); break;
+					case 'setDisclosureConsent': await queue.setDisclosureConsent(request.argument as DisclosureState); break;
 					case 'getEvidenceConsent': value = await queue.getEvidenceConsent(request.argument as string); break;
 					case 'setEvidenceConsent': await queue.setEvidenceConsent(request.argument as EvidenceConsentState); break;
 					case 'enqueue': await queue.enqueue(request.argument); break;

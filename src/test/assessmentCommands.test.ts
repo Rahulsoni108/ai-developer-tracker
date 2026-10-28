@@ -1,3 +1,4 @@
+import { GRANT_DISCLOSURE_COMMAND, STATUS_DISCLOSURE_COMMAND, REVOKE_DISCLOSURE_COMMAND } from '../assessmentDisclosureCommands';
 import * as assert from 'node:assert/strict';
 import * as vscode from 'vscode';
 import { ARCHIVE_ASSESSMENT_COMMAND, ASSESSMENT_STATUS_COMMAND, PAIR_ASSESSMENT_COMMAND, START_ASSESSMENT_COMMAND, SUBMIT_ASSESSMENT_COMMAND, formatAssessmentStatus } from '../assessmentCommands';
@@ -8,7 +9,7 @@ suite('Assessment VS Code commands', () => {
 		this.timeout(15000); const view = await vscode.commands.executeCommand<AssessmentView>(ASSESSMENT_STATUS_COMMAND);
 		assert.equal(view!.state, 'unpaired'); assert.equal(view!.uploadConsent, false);
 		const commands = await vscode.commands.getCommands();
-		for (const command of [ARCHIVE_ASSESSMENT_COMMAND, ASSESSMENT_STATUS_COMMAND, PAIR_ASSESSMENT_COMMAND, START_ASSESSMENT_COMMAND, SUBMIT_ASSESSMENT_COMMAND]) { assert.ok(commands.includes(command)); }
+		for (const command of [GRANT_DISCLOSURE_COMMAND, STATUS_DISCLOSURE_COMMAND, REVOKE_DISCLOSURE_COMMAND, ARCHIVE_ASSESSMENT_COMMAND, ASSESSMENT_STATUS_COMMAND, PAIR_ASSESSMENT_COMMAND, START_ASSESSMENT_COMMAND, SUBMIT_ASSESSMENT_COMMAND]) { assert.ok(commands.includes(command)); }
 	});
 	test('status text makes pending submission and mock timing limitations explicit without connection identifiers', () => {
 		const text = formatAssessmentStatus({ state: 'submission_pending', mode: 'mock', uploadConsent: false, pendingEvents: 2,
