@@ -1,3 +1,5 @@
+import { RailsDisclosureConsentClient } from './railsDisclosureConsentClient';
+import type { DisclosureState } from './assessmentDisclosure';
 import { validFinalizationRequest, receiptMatches } from './assessmentFinalization';
 import { createHash } from 'node:crypto';
 import { isUuid } from './eventSchema';
@@ -29,9 +31,11 @@ export function inspectRailsUploadPermit(permit: RailsUploadPermit | undefined, 
 export class RailsAssessmentApiClient implements AssessmentApiClient, EvidenceConsentApi {
 	readonly mode = 'rails' as const;
 	private readonly consents: RailsEvidenceConsentClient;
+	private readonly disclosures: RailsDisclosureConsentClient;
 	constructor(readonly origin: string, private readonly transport: UploadTransport = new HttpsEventTransport(), private readonly timeoutMs = 10000) {
 		if (origin.length > 2048 || !validOrigin(origin) || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120000) { throw new AssessmentApiError('protocol'); }
 		this.consents = new RailsEvidenceConsentClient(transport, timeoutMs);
+		this.disclosures = new RailsDisclosureConsentClient(transport, timeoutMs);
 	}
 	async pair(code: string, signal: AbortSignal) {
 		if (code.length > 64 || !/^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{16}$/.test(code.replace(/-/g, '').toUpperCase())) { throw new AssessmentApiError('rejected'); }
@@ -71,6 +75,10 @@ export class RailsAssessmentApiClient implements AssessmentApiClient, EvidenceCo
 	register(auth: AssessmentAuthentication, state: EvidenceConsentState, signal: AbortSignal) { this.checkAuth(auth); return this.consents.register(auth, state, signal); }
 	stop(auth: AssessmentAuthentication, state: EvidenceConsentState, signal: AbortSignal) { this.checkAuth(auth); return this.consents.stop(auth, state, signal); }
 	revoke(auth: AssessmentAuthentication, state: EvidenceConsentState, signal: AbortSignal) { this.checkAuth(auth); return this.consents.revoke(auth, state, signal); }
+	inspectDisclosure(auth: AssessmentAuthentication, state: DisclosureState, signal: AbortSignal) {
+		this.checkAuth(auth); return this.disclosures.send(auth, state, 'status', signal);
+	}
+
 	async authorizeUpload(auth: AssessmentAuthentication, state: EvidenceConsentState, batch: PreparedEventBatch, signal: AbortSignal, expected?: AssessmentServerStatus): Promise<RailsUploadPermit> {
 		this.checkAuth(auth);
 		if (!validConsentState(state) || state.credentialDigest !== createHash('sha256').update(auth.credential).digest('hex') || state.codingSessionId !== auth.connection.codingSessionId || state.origin !== this.origin

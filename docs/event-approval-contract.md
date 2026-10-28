@@ -1,5 +1,7 @@
 # E4.4 — assessment event approval contract v1
 
+**E4.9:** [Protocol-2 approvals](assessment-protocol2-approvals.md) add prospective disclosure authorization for new eligible events. Protocol 1 and historical events remain unchanged. Earlier availability notes below are historical.
+
 E4.5 update: [real Rails assessment integration](rails-assessment-integration.md) now
 connects the documented R4.2D control APIs and scoped uploader, with fresh upload consent,
 exact capture-time approvals and credential-generation checks. The historical implementation

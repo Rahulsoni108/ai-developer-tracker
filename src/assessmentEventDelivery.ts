@@ -42,8 +42,8 @@ export class AssessmentEventDelivery implements AssessmentDeliveryLifecycle {
 				for (const id of snapshot.localRecordingSessionIds) {
 					if (!current()) { throw new AssessmentApiError('consent_required'); }
 					// Reserve sidecar overhead per event so an otherwise valid batch fits the complete wire limit.
-					const count = Math.max(1, Math.min(maxEvents, Math.floor((maxBytes - 128) / 1024)));
-					const batch = await this.queue.prepareBatch(count, Math.max(2, maxBytes - count * 640), id);
+					const count = Math.max(1, Math.min(maxEvents, Math.floor((maxBytes - 128) / 1280)));
+					const batch = await this.queue.prepareBatch(count, Math.max(2, maxBytes - count * 1024), id);
 					if (batch) { activeSession = id; return batch; }
 				}
 				return null;
@@ -56,7 +56,16 @@ export class AssessmentEventDelivery implements AssessmentDeliveryLifecycle {
 			if (!scope) { throw new AssessmentApiError('consent_required'); }
 			permit = await this.api.authorizeUpload(identity, scope, batch, signal, snapshot.serverStatus);
 			binding = inspectRailsUploadPermit(permit, batch, snapshot.connection.uploadEndpoint, token);
-			if (!binding || !current()) { throw new AssessmentApiError('consent_required'); } return permit;
+			if (!binding || !current()) { throw new AssessmentApiError('consent_required'); }
+			// Only receipts referenced by exact authenticated queued approvals; never infer or mint approvals here.
+			for (const state of await this.queue.getAssessmentDisclosureConsents(batch.events, binding).catch(() => { throw new AssessmentApiError('consent_required'); })) {
+				await this.queue.suspendDisclosureCapture(state.request.local_recording_session_id);
+				const requestedAt = process.hrtime.bigint();
+				const receipt = await this.api.inspectDisclosure(identity, state, signal);
+				if (!current()) { throw new AssessmentApiError('consent_required'); }
+				await this.queue.confirmDisclosureConsent({ state: { ...state, receipt }, requestedAt });
+			}
+			return permit;
 		};
 		const driver = new EventUploader(batches, this.queue, { get: async () => (await auth()).credential }, {
 			...this.options, endpoint: snapshot.connection.uploadEndpoint, confirmUpload: async origin => current() && origin === snapshot.connection.apiOrigin,

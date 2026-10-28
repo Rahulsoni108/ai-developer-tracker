@@ -1,3 +1,4 @@
+import type { DisclosureConfirmation } from './disclosureCapture';
 import type { DisclosureState } from './assessmentDisclosure';
 import type { AssessmentArchive } from './assessmentArchive';
 import type { FinalizationScope } from './assessmentFinalization';
@@ -58,6 +59,20 @@ async function run(): Promise<void> {
 		}
 	};
 	port.on('message', (request: QueueRequest) => {
+		// Denial must take effect even while a prior capture is awaiting disk admission.
+		if (request.operation === 'suspendDisclosureCapture') {
+			try { const args = request.argument as { sessionId?: string; requestId?: string; seal?: boolean };
+				queue.suspendDisclosureCapture(args.sessionId, args.requestId, args.seal); port.postMessage({ type: 'result', id: request.id, ok: true } satisfies QueueReply); }
+			catch { port.postMessage({ type: 'result', id: request.id, ok: false, code: 'unavailable' } satisfies QueueReply); }
+			return;
+		}
+		// Parent withdrawal/stop is also an immediate deny before queued disk mutations complete.
+		if (request.operation === 'setEvidenceConsent') {
+			const state = request.argument as EvidenceConsentState;
+			if (state?.captureClosed || state?.locallyRevoked) {
+				try { queue.suspendDisclosureCapture(state.request.local_recording_session_id, undefined, true); } catch { /* Normal validation below rejects malformed requests. */ }
+			}
+		}
 		pending = pending.then(async () => {
 			try {
 				let value: unknown;
@@ -87,8 +102,8 @@ async function run(): Promise<void> {
 					case 'releaseBatch': await queue.releaseBatch(request.argument as string); break;
 					case 'getDeliveryStatus': value = await queue.getDeliveryStatus(); break;
 					case 'enqueueApproved': {
-						const args = request.argument as { event: unknown; context: UploadPrivacyContext };
-						await queue.enqueueApproved(args.event, args.context); break;
+						const args = request.argument as { event: unknown; context: UploadPrivacyContext; capturedAt?: bigint };
+						await queue.enqueueApproved(args.event, args.context, args.capturedAt); break;
 					}
 					case 'getAssessmentUploadContext': {
 						const args = request.argument as { event: TrackerEvent; binding: AssessmentApprovalBinding };
@@ -96,6 +111,9 @@ async function run(): Promise<void> {
 					}
 					case 'getUploadPrivacyContext': value = await queue.getUploadPrivacyContext(request.argument as TrackerEvent); break;
 					case 'revokeEvidenceApprovals': await queue.revokeEvidenceApprovals(request.argument as string); break;
+					case 'confirmDisclosureConsent': await queue.confirmDisclosureConsent(request.argument as DisclosureConfirmation); break;
+					case 'getAssessmentDisclosureConsents': { const args = request.argument as { events: TrackerEvent[]; binding: AssessmentApprovalBinding };
+						value = await queue.getAssessmentDisclosureConsents(args.events, args.binding); break; }
 					case 'getDisclosureConsents': value = await queue.getDisclosureConsents(request.argument as string); break;
 					case 'setDisclosureConsent': await queue.setDisclosureConsent(request.argument as DisclosureState); break;
 					case 'getEvidenceConsent': value = await queue.getEvidenceConsent(request.argument as string); break;

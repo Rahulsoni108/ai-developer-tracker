@@ -1,3 +1,4 @@
+import type { DisclosureConfirmation } from './disclosureCapture';
 import type { DisclosureState } from './assessmentDisclosure';
 import type { AssessmentArchive, AssessmentArchiveIndex } from './assessmentArchive';
 import type { AssessmentFinalizationRequest, FinalizationScope } from './assessmentFinalization';
@@ -18,7 +19,7 @@ import type { PrivacyReasonCode } from './privacyFilter';
 import { EvidenceEncryptionError, type EncryptionKeys, type EncryptionRequirements } from './evidenceEncryption';
 import { supplyEvidenceKeys, type EvidenceSecretStorage } from './evidenceKeyStorage';
 
-export type QueueOperation = 'getDisclosureConsents' | 'setDisclosureConsent' | 'archiveAssessment' | 'getAssessmentArchiveIndex' | 'freezeFinalization' | 'getAssessmentUploadContext' | 'enqueueApproved' | 'getUploadPrivacyContext' | 'revokeEvidenceApprovals' | 'getEvidenceConsent' | 'setEvidenceConsent' | 'getSessionEvidenceStatus' | 'getRecordedEventSummary' | 'getUploadRetryState' | 'configureUpload' | 'claimUploadAttempt' | 'finishUploadAttempt' | 'prepareBatch' | 'markDelivered' | 'releaseBatch' | 'getDeliveryStatus' | 'enqueue' | 'getPending' | 'markAcknowledged' | 'getPendingCount' | 'getHealth' | 'beginSession' | 'finishSession' | 'getRecordingSessions' | 'recordPrivacyRejection' | 'getPrivacyHealth' | 'getLocalDataSummary' | 'acquireMaintenance' | 'releaseMaintenance' | 'deleteEvidence' | 'expireAcknowledged' | 'close';
+export type QueueOperation = 'suspendDisclosureCapture' | 'confirmDisclosureConsent' | 'getAssessmentDisclosureConsents' | 'getDisclosureConsents' | 'setDisclosureConsent' | 'archiveAssessment' | 'getAssessmentArchiveIndex' | 'freezeFinalization' | 'getAssessmentUploadContext' | 'enqueueApproved' | 'getUploadPrivacyContext' | 'revokeEvidenceApprovals' | 'getEvidenceConsent' | 'setEvidenceConsent' | 'getSessionEvidenceStatus' | 'getRecordedEventSummary' | 'getUploadRetryState' | 'configureUpload' | 'claimUploadAttempt' | 'finishUploadAttempt' | 'prepareBatch' | 'markDelivered' | 'releaseBatch' | 'getDeliveryStatus' | 'enqueue' | 'getPending' | 'markAcknowledged' | 'getPendingCount' | 'getHealth' | 'beginSession' | 'finishSession' | 'getRecordingSessions' | 'recordPrivacyRejection' | 'getPrivacyHealth' | 'getLocalDataSummary' | 'acquireMaintenance' | 'releaseMaintenance' | 'deleteEvidence' | 'expireAcknowledged' | 'close';
 export interface LocalStorageSummary extends LocalDataSummary { legacyLogCount: number; diagnosticFileCount: number }
 export interface LocalCleanupResult extends CleanupResult { deletedFiles: number; filesFailed: boolean; storageFailed?: boolean }
 export interface QueueRequest { id: number; operation: QueueOperation; argument?: unknown }
@@ -122,13 +123,19 @@ export class AsyncLocalEventQueue {
 	async releaseBatch(batchId: string): Promise<void> { await this.request('releaseBatch', batchId); }
 	async getDeliveryStatus(): Promise<DeliveryStatus> { return await this.request('getDeliveryStatus') as DeliveryStatus; }
 	async enqueue(event: unknown): Promise<void> { await this.request('enqueue', event); }
-	async enqueueApproved(event: unknown, context: UploadPrivacyContext): Promise<void> { await this.request('enqueueApproved', { event, context }); }
+	async enqueueApproved(event: unknown, context: UploadPrivacyContext, capturedAt = process.hrtime.bigint()): Promise<void> { await this.request('enqueueApproved', { event, context, capturedAt }); }
 	async getUploadPrivacyContext(event: TrackerEvent): Promise<UploadPrivacyContext | undefined> { return await this.request('getUploadPrivacyContext', event) as UploadPrivacyContext | undefined; }
 	async getAssessmentUploadContext(event: TrackerEvent, binding: AssessmentApprovalBinding): Promise<UploadPrivacyContext | undefined> {
 		return await this.request('getAssessmentUploadContext', { event, binding }) as UploadPrivacyContext | undefined;
 	}
 
 	async revokeEvidenceApprovals(sessionId: string): Promise<void> { await this.request('revokeEvidenceApprovals', sessionId); }
+	async suspendDisclosureCapture(sessionId?: string, requestId?: string, seal = false): Promise<void> { await this.request('suspendDisclosureCapture', { sessionId, requestId, seal }); }
+	async confirmDisclosureConsent(value: DisclosureConfirmation): Promise<void> { await this.request('confirmDisclosureConsent', value); }
+	async getAssessmentDisclosureConsents(events: readonly TrackerEvent[], binding: AssessmentApprovalBinding): Promise<DisclosureState[]> {
+		return await this.request('getAssessmentDisclosureConsents', { events, binding }) as DisclosureState[];
+	}
+
 	async getDisclosureConsents(sessionId: string): Promise<DisclosureState[]> { return await this.request('getDisclosureConsents', sessionId) as DisclosureState[]; }
 	async setDisclosureConsent(state: DisclosureState): Promise<void> { await this.request('setDisclosureConsent', state); }
 

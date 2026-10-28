@@ -10,11 +10,12 @@ export interface DisclosureContext {
 	/** Rechecked across dialogs/network; archival, stop and credential/consent changes invalidate grants. */
 	current(): boolean;
 }
-/** Separate optional control plane. Never mutates events, upload approvals, recording or finalization. */
+/** Coordinates independent disclosure receipts. Only the storage worker can mint new event approvals. */
 export class AssessmentDisclosureConsent {
 	private pending: Promise<unknown> = Promise.resolve();
 	private readonly blocked = new Set<string>();
-	constructor(private readonly queue: Pick<LocalEventQueue, 'getDisclosureConsents' | 'setDisclosureConsent' | 'getEvidenceConsent'>,
+	constructor(private readonly queue: Pick<LocalEventQueue, 'getDisclosureConsents' | 'setDisclosureConsent' | 'getEvidenceConsent'>
+		& Partial<Pick<LocalEventQueue, 'suspendDisclosureCapture' | 'confirmDisclosureConsent'>>,
 		private readonly api: DisclosureApi,
 		private readonly approvedSources: (recordingId: string) => { workspaceId: string; session: DisclosureSource }[]) {}
 	async choices(context: DisclosureContext): Promise<{ workspaceIds: string[]; sources: { workspaceId: string; session: DisclosureSource }[] }> {
@@ -25,6 +26,7 @@ export class AssessmentDisclosureConsent {
 	grant(context: DisclosureContext, selection: DisclosureSelection, signal: AbortSignal): Promise<DisclosureState> {
 		return this.serial(async () => {
 			const upload = await this.upload(context); const id = context.currentRecording!;
+			await this.queue.suspendDisclosureCapture?.(id);
 			const allowed = this.approvedSources(id).filter(s => selection.workspaceIds.includes(s.workspaceId)).map(s => disclosureSourceKey(s.session));
 			if (!selection.categories.length || !selection.workspaceIds.length || selection.workspaceIds.some(w => !upload.request.approved_workspace_ids.includes(w))
 				|| selection.sourceSessions.some(s => !allowed.includes(disclosureSourceKey(s))) || signal.aborted || !context.current()) { throw new AssessmentApiError('consent_required'); }
@@ -36,18 +38,20 @@ export class AssessmentDisclosureConsent {
 			const states = await this.queue.getDisclosureConsents(id);
 			const same = (s: DisclosureState) => JSON.stringify({ ...s.request, request_id: '' }) === JSON.stringify({ ...request, request_id: '' });
 			// Only an explicit retry can resume an unresolved grant. Never restore permission from a receipt alone.
-			let state = states.find(s => s.pendingAction === 'grant' && !s.locallyRevoked && same(s));
+			let state = states.at(-1); if (state && !(state.pendingAction === 'grant' && !state.locallyRevoked && same(state))) { state = undefined; }
 			if (!state) { state = { version: 1, codingSessionId: upload.codingSessionId, origin: upload.origin,
 				credentialDigest: upload.credentialDigest!, deadline: upload.deadline, request, locallyRevoked: false, pendingAction: 'grant' }; }
 			this.owner(context, state);
 			if (!validDisclosureState(state) || this.blocked.has(state.request.request_id)) { throw new AssessmentApiError('consent_required'); }
 			await this.queue.setDisclosureConsent(state);
 			if (!context.current() || signal.aborted || this.blocked.has(state.request.request_id)) { throw new AssessmentApiError('cancelled'); }
+			const requestedAt = process.hrtime.bigint();
 			const receipt = await this.api.send(context.auth, state, 'grant', signal);
 			state = { ...state, receipt, pendingAction: undefined };
 			await this.queue.setDisclosureConsent(state);
+			if (context.current() && !signal.aborted && !this.blocked.has(state.request.request_id)) { await this.queue.confirmDisclosureConsent?.({ state, requestedAt }); }
 			if (!context.current()) { throw new AssessmentApiError('cancelled'); }
-			return state; // raw_disclosure_enabled remains false; no event sidecar or capture permission.
+			return state; // Raw recruiter APIs remain disabled; only new, scoped captures may use protocol 2.
 		});
 	}
 	list(context: DisclosureContext): Promise<DisclosureState[]> {
@@ -61,13 +65,19 @@ export class AssessmentDisclosureConsent {
 		return this.serial(async () => {
 			const stored = await this.stored(context, state);
 			if (!stored.receipt) { return stored; } // Cannot discover unknown receipts by replaying a grant.
+			await this.queue.suspendDisclosureCapture?.(stored.request.local_recording_session_id);
+			const requestedAt = process.hrtime.bigint();
 			const receipt = await this.api.send(context.auth, stored, 'status', signal);
-			const next = { ...stored, receipt }; await this.queue.setDisclosureConsent(next); return next;
+			const next = { ...stored, receipt }; await this.queue.setDisclosureConsent(next);
+			if (context.current() && !signal.aborted && !this.blocked.has(next.request.request_id)) { await this.queue.confirmDisclosureConsent?.({ state: next, requestedAt }); }
+			return next;
 		});
 	}
 	revoke(context: DisclosureContext, state: DisclosureState, signal: AbortSignal): Promise<DisclosureState> {
 		this.blocked.add(state.request.request_id); // Deny future local use immediately, including an in-flight grant.
+		const denial = Promise.resolve(this.queue.suspendDisclosureCapture?.(state.request.local_recording_session_id, state.request.request_id));
 		return this.serial(async () => {
+			await denial;
 			let stored = await this.stored(context, state);
 			stored = { ...stored, locallyRevoked: true, pendingAction: 'revoke' };
 			await this.queue.setDisclosureConsent(stored); // Durable local withdrawal before network.

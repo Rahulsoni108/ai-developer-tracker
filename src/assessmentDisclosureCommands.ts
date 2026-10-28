@@ -7,7 +7,7 @@ import { chooseDisclosure } from './assessmentDisclosureChoices';
 export const GRANT_DISCLOSURE_COMMAND = 'ai-developer-tracker.configureAssessmentDisclosure';
 export const STATUS_DISCLOSURE_COMMAND = 'ai-developer-tracker.showAssessmentDisclosure';
 export const REVOKE_DISCLOSURE_COMMAND = 'ai-developer-tracker.revokeAssessmentDisclosure';
-const blockedNotice = 'Raw recruiter disclosure remains disabled. Protocol-1 events, including existing evidence, remain restricted.';
+const blockedNotice = 'Raw recruiter disclosure remains disabled. Only new, freshly authorized captures may use protocol 2; existing protocol-1 evidence stays restricted.';
 /** Only fixed messages/category counts/server times. Never show/log receipt bodies or private source identifiers. */
 export function registerDisclosureCommands(controller: AssessmentController, consent?: AssessmentDisclosureConsent): vscode.Disposable[] {
 	const perform = async (action: 'grant' | 'status' | 'revoke') => {

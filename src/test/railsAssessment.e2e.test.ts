@@ -23,7 +23,7 @@ import { AsyncLocalEventQueue } from '../asyncLocalEventQueue';
 import { EventPersistence } from '../eventPersistence';
 import { JsonlWriter } from '../jsonlWriter';
 import { RecordingController } from '../recording';
-import { createFileEvent, type TrackerEvent } from '../eventSchema';
+import { createCodexEvent, createClaudeEvent, createFileEvent, type TrackerEvent } from '../eventSchema';
 import { validAssessmentEventApproval, type AssessmentEventApproval } from '../assessmentEventApproval';
 import { parseRailsControlResponse } from '../railsControlResponse';
 import { LOCAL_QUEUE_FILENAME } from '../localEventQueue';
@@ -198,6 +198,19 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 					|| !(receipt.approved_workspace_ids as string[]).includes(event.workspaceId!) || !(receipt.event_types as string[]).includes(event.eventType)) {
 					json(response, { error: 'Authorization rejected.' }, 403); return;
 				}
+				if (proof.approvalProtocolVersion === 2) {
+					const disclosure = disclosures.get(proof.disclosureConsentReceiptId);
+					const category = event.eventType.startsWith('file.') ? 'code_changes'
+						: ['ai.prompt.submitted', 'ai.response.completed'].includes(event.eventType) ? 'ai_interactions' : 'tool_activity';
+					const at = Date.parse(event.timestamp);
+					if (!disclosure || disclosure.local_recording_session_id !== event.sessionId || disclosure.upload_consent_id !== receipt.consent_id
+						|| proof.disclosureCategory !== category || !disclosure.categories.includes(category)
+						|| !disclosure.approved_workspace_ids.includes(event.workspaceId!) || at < Date.parse(disclosure.consented_at)
+						|| at >= Math.min(Date.parse(disclosure.expires_at), disclosure.revoked_at ? Date.parse(disclosure.revoked_at) : Infinity)
+						|| event.source !== 'vscode' && !disclosure.approved_source_sessions.some(scope => scope.source === event.source && scope.source_session_id === event.sourceSessionId)) {
+						json(response, { error: 'Disclosure rejected.' }, 403); return;
+					}
+				}
 			}
 			received.push(body);
 			if (uploadMode === 'hold') { await new Promise<void>(resolve => { holdUpload = resolve; }); }
@@ -220,6 +233,78 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 	teardown(async () => {
 		holdUpload?.(); await stopPipeline(); api.dispose(); server.closeAllConnections();
 		await new Promise<void>(resolve => server.close(() => resolve())); await rm(root, { recursive: true, force: true });
+	});
+
+	async function grantCodeDisclosure(): Promise<{ client: RailsDisclosureConsentClient; coordinator: AssessmentDisclosureConsent; grant: import('../assessmentDisclosure').DisclosureState }> {
+		const client = new RailsDisclosureConsentClient(new HttpsEventTransport(cert), 1000);
+		const coordinator = new AssessmentDisclosureConsent(queue, client, () => []);
+		const grant = await controller.withDisclosureContext(true, context => coordinator.grant(context,
+			{ categories: ['code_changes'], workspaceIds: [WORKSPACE], sourceSessions: [] }, AbortSignal.timeout(2000)));
+		return { client, coordinator, grant };
+	}
+	test('protocol-2 capture uploads mixed immutable sidecars and reconciles finalization without exposing dummy secrets', async () => {
+		await pairStart(); await delivery.disable(); const legacy = await captureFile();
+		const { client } = await grantCodeDisclosure();
+		try {
+			const current = await captureFile(); await controller.enableUploads();
+			await until(async () => await queue.getPendingCount() === 0, 'mixed protocol acknowledgment');
+			const approvals = received.flatMap(batch => batch.eventApprovals);
+			assert.equal(approvals.find(proof => proof.eventId === legacy.eventId)!.approvalProtocolVersion, 1);
+			assert.equal(approvals.find(proof => proof.eventId === current.eventId)!.approvalProtocolVersion, 2);
+			await controller.stopAndSubmit(); assert.equal(controller.view.state, 'submitted');
+			assert.equal(finalized!.recordings[0].event_ids_sha256, canonicalSha256([legacy.eventId, current.eventId].sort()));
+		} finally { client.dispose(); }
+	});
+	test('protocol-2 restart refreshes server consent and retries the original approval after partial acknowledgments', async () => {
+		await pairStart(); await delivery.disable(); const { client } = await grantCodeDisclosure();
+		const first = await captureFile(); const second = await captureFile(); client.dispose();
+		await stopPipeline(); await makePipeline();
+		assert.equal(recording.isRecording, false); assert.equal(controller.view.uploadConsent, false); assert.equal(received.length, 0);
+		uploadMode = 'partial'; await controller.enableUploads();
+		await until(async () => await queue.getPendingCount() === 0, 'restarted protocol-2 upload');
+		const proofs = received.flatMap(batch => batch.eventApprovals);
+		for (const event of [first, second]) {
+			const copies = proofs.filter(proof => proof.eventId === event.eventId);
+			assert.ok(copies.length); assert.equal(copies[0].approvalProtocolVersion, 2);
+			assert.ok(copies.every(proof => JSON.stringify(proof) === JSON.stringify(copies[0])));
+		}
+		assert.ok(requests.some(request => request.path.endsWith('/disclosure_consents/status')));
+		await controller.stopAndSubmit(); assert.equal(controller.view.state, 'submitted');
+	});
+	test('server-side disclosure revocation blocks late captures without downgrading stored protocol-2 approvals', async () => {
+		await pairStart(); await delivery.disable(); const { client, coordinator, grant } = await grantCodeDisclosure();
+		try {
+			const receipt = disclosures.get(grant.receipt!.consent_id)!;
+			receipt.revoked_at = stamp(); receipt.state = 'revoked'; await wait(5);
+			const event = await captureFile(); // Still within the process lease, but the server is authoritative.
+			await controller.enableUploads(); await wait(300);
+			assert.equal(accepted.has(event.eventId), false); assert.equal(await queue.getPendingCount(), 1);
+			assert.equal(recording.isRecording, true);
+			await controller.withDisclosureContext(false, context => coordinator.inspect(context, grant, AbortSignal.timeout(2000)));
+			const after = await captureFile(); const scope = (await queue.getEvidenceConsent(after.sessionId))!;
+			const context = await queue.getAssessmentUploadContext(after, { codingSessionId: currentSessionId, origin, consentReceiptId: scope.receipt!.consent_id, serverTime: stamp() });
+			assert.equal(context!.assessmentEventApproval!.approvalProtocolVersion, 1);
+		} finally { client.dispose(); }
+	});
+	test('approved Codex and Claude visible messages use protocol 2 with sanitized canonical bytes', async () => {
+		await pairStart(); await delivery.disable();
+		const client = new RailsDisclosureConsentClient(new HttpsEventTransport(cert), 1000);
+		const coordinator = new AssessmentDisclosureConsent(queue, client, () => [
+			{ workspaceId: WORKSPACE, session: { source: 'codex', source_session_id: 'dummy-codex' } },
+			{ workspaceId: WORKSPACE, session: { source: 'claude', source_session_id: 'dummy-claude' } }]);
+		try {
+			await controller.withDisclosureContext(true, context => coordinator.grant(context, { categories: ['ai_interactions'], workspaceIds: [WORKSPACE],
+				sourceSessions: [{ source: 'codex', source_session_id: 'dummy-codex' }, { source: 'claude', source_session_id: 'dummy-claude' }] }, AbortSignal.timeout(2000)));
+			const sourceRecord = { sourceFileReference: 'codex-file:' + 'f'.repeat(64), generation: 0, recordIndex: 1, byteOffset: 0, byteLength: 100, recordType: 'response_item' as const };
+			const prompt = createCodexEvent({ sessionId: recording.sessionId!, workspaceId: WORKSPACE, sourceSessionId: 'dummy-codex', eventType: 'ai.prompt.submitted',
+				payload: { text: 'Explain this. password="dummy-e49-secret"', sourceRecord } });
+			const answer = createClaudeEvent({ sessionId: recording.sessionId!, workspaceId: WORKSPACE, sourceSessionId: 'dummy-claude', eventType: 'ai.response.completed',
+				payload: { text: 'Visible answer.', sourceRecord: { ...sourceRecord, sourceFileReference: 'claude-file:' + 'e'.repeat(64), recordType: 'claude_hook' } } });
+			await persistence.write(prompt); await persistence.write(answer); await controller.enableUploads();
+			await until(async () => await queue.getPendingCount() === 0, 'AI protocol-2 acknowledgment');
+			assert.equal(JSON.stringify(received).includes('dummy-e49-secret'), false);
+			for (const event of [prompt, answer]) { assert.equal(received.flatMap(batch => batch.eventApprovals).find(proof => proof.eventId === event.eventId)!.approvalProtocolVersion, 2); }
+		} finally { client.dispose(); }
 	});
 
 	test('disclosure HTTPS grant/status/revoke stays separate from capture, protocol-1 uploads and finalization', async () => {
@@ -533,7 +618,9 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 	});
 
 	test('archiving cancels the old in-flight HTTPS upload, retains its credential/evidence, and new pairing uploads/finalizes only its own events', async () => {
-		uploadMode = 'hold'; await pairStart(); const oldEvent = await captureFile(); await until(() => !!holdUpload, 'old upload held');
+		uploadMode = 'hold'; await pairStart(); const { client } = await grantCodeDisclosure(); client.dispose();
+		const oldEvent = await captureFile(); await until(() => !!holdUpload, 'old upload held');
+		assert.equal(received.flatMap(batch => batch.eventApprovals).find(proof => proof.eventId === oldEvent.eventId)!.approvalProtocolVersion, 2);
 		const oldMetadata = structuredClone(metadata()); const oldToken = await store.getCredential(oldMetadata.credentialId);
 		await controller.archive(async summary => { assert.equal(summary.submissionConfirmed, false); return true; });
 		assert.equal(controller.view.state, 'unpaired'); assert.equal(delivery.status, 'disabled'); assert.equal(await queue.getPendingCount(), 1);
@@ -546,6 +633,7 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 		assert.equal(controller.view.uploadConsent, false); assert.equal(recording.isRecording, false);
 		await controller.start(); assert.equal(controller.view.state, 'active'); const fresh = await captureFile();
 		await until(() => accepted.has(fresh.eventId), 'new event upload');
+		assert.equal(received.flatMap(batch => batch.eventApprovals).find(proof => proof.eventId === fresh.eventId)!.approvalProtocolVersion, 1);
 		await controller.stopAndSubmit(); if (controller.view.state !== 'submitted') {
 			await until(async () => (await queue.getSessionEvidenceStatus([fresh.sessionId])).pendingEvents === 0, 'new local ack'); await controller.stopAndSubmit();
 		}

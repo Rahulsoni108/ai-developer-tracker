@@ -1,3 +1,4 @@
+import { activeDisclosureConfirmation, freshDisclosureConfirmation, disclosureCoversEvent, type DisclosureConfirmation } from './disclosureCapture';
 import { validDisclosureState, type DisclosureState } from './assessmentDisclosure';
 import { assessmentArchiveKey, validAssessmentArchive, MAX_ASSESSMENT_ARCHIVES, type AssessmentArchive, type AssessmentArchiveIndex } from './assessmentArchive';
 import { validFinalizationRequest, type AssessmentFinalizationRequest, type FinalizationScope } from './assessmentFinalization';
@@ -138,6 +139,10 @@ async function resolveStorageDirectory(globalStorageUri: StorageUri, workspaceFo
 
 /** Durable event storage; production runs all database operations on the storage thread. */
 export class LocalEventQueue {
+	private readonly disclosureCapture = new Map<string, DisclosureConfirmation & { activatedAt: bigint }>();
+	private readonly disclosureBlocked = new Set<string>();
+	private readonly disclosureSealed = new Set<string>();
+	private readonly disclosureUploads = new Map<string, DisclosureConfirmation>();
 	private pending: Promise<void> = Promise.resolve();
 	private closing = false;
 	private closePromise?: Promise<void>;
@@ -321,10 +326,11 @@ export class LocalEventQueue {
 	enqueue(event: unknown): Promise<void> { return this.enqueueSnapshot(event); }
 
 	/** Only EventPersistence calls this after filtering; event and approval commit in one transaction. */
-	enqueueApproved(event: unknown, context: UploadPrivacyContext): Promise<void> { return this.enqueueSnapshot(event, context); }
+	enqueueApproved(event: unknown, context: UploadPrivacyContext, capturedAt = process.hrtime.bigint()): Promise<void> { return this.enqueueSnapshot(event, context, capturedAt); }
 
-	private enqueueSnapshot(event: unknown, context?: UploadPrivacyContext): Promise<void> {
+	private enqueueSnapshot(event: unknown, context?: UploadPrivacyContext, capturedAt = process.hrtime.bigint()): Promise<void> {
 		if (this.closing) { return Promise.reject(new LocalEventQueueError('Local event queue is closed.')); }
+		if (typeof capturedAt !== 'bigint' || capturedAt < 0n || capturedAt > process.hrtime.bigint()) { return Promise.reject(new LocalEventQueueError('Invalid capture admission.')); }
 		const validation = validateEvent(event);
 		if (!validation.valid) { return Promise.reject(new EventValidationError(validation.errors)); }
 		// Snapshot before scheduling: callers cannot change the persisted event later.
@@ -333,6 +339,8 @@ export class LocalEventQueue {
 			return Promise.reject(new LocalEventQueueError('Queue event exceeds size limit.'));
 		}
 		const eventId = validation.event.eventId;
+		// Admission snapshot precedes scheduling/awaits: a later grant cannot promote an already queued capture.
+		const disclosureCandidate = this.disclosureCapture.get(validation.event.sessionId);
 		let proof: EvidenceApproval | undefined;
 		try { if (context) { proof = createEvidenceApproval(validation.event, context); } }
 		catch { return Promise.reject(new LocalEventQueueError('Evidence approval validation failed.')); }
@@ -369,7 +377,9 @@ export class LocalEventQueue {
 							...(consentCoversEvent(scope, validation.event) ? { consentId: scope.receipt!.consent_id } : {}) };
 						if (proof.assessment.consentId) {
 							proof.version = 2;
-							proof.assessmentEventApproval = createAssessmentEventApproval(validation.event, proof.assessment.consentId);
+							const disclosure = this.disclosureAtCapture(validation.event, scope, capturedAt, disclosureCandidate);
+							proof.assessmentEventApproval = createAssessmentEventApproval(validation.event, proof.assessment.consentId, disclosure?.receipt!.consent_id);
+							if (disclosure) { proof.disclosureRequestId = disclosure.request.request_id; }
 						}
 					}
 					encryptedApproval = JSON.stringify(this.cipher!.encrypt(eventId, JSON.stringify(proof), 'approval'));
@@ -414,30 +424,39 @@ export class LocalEventQueue {
 			|| !validOrigin(binding.origin) || !isUuid(binding.consentReceiptId) || !utcTime(binding.serverTime)
 			|| Object.keys(binding).length !== 4) { return Promise.resolve(undefined); }
 		const json = JSON.stringify(validation.event); const target = { ...binding };
-		return this.schedule(() => {
-			const current = JSON.parse(json) as TrackerEvent;
-			if (this.isArchivedRecording(current.sessionId) || this.isApprovalRevoked(current.sessionId)) { return undefined; }
-			const scope = this.readEvidenceConsent(current.sessionId); const receipt = scope?.receipt;
-			if (scope && this.isArchivedAssessment(scope.codingSessionId, scope.origin)) { return undefined; }
-			if (!scope || !receipt || scope.locallyRevoked || scope.pendingAction || !['active', 'stopped'].includes(receipt.state)
-				|| scope.captureClosed && receipt.state !== 'stopped' || scope.codingSessionId !== target.codingSessionId || scope.origin !== target.origin
-				|| receipt.consent_id !== target.consentReceiptId || receipt.destination_origin !== target.origin
-				|| Date.parse(target.serverTime) < Date.parse(receipt.server_time) || Date.parse(target.serverTime) >= Date.parse(receipt.expires_at)
-				|| Date.parse(target.serverTime) >= Date.parse(scope.deadline) || Date.parse(current.timestamp) > Date.parse(target.serverTime)
-				|| Date.parse(current.timestamp) < Date.parse(receipt.evidence_window.starts_at) || Date.parse(current.timestamp) > Date.parse(receipt.evidence_window.ends_at)
-				|| !receipt.approved_workspace_ids.includes(current.workspaceId!) || !receipt.event_types.includes(current.eventType)) { return undefined; }
-			const row = this.database.prepare(`SELECT e.event_id, e.event_json, e.payload_format, e.session_id, a.approval_json
-				FROM queued_events e JOIN event_approvals a ON a.event_id = e.event_id WHERE e.event_id = ? AND e.acknowledged = 0`).get(current.eventId);
-			if (!row) { return undefined; }
-			if (row.payload_format !== 1 || !this.cipher) { throw new EvidenceEncryptionError('authentication_failed'); }
-			const stored = this.readStoredEvent(row); if (JSON.stringify(stored) !== json) { return undefined; }
-			let proof: EvidenceApproval;
-			try { proof = verifyEvidenceApproval(this.cipher.decrypt(current.eventId, JSON.parse(String(row.approval_json)), 'approval'), stored); }
-			catch { throw new EvidenceEncryptionError('authentication_failed'); }
-			if (proof.version !== 2 || !proof.assessmentEventApproval || proof.assessment?.codingSessionId !== target.codingSessionId
-				|| proof.assessment.origin !== target.origin || proof.assessment.consentId !== target.consentReceiptId) { return undefined; }
-			return { ...proof.context, exactEventDigest: proof.eventDigest, assessmentEventApproval: proof.assessmentEventApproval, assessmentApprovalBinding: target };
-		});
+		return this.schedule(() => this.readAssessmentUploadContext(JSON.parse(json) as TrackerEvent, json, target, true));
+	}
+	private readAssessmentUploadContext(current: TrackerEvent, json: string, target: AssessmentApprovalBinding, requireFreshDisclosure: boolean): UploadPrivacyContext | undefined {
+		if (this.isArchivedRecording(current.sessionId) || this.isApprovalRevoked(current.sessionId)) { return undefined; }
+		const scope = this.readEvidenceConsent(current.sessionId); const receipt = scope?.receipt;
+		if (scope && this.isArchivedAssessment(scope.codingSessionId, scope.origin)) { return undefined; }
+		if (!scope || !receipt || scope.locallyRevoked || scope.pendingAction || !['active', 'stopped'].includes(receipt.state)
+			|| scope.captureClosed && receipt.state !== 'stopped' || scope.codingSessionId !== target.codingSessionId || scope.origin !== target.origin
+			|| receipt.consent_id !== target.consentReceiptId || receipt.destination_origin !== target.origin
+			|| Date.parse(target.serverTime) < Date.parse(receipt.server_time) || Date.parse(target.serverTime) >= Date.parse(receipt.expires_at)
+			|| Date.parse(target.serverTime) >= Date.parse(scope.deadline) || Date.parse(current.timestamp) > Date.parse(target.serverTime)
+			|| Date.parse(current.timestamp) < Date.parse(receipt.evidence_window.starts_at) || Date.parse(current.timestamp) > Date.parse(receipt.evidence_window.ends_at)
+			|| !receipt.approved_workspace_ids.includes(current.workspaceId!) || !receipt.event_types.includes(current.eventType)) { return undefined; }
+		const row = this.database.prepare(`SELECT e.event_id, e.event_json, e.payload_format, e.session_id, a.approval_json
+			FROM queued_events e JOIN event_approvals a ON a.event_id = e.event_id WHERE e.event_id = ? AND e.acknowledged = 0`).get(current.eventId);
+		if (!row) { return undefined; }
+		if (row.payload_format !== 1 || !this.cipher) { throw new EvidenceEncryptionError('authentication_failed'); }
+		const stored = this.readStoredEvent(row); if (JSON.stringify(stored) !== json) { return undefined; }
+		let proof: EvidenceApproval;
+		try { proof = verifyEvidenceApproval(this.cipher.decrypt(current.eventId, JSON.parse(String(row.approval_json)), 'approval'), stored); }
+		catch { throw new EvidenceEncryptionError('authentication_failed'); }
+		if (proof.version !== 2 || !proof.assessmentEventApproval || proof.assessment?.codingSessionId !== target.codingSessionId
+			|| proof.assessment.origin !== target.origin || proof.assessment.consentId !== target.consentReceiptId) { return undefined; }
+		if (proof.assessmentEventApproval.approvalProtocolVersion === 2) {
+			const state = proof.disclosureRequestId && this.readDisclosureConsent(proof.disclosureRequestId);
+			if (!state || state.receipt?.consent_id !== proof.assessmentEventApproval.disclosureConsentReceiptId
+				|| !disclosureCoversEvent(state, scope, stored)) { return undefined; }
+			const confirmation = this.disclosureUploads.get(state.request.request_id);
+			if (requireFreshDisclosure && (!confirmation || !freshDisclosureConfirmation(confirmation)
+				|| JSON.stringify(confirmation.state) !== JSON.stringify(state)
+				|| Date.parse(state.receipt.server_time) < Date.parse(target.serverTime))) { return undefined; }
+		}
+		return { ...proof.context, exactEventDigest: proof.eventDigest, assessmentEventApproval: proof.assessmentEventApproval, assessmentApprovalBinding: target };
 	}
 
 	revokeEvidenceApprovals(sessionId: string): Promise<void> {
@@ -474,6 +493,7 @@ export class LocalEventQueue {
 		let snapshot: EvidenceConsentState;
 		try { snapshot = JSON.parse(JSON.stringify(state)); if (!validConsentState(snapshot)) { throw new Error(); } }
 		catch { return Promise.reject(new LocalEventQueueError('Invalid evidence consent.')); }
+		if (snapshot.captureClosed || snapshot.locallyRevoked) { this.suspendDisclosureCapture(snapshot.request.local_recording_session_id, undefined, true); }
 		return this.schedule(async () => {
 			const id = snapshot.request.local_recording_session_id;
 			if (this.isArchivedRecording(id) || this.isArchivedAssessment(snapshot.codingSessionId, snapshot.origin)) { throw new LocalEventQueueError('Archived evidence scope is immutable.'); }
@@ -503,6 +523,74 @@ export class LocalEventQueue {
 		});
 	}
 
+	/** This RPC exposes only verified control receipts, never a bypass-capable upload context. */
+	getAssessmentDisclosureConsents(events: readonly TrackerEvent[], binding: AssessmentApprovalBinding): Promise<DisclosureState[]> {
+		if (!Array.isArray(events) || !events.length || events.length > MAX_QUEUE_BATCH || events.some(e => !validateEvent(e).valid)
+			|| !binding || !/^[1-9][0-9]{0,19}$/.test(binding.codingSessionId) || !validOrigin(binding.origin)
+			|| !isUuid(binding.consentReceiptId) || !utcTime(binding.serverTime) || Object.keys(binding).length !== 4) {
+			return Promise.reject(new LocalEventQueueError('Invalid disclosure lookup.'));
+		}
+		const snapshots = events.map(event => JSON.stringify(event)); const target = { ...binding };
+		return this.schedule(() => {
+			const states = new Map<string, DisclosureState>();
+			for (const json of snapshots) {
+				const event = JSON.parse(json) as TrackerEvent;
+				const context = this.readAssessmentUploadContext(event, json, target, false);
+				if (!context) { throw new LocalEventQueueError('Unapproved assessment evidence.'); }
+				const proof = context.assessmentEventApproval!;
+				if (proof.approvalProtocolVersion !== 2) { continue; }
+				const row = this.database.prepare('SELECT approval_json FROM event_approvals WHERE event_id = ?').get(event.eventId)!;
+				const local = verifyEvidenceApproval(this.cipher!.decrypt(event.eventId, JSON.parse(String(row.approval_json)), 'approval'), event);
+				const state = this.readDisclosureConsent(local.disclosureRequestId!)!;
+				states.set(state.request.request_id, state);
+			}
+			return [...states.values()];
+		});
+	}
+	/** Immediate process-local denial; never revived from persisted state on restart. */
+	suspendDisclosureCapture(sessionId?: string, requestId?: string, seal = false): void {
+		if (sessionId !== undefined && !isUuid(sessionId) || requestId !== undefined && !isUuid(requestId) || seal && !sessionId) { throw new LocalEventQueueError('Invalid disclosure scope.'); }
+		if (requestId) { this.disclosureBlocked.add(requestId); }
+		if (seal && sessionId) { this.disclosureSealed.add(sessionId); }
+		if (sessionId === undefined) { this.disclosureCapture.clear(); } else { this.disclosureCapture.delete(sessionId); }
+	}
+	/** Called only with a freshly validated HTTPS response. Request-start monotonic time bounds network/storage latency. */
+	async confirmDisclosureConsent(confirmation: DisclosureConfirmation): Promise<void> {
+		if (!confirmation || !freshDisclosureConfirmation(confirmation)) { throw new LocalEventQueueError('Disclosure confirmation expired.'); }
+		const snapshot = JSON.parse(JSON.stringify(confirmation.state)) as DisclosureState;
+		await this.setDisclosureConsent(snapshot);
+		await this.schedule(() => {
+			const state = this.readDisclosureConsent(snapshot.request.request_id);
+			if (!state || JSON.stringify(state) !== JSON.stringify(snapshot) || !freshDisclosureConfirmation(confirmation)
+				|| this.isArchivedRecording(state.request.local_recording_session_id)) { return; }
+			const value = { state, requestedAt: confirmation.requestedAt };
+			this.disclosureUploads.set(state.request.request_id, value);
+			const id = state.request.local_recording_session_id;
+			const latest = this.database.prepare('SELECT request_id FROM disclosure_consents WHERE session_id = ? ORDER BY rowid DESC LIMIT 1').get(id);
+			const scope = this.readEvidenceConsent(id);
+			if (scope && !this.disclosureSealed.has(id) && !this.disclosureBlocked.has(state.request.request_id)
+				&& latest?.request_id === state.request.request_id && activeDisclosureConfirmation(value, scope)
+				&& this.database.prepare("SELECT 1 FROM recording_sessions WHERE session_id = ? AND owner_id = ? AND status = 'active'").get(id, this.ownerId)) {
+				this.disclosureCapture.set(id, { ...value, activatedAt: process.hrtime.bigint() });
+			}
+		});
+	}
+	private readDisclosureConsent(requestId: string): DisclosureState | undefined {
+		const row = this.database.prepare('SELECT session_id, state_json FROM disclosure_consents WHERE request_id = ?').get(requestId);
+		if (!row) { return undefined; }
+		const state = this.cipher?.decrypt(requestId, JSON.parse(String(row.state_json)), 'disclosure') as DisclosureState;
+		if (!validDisclosureState(state) || state.request.request_id !== requestId || state.request.local_recording_session_id !== row.session_id) { throw new EvidenceEncryptionError('authentication_failed'); }
+		return state;
+	}
+	private disclosureAtCapture(event: TrackerEvent, scope: EvidenceConsentState, capturedAt: bigint, candidate?: DisclosureConfirmation & { activatedAt: bigint }): DisclosureState | undefined {
+		if (!candidate || this.disclosureSealed.has(event.sessionId) || this.disclosureBlocked.has(candidate.state.request.request_id) || capturedAt < candidate.activatedAt || this.disclosureCapture.get(event.sessionId) !== candidate || !activeDisclosureConfirmation(candidate, scope)) { return undefined; }
+		const latest = this.database.prepare('SELECT request_id FROM disclosure_consents WHERE session_id = ? ORDER BY rowid DESC LIMIT 1').get(event.sessionId);
+		if (latest?.request_id !== candidate.state.request.request_id) { return undefined; }
+		const current = this.readDisclosureConsent(candidate.state.request.request_id);
+		if (!current || JSON.stringify(current) !== JSON.stringify(candidate.state) || !disclosureCoversEvent(current, scope, event)) { return undefined; }
+		return current;
+	}
+
 	getDisclosureConsents(sessionId: string): Promise<DisclosureState[]> {
 		if (!isUuid(sessionId)) { return Promise.reject(new LocalEventQueueError('Invalid disclosure scope.')); }
 		return this.schedule(() => this.readDisclosureConsents(sessionId));
@@ -519,6 +607,7 @@ export class LocalEventQueue {
 		let snapshot: DisclosureState;
 		try { snapshot = JSON.parse(JSON.stringify(state)); if (!validDisclosureState(snapshot)) { throw new Error(); } }
 		catch { return Promise.reject(new LocalEventQueueError('Invalid disclosure consent.')); }
+		this.suspendDisclosureCapture(snapshot.request.local_recording_session_id, snapshot.locallyRevoked ? snapshot.request.request_id : undefined); this.disclosureUploads.delete(snapshot.request.request_id);
 		return this.schedule(async () => {
 			if (!this.cipher) { throw new EvidenceEncryptionError('key_missing'); }
 			const id = snapshot.request.local_recording_session_id;

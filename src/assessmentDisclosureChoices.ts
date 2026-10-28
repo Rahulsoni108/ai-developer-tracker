@@ -1,7 +1,7 @@
 import type { DisclosureCategory, DisclosureSource } from './assessmentDisclosure';
 import type { DisclosureSelection } from './assessmentDisclosureConsent';
 
-export const DISCLOSURE_NOTICE = 'assessment-disclosure.v1 — Selected assessment evidence may be visible to the authorized recruiter who owns this job, solely for assessment review. Recording, upload and disclosure are separate choices. No training, scoring or blanket surveillance. Current Rails support registers scope only: raw content remains unavailable until a matching capture-time event contract is implemented. Existing events cannot acquire disclosure permission.';
+export const DISCLOSURE_NOTICE = 'assessment-disclosure.v1 — Selected assessment evidence may be visible to the authorized recruiter who owns this job, solely for assessment review. Recording, upload and disclosure are separate choices. No training, scoring or blanket surveillance. New eligible events may receive protocol-2 capture-time disclosure authorization. Raw recruiter content APIs remain unavailable in this release. Existing events cannot acquire disclosure permission.';
 export const CATEGORY_CHOICES: { label: string; value: DisclosureCategory; picked: false }[] = [
 	{ label: 'AI prompts and relevant visible responses', value: 'ai_interactions', picked: false },
 	{ label: 'Source-code changes and diffs', value: 'code_changes', picked: false },

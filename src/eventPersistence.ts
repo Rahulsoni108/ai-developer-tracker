@@ -81,6 +81,7 @@ export class EventPersistence implements ActivityWriter {
 	}
 
 	write(event: unknown): Promise<void> {
+		const capturedAt = process.hrtime.bigint();
 		if (this.closing) { return Promise.reject(new EventPersistenceError()); }
 		let context: PrivacyContext | undefined;
 		let result: PrivacyResult;
@@ -141,7 +142,7 @@ export class EventPersistence implements ActivityWriter {
 			// Yield between individual commits: never synchronously drain a large batch.
 			await setImmediate();
 			try {
-				if (uploadContext && this.queue.enqueueApproved) { await this.queue.enqueueApproved(JSON.parse(snapshot), uploadContext); }
+				if (uploadContext && this.queue.enqueueApproved) { await this.queue.enqueueApproved(JSON.parse(snapshot), uploadContext, capturedAt); }
 				else { await this.queue.enqueue(JSON.parse(snapshot)); }
 			}
 			catch (error) {

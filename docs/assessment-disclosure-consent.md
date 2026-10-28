@@ -1,5 +1,7 @@
 # E4.8 — Independent assessment disclosure consent
 
+**E4.9 update:** [Protocol-2 capture-time approvals](assessment-protocol2-approvals.md) now use this unchanged control contract. The capture limitations below describe the E4.8 implementation; historical protocol-1 evidence remains restricted.
+
 ## Implemented boundary
 
 This client implements the existing Rails R4.6 **`assessment-disclosure.v1` control
@@ -112,9 +114,9 @@ may also prevent remote revocation. No anonymous cleanup or credential bypass is
 An archive racing a response prevents later writes into the archived scope. The encrypted
 intent remains retained; an unknown remote outcome is not claimed revoked or successful.
 
-## Capture-time authorization and remaining server blockers
+## Historical E4.8 capture-time boundary (superseded for new E4.9 captures)
 
-The current upload envelope is protocol **1** and contains no disclosure receipt reference.
+At E4.8, the upload envelope was protocol **1** and contains no disclosure receipt reference.
 Rails rejects extra fields and unsupported versions. Therefore E4.8 deliberately does not
 persist a purported per-event disclosure authorization, retrofit old approvals, attach a
 receipt at upload time, or emit the proposed protocol-2 sidecar. **All current events,
