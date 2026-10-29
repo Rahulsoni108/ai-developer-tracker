@@ -1,6 +1,9 @@
 import { startRecordingCommand, stopRecordingCommand, type RecordingStartChoice } from './recordingCommands';
 import { DisclosureCaptureMonitor } from './disclosureCaptureMonitor';
 import { registerDisclosureCommands } from './assessmentDisclosureCommands';
+import { registerProcessingCommands } from './assessmentProcessingCommands';
+import { AssessmentProcessingConsent } from './assessmentProcessingConsent';
+import { RailsProcessingConsentClient } from './railsProcessingConsentClient';
 import { AssessmentDisclosureConsent } from './assessmentDisclosureConsent';
 import { RailsDisclosureConsentClient } from './railsDisclosureConsentClient';
 import { approveRecordingWorkspaces, describeAssessmentStart, type AssessmentStartStep } from './assessmentStartDiagnostics';
@@ -504,16 +507,22 @@ export async function activate(context: vscode.ExtensionContext) {
 	await assessment.initialize();
 	const disclosureClient = queue && assessmentApi instanceof RailsAssessmentApiClient ? new RailsDisclosureConsentClient() : undefined;
 	if (disclosureClient) { context.subscriptions.push(disclosureClient); }
-	const disclosureConsent = queue && disclosureClient ? new AssessmentDisclosureConsent(queue, disclosureClient, id => [
+	const approvedAssessmentSources = (id: string) => [
 			...(privacyParser?.hasAdmittedContentConsent(id) ? (privacyDiscovery?.getRegistry() ?? []).filter(entry => entry.recordingSessionId === id
 				&& entry.status === 'confirmed' && entry.reason === 'user_confirmed' && entry.sourceSessionId && entry.workspaceId)
 				.map(entry => ({ workspaceId: entry.workspaceId!, session: { source: 'codex' as const, source_session_id: entry.sourceSessionId! } })) : []),
 			...(activeClaudeParser?.getApprovals(id) ?? []).map(entry => ({ workspaceId: entry.workspaceId,
 				session: { source: 'claude' as const, source_session_id: entry.sourceSessionId } }))
-		]) : undefined;
+		];
+	const disclosureConsent = queue && disclosureClient ? new AssessmentDisclosureConsent(queue, disclosureClient, approvedAssessmentSources) : undefined;
+	const processingClient = queue && assessmentApi instanceof RailsAssessmentApiClient ? new RailsProcessingConsentClient() : undefined;
+	if (processingClient) { context.subscriptions.push(processingClient); }
+	// No trusted processor discovery is exposed by R5.0C. Do not infer it from settings or old receipts.
+	const processingConsent = queue && processingClient ? new AssessmentProcessingConsent(context.secrets, queue, processingClient, approvedAssessmentSources) : undefined;
 	if (disclosureConsent && queue) { context.subscriptions.push(new DisclosureCaptureMonitor(recording, assessment, disclosureConsent, queue)); }
 	context.subscriptions.push(assessmentStatus, ...registerAssessmentCommands(assessment, mockAssessments),
 		...registerDisclosureCommands(assessment, disclosureConsent),
+		...registerProcessingCommands(assessment, processingConsent),
 		vscode.workspace.onDidChangeConfiguration(event => {
 			if (event.affectsConfiguration('ai-developer-tracker.assessment')) { void assessment.revokeUploadConsent();
 				void vscode.window.showWarningMessage('Assessment settings changed. Upload consent was revoked; reload before pairing or resuming with the new configuration.'); }
