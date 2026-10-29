@@ -122,8 +122,8 @@ export class RecordingController {
 	private updateStatusBar(): void {
 		this.statusBar.text = this.recording ? 'Recording' : 'Not Recording';
 		this.statusBar.tooltip = this.recording
-			? 'AI Developer Tracker: Click to stop recording'
-			: 'AI Developer Tracker: Click to start recording';
+			? 'AI Developer Tracker: Click to stop recording without submitting'
+			: 'AI Developer Tracker: Click to start manual recording; use Start Assessment for a paired assessment';
 		this.statusBar.command = this.recording ? STOP_RECORDING_COMMAND : START_RECORDING_COMMAND;
 	}
 }

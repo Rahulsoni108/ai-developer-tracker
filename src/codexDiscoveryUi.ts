@@ -1,3 +1,4 @@
+import { describeCodexDiscovery } from './codexDiscoveryDiagnostics';
 import * as vscode from 'vscode';
 import type { RecordingController } from './recording';
 import type { CodexSessionDiscovery, CodexSessionRegistration } from './codexSessionDiscovery';
@@ -28,9 +29,10 @@ export class CodexDiscoveryUi implements vscode.Disposable {
 	private readonly prompted = new Set<string>();
 	constructor(
 		private readonly recording: Pick<RecordingController, 'isRecording' | 'sessionId'>,
-		private readonly discovery: Pick<CodexSessionDiscovery, 'scanNow' | 'getConfirmationCandidates' | 'confirm' | 'reject'>,
+		private readonly discovery: Pick<CodexSessionDiscovery, 'scanNow' | 'getConfirmationCandidates' | 'confirm' | 'reject'> & Partial<Pick<CodexSessionDiscovery, 'getDiagnostics'>>,
 		private readonly prompts: CodexDiscoveryPrompts = defaultPrompts,
-		private readonly contentConsent?: CodexContentConsent
+		private readonly contentConsent?: CodexContentConsent,
+		private readonly reportDiagnostics: (summary: ReturnType<CodexSessionDiscovery['getDiagnostics']>, contentConsent: boolean) => void = () => {}
 	) {}
 
 	notify(candidates: readonly CodexSessionRegistration[]): void {
@@ -51,8 +53,11 @@ export class CodexDiscoveryUi implements vscode.Disposable {
 			await this.discovery.scanNow();
 			if (this.disposed || this.recording.sessionId !== sessionId) { return; }
 			const candidates = this.discovery.getConfirmationCandidates();
+			const summary = this.discovery.getDiagnostics?.();
+			const hasContentConsent = this.contentConsent?.hasConsent(sessionId!) ?? false;
+			if (summary) { this.reportDiagnostics(summary, hasContentConsent); }
 			if (!candidates.length) {
-				await this.prompts.information('No verified current Codex session candidates are available.'); return;
+				await this.prompts.information(summary ? describeCodexDiscovery(summary, hasContentConsent) : 'No verified current Codex session candidates are available.'); return;
 			}
 			const workspaceIds = [...new Set(candidates.map(entry => entry.workspaceId))];
 			for (const candidate of candidates) { this.prompted.add(`${sessionId}:${candidate.sourceFileId}`); }
@@ -74,6 +79,10 @@ export class CodexDiscoveryUi implements vscode.Disposable {
 			for (const candidate of candidates) {
 				if (selectedIds.has(candidate.sourceFileId)) { await this.discovery.confirm(candidate.sourceFileId);
 				} else { this.discovery.reject(candidate.sourceFileId); }
+			}
+			if (this.recording.isRecording && this.recording.sessionId === sessionId) {
+				const updated = this.discovery.getDiagnostics?.();
+				if (updated) { this.reportDiagnostics(updated, this.contentConsent?.hasConsent(sessionId!) ?? false); }
 			}
 		} finally { this.reviewing = false; }
 	}

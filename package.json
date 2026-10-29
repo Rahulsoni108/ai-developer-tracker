@@ -99,11 +99,11 @@
       { "command": "ai-developer-tracker.revokeAssessmentCredential", "title": "AI Developer Tracker: Revoke Assessment Credential" },
       {
         "command": "ai-developer-tracker.startRecording",
-        "title": "AI Developer Tracker: Start Recording"
+        "title": "AI Developer Tracker: Start Recording (Manual / Development)"
       },
       {
         "command": "ai-developer-tracker.stopRecording",
-        "title": "AI Developer Tracker: Stop Recording"
+        "title": "AI Developer Tracker: Stop Recording (Without Submitting)"
       },
       {
         "command": "ai-developer-tracker.reviewCodexSessions",

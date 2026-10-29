@@ -142,8 +142,8 @@ Command Palette titles and IDs match `package.json`.
 
 | Command title | Command ID | Purpose |
 | --- | --- | --- |
-| AI Developer Tracker: Start Recording | `ai-developer-tracker.startRecording` | Request consent and start manual development recording. |
-| AI Developer Tracker: Stop Recording | `ai-developer-tracker.stopRecording` | Stop local capture and drain pending work. |
+| AI Developer Tracker: Start Recording (Manual / Development) | `ai-developer-tracker.startRecording` | Request consent and start manual development recording. |
+| AI Developer Tracker: Stop Recording (Without Submitting) | `ai-developer-tracker.stopRecording` | Stop local capture and drain pending work. |
 | AI Developer Tracker: Review Codex Sessions | `ai-developer-tracker.reviewCodexSessions` | Review eligible sessions; content consent and explicit association are required. |
 | AI Developer Tracker: Start Claude Code Capture | `ai-developer-tracker.startClaudeCapture` | During recording, request consent and launch a new Claude session with temporary hooks. |
 | AI Developer Tracker: Revoke Claude Code Capture | `ai-developer-tracker.revokeClaudeCapture` | Revoke Claude capture without stopping file recording or terminating Claude itself. |
@@ -178,6 +178,8 @@ The event summary decrypts/validates inside the storage worker and returns only 
 6. Rails authorizes the start and establishes the official deadline exactly once; reconnects/restarts must not reset it.
 7. The extension records approved workspace and AI activity through privacy filtering and encrypted storage.
 8. The candidate clicks **Stop & Submit Assessment**. Capture stops and flushes; durable event acknowledgments and server finalization are required before success. Network failure leaves submission pending.
+
+**Manual recording conflict:** If `recording_busy` identifies an active/preparing manual recording, run **Stop Recording (Without Submitting)** and wait for local writes to drain, then run **Start Assessment**. Manual evidence is retained and never adopted by the assessment. The manual/status-bar start command now offers an explicit assessment workflow choice when Rails is paired.
 
 If Start Assessment stops after recording confirmation, inspect **Output → AI Developer Tracker** and **Show Assessment Status** for the last start prerequisite. Recording confirmation is followed by workspace/storage/baseline preparation, separate upload consent and Rails authorization. See [safe start diagnostics and retry steps](docs/assessment-start-diagnostics.md).
 
@@ -218,6 +220,8 @@ Use the compile/lint/test commands in section 5. Tests cover recording, workspac
 | Claude automated integration tests | Synthetic hooks/transcripts, real local hook IPC, consent/revocation, encrypted persistence and correlation have passed. Live Claude CLI/model testing remains pending. |
 | Mock HTTPS tests | A local HTTPS server exercises recording-to-delivery behavior, failures, retries and explicit acknowledgments. Its self-signed certificate is trusted only by the test client; TLS verification is never disabled globally. |
 | Mocked Rails tests | API doubles plus real collectors/filtering/SQLite/delivery bookkeeping verify lifecycle, security races and recovery. They do not prove real Rails endpoints or website integration work. |
+
+**Codex discovery troubleshooting:** [Safe reason counts, supported ordinal metadata headers and confirmation/content consent](docs/codex-session-discovery.md#discovery-troubleshooting-and-consent). Already-confirmed sessions are now distinguished from missing candidates.
 
 ### Manual Codex verification
 

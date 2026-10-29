@@ -43,11 +43,11 @@ suite('Incremental Codex JSONL reader', () => {
 		});
 		if (waitForInitialTick) { await reader.flush(); }
 	}
-	async function session(body = '', confirm = true) {
+	async function session(body = '', confirm = true, ordinal = false) {
 		const id = randomUUID();
 		const path = join(root, id + '.jsonl');
 		const metadata = { id, cwd: workspace, timestamp: new Date(startMs + 100).toISOString(), cli_version: '0.162.1' };
-		const header = JSON.stringify({ timestamp: metadata.timestamp, type: 'session_meta', payload: metadata }) + '\n';
+		const header = JSON.stringify({ timestamp: metadata.timestamp, ...(ordinal ? { ordinal: 0 } : {}), type: 'session_meta', payload: metadata }) + '\n';
 		await writeFile(path, header + body);
 		await discovery.scanNow();
 		const entry = discovery.getRegistry().find(candidate => candidate.sourceSessionId === id)!;
@@ -94,6 +94,14 @@ suite('Incremental Codex JSONL reader', () => {
 		assert.ok(!JSON.stringify(records).includes(workspace));
 	});
 
+	test('ordinal journals remain unread until confirmed and then retain incremental ordering without diagnostic content', async () => {
+		const file = await session(record(), false, true); await reader.readNow(); assert.equal(records.length, 0);
+		assert.equal(await discovery.confirm(file.fileId), true); await reader.readNow();
+		assert.deepEqual(records.map(entry => entry.eventType), ['session_meta', 'event_msg']);
+		assert.deepEqual(records.map(entry => entry.recordIndex), [1, 2]);
+		assert.equal(JSON.stringify(records).includes(privateText), false); assert.equal(JSON.stringify(records).includes(workspace), false);
+		await reader.readNow(); assert.equal(records.length, 2);
+	});
 	test('reads multiple appends in file order and advances byte offsets', async () => {
 		const file = await session(); await reader.readNow();
 		const firstOffset = reader.getProgress()[0].byteOffset;

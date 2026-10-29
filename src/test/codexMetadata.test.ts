@@ -25,6 +25,39 @@ suite('Codex metadata reader privacy', () => {
 		} finally { await handle.close(); }
 	});
 
+	test('accepts the observed ordinal header before type without reading beyond the metadata line', async () => {
+		const data = payload(); const first = JSON.stringify({ timestamp: data.timestamp, ordinal: 0, type: 'session_meta', payload: data }) + '\n';
+		await writeFile(path, first + '{"ordinal":1,"type":"response_item","payload":{"text":"dummy-private-content"}}\n');
+		const handle = await open(path, 'r'); let count = 0;
+		try {
+			const wrapped = { read: async (buffer: Buffer, offset: number, length: number, position: number) => {
+				assert.equal(length, 1); const result = await handle.read(buffer, offset, length, position); count += result.bytesRead; return result;
+			} } as unknown as FileHandle;
+			const result = await readSessionMetadata(wrapped, () => true); assert.equal(result.kind, 'valid'); assert.equal(count, Buffer.byteLength(first));
+			if (result.kind === 'valid') { assert.equal(result.metadata.sourceSessionId, data.id); assert.equal('ordinal' in result.metadata, false); }
+		} finally { await handle.close(); }
+	});
+	test('ordinal is a bounded non-negative integer; duplicates, arbitrary values and unknown headers stay rejected', async () => {
+		for (const value of ['-1', '1.5', '1e3', '01', '9007199254740992', '"dummy-secret"', '{}', 'null', 'true']) {
+			await writeFile(path, '{"ordinal":' + value + ',"type":"session_meta","payload":' + JSON.stringify(payload()) + '}\n');
+			const handle = await open(path, 'r'); try { assert.notEqual((await readSessionMetadata(handle, () => true)).kind, 'valid'); } finally { await handle.close(); }
+		}
+		for (const prefix of ['"ordinal":0,"ordinal":1,', '"untrusted":{},']) {
+			await writeFile(path, '{' + prefix + '"type":"session_meta","payload":' + JSON.stringify(payload()) + '}\n');
+			const handle = await open(path, 'r'); try { assert.notEqual((await readSessionMetadata(handle, () => true)).kind, 'valid'); } finally { await handle.close(); }
+		}
+	});
+	test('ordinal does not authorize non-metadata payloads or searching subsequent records', async () => {
+		const first = '{"timestamp":"2026-10-13T10:00:00.000Z","ordinal":0,"type":"response_item","payload":{"text":"dummy-private"}}\n';
+		await writeFile(path, first + JSON.stringify({ ordinal: 1, type: 'session_meta', payload: payload() }) + '\n');
+		const handle = await open(path, 'r'); let count = 0;
+		try {
+			const wrapped = { read: async (buffer: Buffer, offset: number, length: number, position: number) => {
+				const result = await handle.read(buffer, offset, length, position); count += result.bytesRead; return result;
+			} } as unknown as FileHandle;
+			assert.equal((await readSessionMetadata(wrapped, () => true)).kind, 'missing'); assert.ok(count < first.indexOf('payload'));
+		} finally { await handle.close(); }
+	});
 	test('rejects non-metadata before reading its payload', async () => {
 		const line = '{"type":"response_item","payload":{"text":"private"}}\n'; await writeFile(path, line);
 		const handle = await open(path, 'r'); let count = 0;

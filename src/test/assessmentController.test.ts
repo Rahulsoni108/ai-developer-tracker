@@ -151,6 +151,15 @@ suite('Assessment lifecycle foundation', () => {
 		recording.stop(); await paired(); await recording.start(); await controller.start();
 		assert.equal(controller.view.reason, 'recording_busy'); assert.equal(starts, 0); assert.equal(recording.isRecording, true);
 	});
+	test('a manual recording that starts during server-status lookup is rejected by the second guard without creating a binding', async () => {
+		await paired(); const before = structuredClone(metadata()); const original = mock.getStatus.bind(mock);
+		mock.getStatus = async (...args) => { await recording.start(); return original(...args); };
+		await controller.start(); const manual = recording.sessionId!;
+		assert.equal(controller.view.reason, 'recording_busy'); assert.equal(controller.view.lastStart?.step, 'manual_recording_active');
+		assert.equal(controller.view.state, 'paired'); assert.equal(starts, 0); assert.equal(uploadDialogs, 0);
+		assert.equal(controller.isAssociatedSession(manual), false); assert.deepEqual(metadata().localRecordingSessionIds, []);
+		assert.equal(metadata().submitRequestId, before.submitRequestId); assert.equal(metadata().serverStatus.startedAt, undefined);
+	});
 	test('revocation invalidates delayed consent and never starts recording', async () => {
 		await controller.dispose(); let approve!: (yes: boolean) => void; let opened!: () => void;
 		const visible = new Promise<void>(resolve => { opened = resolve; });

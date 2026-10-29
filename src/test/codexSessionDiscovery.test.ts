@@ -66,6 +66,35 @@ suite('Codex session discovery', () => {
 		assert.throws(() => codexSessionsDirectory('relative/path'));
 	});
 
+	test('discovers ordinal metadata, requires confirmation, and returns only safe reason counts', async () => {
+		const values = meta(); const file = await session(values);
+		await writeFile(file, JSON.stringify({ timestamp: values.timestamp, ordinal: 0, type: 'session_meta', payload: values }) + '\n');
+		await start(); const before = discovery.getDiagnostics();
+		assert.equal(before.directoryStatus, 'ready'); assert.equal(before.candidateCount, 1); assert.equal(before.confirmedCount, 0);
+		assert.equal(before.approvedWorkspaceCount, 1); assert.equal(before.reasons.recent_workspace_match, 1);
+		const candidate = discovery.getConfirmationCandidates()[0]; assert.ok(await discovery.confirm(candidate.sourceFileId));
+		const after = discovery.getDiagnostics(); assert.equal(after.candidateCount, 0); assert.equal(after.confirmedCount, 1); assert.equal(after.reasons.user_confirmed, 1);
+		for (const forbidden of [root, workspace, String(values.id), candidate.sourceFileId, 'cwd', 'sourceSessionId', 'private conversation']) {
+			assert.equal(JSON.stringify(after).includes(forbidden), false);
+		}
+		recording.stop(); assert.equal(discovery.getDiagnostics().recordingActive, false); assert.equal(discovery.getDiagnostics().confirmedCount, 0);
+	});
+	test('reports historical, out-of-workspace and unsupported metadata separately without exposing them', async () => {
+		await session(meta({ timestamp: new Date(startMs - 100).toISOString() }));
+		await session(meta({ cwd: temporary })); const file = await session(); await writeFile(file, '{"type":"response_item","payload":{"text":"dummy-private"}}\n');
+		await start(); const summary = discovery.getDiagnostics();
+		assert.equal(summary.reasons.historical, 1); assert.equal(summary.reasons.outside_workspace, 1); assert.equal(summary.reasons.missing_metadata, 1);
+		assert.equal(summary.candidateCount, 0); assert.equal(JSON.stringify(summary).includes(temporary), false);
+	});
+	test('reports missing roots and CODEX_HOME mismatch without searching or printing the alternate home', async () => {
+		const previous = process.env.CODEX_HOME;
+		try {
+			process.env.CODEX_HOME = join(temporary, 'dummy-other-home'); configure({ sessionsDirectory: join(temporary, 'missing') });
+			await start(); const summary = discovery.getDiagnostics(); assert.equal(summary.directoryStatus, 'missing'); assert.equal(summary.codexHome, 'differs');
+			assert.equal(summary.directorySource, 'user_setting'); assert.equal(JSON.stringify(summary).includes(temporary), false);
+			process.env.CODEX_HOME = temporary; assert.equal(discovery.getDiagnostics().codexHome, 'differs');
+		} finally { if (previous === undefined) { delete process.env.CODEX_HOME; } else { process.env.CODEX_HOME = previous; } }
+	});
 	test('discovers valid metadata as eligible, and confirms only on an explicit call', async () => {
 		const metadata = meta(); await session(metadata); await start();
 		const entry = discovery.getRegistry()[0];

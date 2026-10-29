@@ -51,10 +51,42 @@ also leaves Rails unstarted. A Rails start may already have committed if a later
 registration fails; no success is claimed, no local timer is invented, and retries preserve
 existing binding/deadline recovery rules.
 
-The manual **AI Developer Tracker: Start Recording** command and recording status-bar
-button remain independent development controls. They do not start a Rails assessment,
-show assessment upload consent or adopt their manual recording into a paired attempt.
-Output explicitly identifies manual command invocation to distinguish this case.
+The palette labels now distinguish **Start Recording (Manual / Development)** and
+**Stop Recording (Without Submitting)**. The recording status bar still invokes the
+manual command. When a Rails connection is paired (including recovery), it now asks
+whether to use **Start Assessment** or deliberately **Start Manual Recording**; Cancel
+changes nothing. The assessment choice invokes the normal command and fresh consents.
+Manual recording never starts Rails, shows its upload consent or adopts evidence into
+the paired attempt. Manual invocation and assessment prerequisites remain distinct in Output.
+
+## Confirmed `recording_busy` conflict
+
+A manual command followed by `recording_consent`, workspace approval, `local_storage`,
+`diff_baseline` and `assessment_authorization`, but no upload dialog, is reproducible:
+the assessment lifecycle listener is registered for every recording; its authorization
+body returns immediately unless `AssessmentController.start()` initiated this start.
+The preparation label alone does not prove a Rails request or assessment binding.
+
+An active manual recording, or one still being prepared, then blocks assessment start.
+That guard is required: the assessment must not reuse its recording UUID, baseline or
+evidence. Previous archived connections do not cause this conflict. New diagnostics
+identify `manual_recording_active` versus `recording_start_pending`, with safe retry
+instructions. A local conflict now leaves the paired connection and durable metadata
+unchanged instead of moving it into recovery through generic error handling.
+
+To resolve safely, run **AI Developer Tracker: Stop Recording (Without Submitting)**
+(**Stop Recording** on an older build) and wait for local producer/write draining.
+This stops manual capture only. Its encrypted pending events remain retained; the paired
+assessment is not finalized, archived, deleted, re-paired or reset. Then run **Start
+Assessment** and approve fresh recording/workspace/upload permissions. It creates a new
+local recording ID and requests Rails authorization through the existing contract.
+
+Reproducing tests preserve a manual event in encrypted SQLite, exercise this exact
+preparation sequence, reject adoption, stop/drain, and assert that the eventual Rails
+binding contains only a fresh assessment recording. Tests also cover manual recording
+starting during server-status lookup, pending preparation cancellation, explicit command
+choices, archive-only/manual compatibility and drain failures. Mock HTTPS and archive
+regressions remain included; no live assessment records are altered by these tests.
 
 ## Exact manual retry
 

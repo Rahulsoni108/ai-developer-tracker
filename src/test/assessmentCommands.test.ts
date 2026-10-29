@@ -11,6 +11,12 @@ suite('Assessment VS Code commands', () => {
 		const commands = await vscode.commands.getCommands();
 		for (const command of [GRANT_DISCLOSURE_COMMAND, STATUS_DISCLOSURE_COMMAND, REVOKE_DISCLOSURE_COMMAND, ARCHIVE_ASSESSMENT_COMMAND, ASSESSMENT_STATUS_COMMAND, PAIR_ASSESSMENT_COMMAND, START_ASSESSMENT_COMMAND, SUBMIT_ASSESSMENT_COMMAND]) { assert.ok(commands.includes(command)); }
 	});
+	test('recording palette commands explicitly distinguish manual recording and stopping without submission', () => {
+		const extension = vscode.extensions.all.find(candidate => candidate.packageJSON.name === 'ai-developer-tracker'); assert.ok(extension);
+		const commands = extension.packageJSON.contributes.commands as { command: string; title: string }[];
+		assert.equal(commands.find(command => command.command === 'ai-developer-tracker.startRecording')!.title, 'AI Developer Tracker: Start Recording (Manual / Development)');
+		assert.equal(commands.find(command => command.command === 'ai-developer-tracker.stopRecording')!.title, 'AI Developer Tracker: Stop Recording (Without Submitting)');
+	});
 	test('status text makes pending submission and mock timing limitations explicit without connection identifiers', () => {
 		const text = formatAssessmentStatus({ state: 'submission_pending', mode: 'mock', uploadConsent: false, pendingEvents: 2,
 			serverTime: '2030-01-01T00:00:00Z', deadline: '2030-01-01T01:00:00Z' });

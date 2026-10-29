@@ -14,6 +14,7 @@ suite('Codex discovery confirmation UI', () => {
 	let picks: number;
 	let messages: string[];
 	let pick: CodexDiscoveryPrompts['pick'];
+	let summaries: import('../codexSessionDiscovery').CodexDiscoverySummary[];
 
 	setup(async () => {
 		recording = new RecordingController({ text: '', tooltip: '', command: '', show() {}, dispose() {} }, async () => true);
@@ -25,10 +26,13 @@ suite('Codex discovery confirmation UI', () => {
 			createdAt: '2026-10-13T10:00:00.000Z', workspaceRelativeCwd: 'private-customer/project',
 			status: 'ambiguous', reason: 'multiple_matches'
 		}));
-		confirmed = []; rejected = []; scans = 0; picks = 0; messages = [];
+		confirmed = []; rejected = []; scans = 0; picks = 0; messages = []; summaries = [];
 		pick = async () => undefined;
 		ui = new CodexDiscoveryUi(recording, {
 			scanNow: async () => { scans++; },
+			getDiagnostics: () => ({ recordingActive: recording.isRecording, directorySource: 'default_home', directoryStatus: 'ready', codexHome: 'unset',
+				approvedWorkspaceCount: 2, inspectedFileCount: entries.length, candidateCount: entries.filter(e => e.reason === 'multiple_matches').length,
+				confirmedCount: entries.filter(e => e.reason === 'user_confirmed').length, reasons: {}, diagnostics: [] }),
 			getConfirmationCandidates: () => entries.filter(entry =>
 				entry.reason === 'multiple_matches' || entry.reason === 'recent_workspace_match'),
 			confirm: async id => {
@@ -44,7 +48,7 @@ suite('Codex discovery confirmation UI', () => {
 		}, {
 			pick: items => { picks++; return pick(items); },
 			information: async message => { messages.push(message); }
-		});
+		}, undefined, summary => summaries.push(summary));
 	});
 	teardown(() => { ui.dispose(); recording.dispose(); });
 
@@ -59,6 +63,13 @@ suite('Codex discovery confirmation UI', () => {
 		await ui.review();
 		assert.deepEqual(confirmed, [entries[0].sourceFileId]);
 		assert.deepEqual(rejected, [entries[1].sourceFileId]);
+	});
+	test('review after checkbox confirmation reports existing sessions rather than falsely reporting no verified candidates', async () => {
+		pick = async items => [items[0]]; await ui.review(); await ui.review();
+		assert.equal(picks, 1); assert.equal(messages.length, 1); assert.ok(messages[0].includes('Already confirmed for this recording: 1'));
+		assert.equal(messages[0].includes('No verified current'), false); assert.equal(messages[0].includes('Local content capture is not authorized'), true);
+		assert.equal(summaries.at(-1)!.confirmedCount, 1);
+		for (const secret of [entries[0].sourceSessionId!, entries[0].sourceFileId, 'private-customer']) { assert.equal(JSON.stringify(summaries).includes(secret), false); }
 	});
 	test('cancel leaves all candidates unconfirmed and available for later review', async () => {
 		await ui.review();

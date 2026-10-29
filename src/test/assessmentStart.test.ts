@@ -1,3 +1,5 @@
+import { stopRecordingCommand } from '../recordingCommands';
+import { createFileEvent } from '../eventSchema';
 import * as assert from 'node:assert/strict';
 import * as vscode from 'vscode';
 import { createHash } from 'node:crypto';
@@ -118,6 +120,34 @@ suite('Assessment production recording preparation', function () {
 	test('manual Start Recording remains local and emits no Rails authorization diagnostics', async () => {
 		await recording.start(); assert.equal(recording.isRecording, true); assert.equal(starts, 0); assert.equal(uploadDialogs, 0); assert.equal(assessment.view.state, 'paired');
 		assert.equal(assessment.view.lastStart, undefined); assert.equal(steps.length, 0); assert.ok(files.getApprovedFolders().length);
+	});
+	test('reproduces the manual preparation log sequence, rejects adoption, then starts a fresh assessment after a safe local Stop', async () => {
+		await recording.start(); const manual = recording.sessionId!;
+		assert.deepEqual(prerequisiteCodes, ['recording_consent', 'workspace_approval', 'workspace_approved', 'local_storage', 'diff_baseline', 'assessment_authorization']);
+		const event = createFileEvent({ sessionId: manual, source: 'vscode', workspaceId: workspaceId(), eventType: 'file.modified', payload: { relativePath: 'app.ts' } });
+		await writer.write(event); await writer.flush();
+		const before = structuredClone(await store.load()); await assessment.start();
+		assert.equal(assessment.view.reason, 'recording_busy'); assert.equal(assessment.view.state, 'paired');
+		assert.equal(assessment.view.lastStart?.step, 'manual_recording_active'); assert.equal(assessment.view.lastStart?.status, 'failed');
+		assert.equal(starts, 0); assert.equal(uploadDialogs, 0); assert.equal(recording.sessionId, manual);
+		assert.deepEqual(await store.load(), before); assert.equal(assessment.isAssociatedSession(manual), false);
+		assert.ok(formatAssessmentStatus(assessment.view).includes('Stop Recording (Without Submitting)'));
+		await stopRecordingCommand(recording, drain); assert.equal(assessment.view.state, 'paired');
+		assert.deepEqual(await store.load(), before); assert.ok((await queue.getPending(100)).some(item => item.eventId === event.eventId));
+		await assessment.start(); assert.equal(assessment.view.state, 'active'); assert.equal(starts, 1); assert.equal(uploadDialogs, 1);
+		assert.notEqual(recording.sessionId, manual); assert.deepEqual((await store.load())!.localRecordingSessionIds, [recording.sessionId]);
+		assert.equal(assessment.isAssociatedSession(manual), false);
+		assert.ok((await queue.getPending(100)).some(item => item.eventId === event.eventId));
+	});
+	test('manual preparation in progress is diagnosed separately, and Stop cancels it before any Rails start', async () => {
+		const entered = deferred(); const release = deferred(); const actual = files.selectWorkspaces.bind(files);
+		files.selectWorkspaces = async selected => { entered.resolve(); await release.promise; await actual(selected); };
+		const manual = recording.start(); await entered.promise; const before = structuredClone(await store.load());
+		await assessment.start(); assert.equal(assessment.view.lastStart?.step, 'recording_start_pending');
+		assert.equal(assessment.view.reason, 'recording_busy'); assert.equal(assessment.view.state, 'paired'); assert.deepEqual(await store.load(), before);
+		recording.stop(); release.resolve(); await manual; await drain();
+		assert.equal(recording.isRecording, false); assert.equal(starts, 0); assert.equal(uploadDialogs, 0);
+		await assessment.start(); assert.equal(assessment.view.state, 'active'); assert.equal(starts, 1);
 	});
 	test('diagnostic descriptions are a fixed allowlist without connection, workspace or credential identifiers', () => {
 		const text = describeAssessmentStart({ step: 'rails_start', status: 'failed', reason: 'authentication' });

@@ -84,6 +84,19 @@ export async function readSessionMetadata(handle: FileHandle, active: () => bool
 			seen.add(name);
 			if (name === 'timestamp') {
 				timestamp = await string();
+			} else if (name === 'ordinal') {
+				// Current Codex journals put a non-negative sequence number before type.
+				// Accept only this bounded scalar; never skip arbitrary values or payloads.
+				let byte: number | undefined = await next(); let digits = '';
+				while (byte !== undefined && byte >= 48 && byte <= 57) {
+					digits += String.fromCharCode(byte);
+					if (digits.length > 16) { return { kind: 'invalid' }; }
+					byte = await read();
+				}
+				if (!/^(0|[1-9][0-9]*)$/.test(digits) || !Number.isSafeInteger(Number(digits))) { return { kind: 'invalid' }; }
+				while (byte === 32 || byte === 9 || byte === 13) { byte = await read(); }
+				if (byte !== 44) { return { kind: 'invalid' }; }
+				continue;
 			} else if (name === 'type') {
 				type = await string();
 				if (type !== 'session_meta') { return { kind: 'missing' }; }

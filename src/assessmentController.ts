@@ -145,13 +145,19 @@ export class AssessmentController {
 			if (this.archiving || this.phase === 'submitted') { return; }
 			this.startStep('requested');
 			if (this.recording.isRecording && this.isAssociatedSession(this.recording.sessionId!)) { this.startStep('assessment_active', 'active'); this.set('active'); return; }
-			if (this.recording.isRecording || this.recording.isStarting) { throw new AssessmentApiError('recording_busy'); }
+			if (this.recording.isRecording || this.recording.isStarting) {
+				this.startStep(this.recording.isRecording ? 'manual_recording_active' : 'recording_start_pending', 'failed', 'recording_busy');
+				this.set(this.phase, 'recording_busy'); return;
+			}
 			if (!this.metadata) { throw new AssessmentApiError('rejected'); }
 			if (['submission_pending', 'stopping', 'submitted'].includes(this.metadata.phase)) { throw new AssessmentApiError('recovery_required'); }
 			this.startStep('credential_check'); await this.authenticate();
 			this.startStep('server_status'); await this.refresh();
 			if (this.disposed || generation !== this.generation) { throw new AssessmentApiError('cancelled'); }
-			if (this.recording.isRecording || this.recording.isStarting) { throw new AssessmentApiError('recording_busy'); }
+			if (this.recording.isRecording || this.recording.isStarting) {
+				this.startStep(this.recording.isRecording ? 'manual_recording_active' : 'recording_start_pending', 'failed', 'recording_busy');
+				this.set(this.phase, 'recording_busy'); return;
+			}
 			if (!['paired', 'active'].includes(this.metadata.serverStatus.state)) { throw new AssessmentApiError('session_ended'); }
 			this.set('starting'); this.starting = true;
 			try {

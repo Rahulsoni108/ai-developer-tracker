@@ -1,3 +1,4 @@
+import { startRecordingCommand, stopRecordingCommand, type RecordingStartChoice } from './recordingCommands';
 import { DisclosureCaptureMonitor } from './disclosureCaptureMonitor';
 import { registerDisclosureCommands } from './assessmentDisclosureCommands';
 import { AssessmentDisclosureConsent } from './assessmentDisclosureConsent';
@@ -284,7 +285,7 @@ export async function activate(context: vscode.ExtensionContext) {
 				{ modal: true, detail: 'User prompts, visible assistant responses, tool inputs, and tool outputs from sessions you explicitly confirm will be saved in the encrypted local SQLite assessment queue after privacy filtering. These may include source code, credentials, or other sensitive text. System/developer instructions and private reasoning are excluded. Path exclusions do not redact every secret inside ordinary messages. This content-capture consent does not authorize uploads. Upload consent is separate. Content-capture consent expires when recording stops.' },
 				'Allow Content Capture'
 			)) === 'Allow Content Capture'
-		});
+		}, (summary, contentConsent) => output.appendLine('Codex discovery review: ' + JSON.stringify({ ...summary, contentConsent })));
 		activeDiscovery = discovery;
 		activeCodexParser = parser;
 		const reader = new CodexJsonlReader(recording, discovery, {
@@ -558,15 +559,19 @@ export async function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand(START_RECORDING_COMMAND, async () => {
 			try {
 				output.appendLine('Manual Start Recording command invoked. Use Start Assessment for the Rails lifecycle.');
-				await recording.start();
+				await startRecordingCommand(recording, () => assessment.view, async () => vscode.window.showWarningMessage<RecordingStartChoice>(
+					'A Rails assessment is paired. Choose the recording workflow.', { modal: true,
+						detail: 'Start Assessment requests fresh recording and separate upload consent, then asks Rails to authorize the official timer. Manual recording is only for local development; it does not start Rails and its evidence cannot be attached to this assessment. Cancel to leave everything unchanged.' },
+					'Start Assessment', 'Start Manual Recording'), async () => vscode.commands.executeCommand('ai-developer-tracker.startAssessment'));
 			} catch (error) {
 				reportError(error);
 			}
 		}),
 		vscode.commands.registerCommand(STOP_RECORDING_COMMAND, async () => {
-			const stoppedSession = recording.sessionId;
-			recording.stop();
-			await flushStoppedRecording(stoppedSession);
+			const stoppedSession = await stopRecordingCommand(recording, flushStoppedRecording);
+			if (stoppedSession && !assessment.isAssociatedSession(stoppedSession) && assessment.view.mode === 'rails' && assessment.view.state !== 'unpaired') {
+				void vscode.window.showInformationMessage('Manual recording stopped and local writes drained. Evidence was retained. The paired assessment was not submitted or archived. Use Start Assessment to begin its authorized workflow.');
+			}
 			await activeLocalData?.automaticRetention();
 			if (queue) { try { renderHealth(await queue.getHealth()); } catch (error) { reportPersistence('queue_failed', safeQueueError(error).code); } }
 		})

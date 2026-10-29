@@ -7,10 +7,8 @@ import type { RecordingController, RecordingLifecycle } from './recording';
 import { readSessionMetadata, type MetadataResult } from './codexMetadata';
 
 export type DiscoveryStatus = 'eligible' | 'confirmed' | 'rejected' | 'ambiguous';
-export type DiscoveryReason = 'recent_workspace_match' | 'multiple_matches' | 'user_confirmed' | 'user_rejected'
-	| 'historical' | 'outside_workspace' | 'future_timestamp' | 'creation_time_unverified'
-	| 'invalid_metadata' | 'missing_metadata' | 'incomplete_metadata' | 'oversized_metadata'
-	| 'working_directory_unverified' | 'duplicate_source_id' | 'metadata_changed' | 'filename_mismatch';
+export const DISCOVERY_REASONS = ['recent_workspace_match', 'multiple_matches', 'user_confirmed', 'user_rejected', 'historical', 'outside_workspace', 'future_timestamp', 'creation_time_unverified', 'invalid_metadata', 'missing_metadata', 'incomplete_metadata', 'oversized_metadata', 'working_directory_unverified', 'duplicate_source_id', 'metadata_changed', 'filename_mismatch'] as const;
+export type DiscoveryReason = typeof DISCOVERY_REASONS[number];
 
 /** Sanitized registry: no absolute cwd, transcript paths, account IDs, or content. */
 export interface CodexSessionRegistration {
@@ -45,6 +43,16 @@ export interface DiscoveryOptions {
 	watch?: (root: string, created: (file: string) => void, changed: (file: string) => void) => Disposable;
 	onCandidatesChanged?: (candidates: readonly CodexSessionRegistration[]) => void;
 	onDiagnostic?: (diagnostic: DiscoveryDiagnostic) => void;
+}
+/** Counts/fixed codes only. Never includes source IDs, paths, cwd, timestamps or content. */
+export interface CodexDiscoverySummary {
+	recordingActive: boolean;
+	directorySource: 'user_setting' | 'default_home';
+	directoryStatus: 'not_checked' | 'ready' | 'missing' | 'unsafe';
+	codexHome: 'unset' | 'matches' | 'differs' | 'invalid';
+	approvedWorkspaceCount: number; inspectedFileCount: number; candidateCount: number; confirmedCount: number;
+	reasons: Partial<Record<DiscoveryReason, number>>;
+	diagnostics: DiscoveryDiagnostic[];
 }
 interface WorkspaceScope extends ApprovedWorkspace { canonical: string; }
 interface FileIdentity { dev: number; ino: number; birthtimeMs: number; }
@@ -127,6 +135,23 @@ export class CodexSessionDiscovery implements RecordingLifecycle, Disposable {
 	}
 
 	getRegistry(): CodexSessionRegistration[] { return [...this.registry.values()].map(entry => ({ ...entry })); }
+	getDiagnostics(): CodexDiscoverySummary {
+		const active = this.run && this.current(this.run) ? this.run : undefined;
+		let codexHome: CodexDiscoverySummary['codexHome'] = 'unset';
+		if (process.env.CODEX_HOME) {
+			try { codexHome = samePath(codexSessionsDirectory(join(process.env.CODEX_HOME, 'sessions')), codexSessionsDirectory(this.options.sessionsDirectory)) ? 'matches' : 'differs'; }
+			catch { codexHome = 'invalid'; }
+		}
+		const entries = active ? this.getRegistry().filter(entry => entry.recordingSessionId === active.id) : [];
+		const reasons: CodexDiscoverySummary['reasons'] = {};
+		for (const reason of DISCOVERY_REASONS) { const count = entries.filter(entry => entry.reason === reason).length; if (count) { reasons[reason] = count; } }
+		return { recordingActive: !!active, directorySource: this.options.sessionsDirectory?.trim() ? 'user_setting' : 'default_home',
+			directoryStatus: active?.root ? 'ready' : active?.diagnostics.has('unsafe_directory') ? 'unsafe' : active?.diagnostics.has('missing_directory') ? 'missing' : 'not_checked',
+			codexHome, approvedWorkspaceCount: active?.scopes.length ?? 0, inspectedFileCount: active?.files.size ?? 0,
+			candidateCount: active ? this.getConfirmationCandidates().length : 0,
+			confirmedCount: entries.filter(entry => entry.status === 'confirmed' && entry.reason === 'user_confirmed').length,
+			reasons, diagnostics: active ? [...active.diagnostics] : [] };
+	}
 	clearStoppedRegistry(): void {
 		if (this.recording.isRecording || this.recording.isStarting) { throw new Error('Cannot clear active session associations.'); }
 		this.registry.clear();
