@@ -340,7 +340,10 @@ export class LocalEventQueue {
 		}
 		const eventId = validation.event.eventId;
 		// Admission snapshot precedes scheduling/awaits: a later grant cannot promote an already queued capture.
-		const disclosureCandidate = this.disclosureCapture.get(validation.event.sessionId);
+		const admissionScope = this.readEvidenceConsent(validation.event.sessionId);
+		const disclosureCandidate = [...this.disclosureCapture.values()].reverse().find(candidate => admissionScope
+			&& candidate.state.request.local_recording_session_id === validation.event.sessionId
+			&& disclosureCoversEvent(candidate.state, admissionScope, validation.event));
 		let proof: EvidenceApproval | undefined;
 		try { if (context) { proof = createEvidenceApproval(validation.event, context); } }
 		catch { return Promise.reject(new LocalEventQueueError('Evidence approval validation failed.')); }
@@ -552,7 +555,11 @@ export class LocalEventQueue {
 		if (sessionId !== undefined && !isUuid(sessionId) || requestId !== undefined && !isUuid(requestId) || seal && !sessionId) { throw new LocalEventQueueError('Invalid disclosure scope.'); }
 		if (requestId) { this.disclosureBlocked.add(requestId); }
 		if (seal && sessionId) { this.disclosureSealed.add(sessionId); }
-		if (sessionId === undefined) { this.disclosureCapture.clear(); } else { this.disclosureCapture.delete(sessionId); }
+		if (sessionId === undefined) { this.disclosureCapture.clear(); } else {
+			for (const [key, value] of this.disclosureCapture) {
+				if (value.state.request.local_recording_session_id === sessionId && (!requestId || key === requestId)) { this.disclosureCapture.delete(key); }
+			}
+		}
 	}
 	/** Called only with a freshly validated HTTPS response. Request-start monotonic time bounds network/storage latency. */
 	async confirmDisclosureConsent(confirmation: DisclosureConfirmation): Promise<void> {
@@ -569,9 +576,9 @@ export class LocalEventQueue {
 			const latest = this.database.prepare('SELECT request_id FROM disclosure_consents WHERE session_id = ? ORDER BY rowid DESC LIMIT 1').get(id);
 			const scope = this.readEvidenceConsent(id);
 			if (scope && !this.disclosureSealed.has(id) && !this.disclosureBlocked.has(state.request.request_id)
-				&& latest?.request_id === state.request.request_id && activeDisclosureConfirmation(value, scope)
+				&& (latest?.request_id === state.request.request_id || state.workflowConsentId && this.readDisclosureConsent(String(latest?.request_id))?.workflowConsentId === state.workflowConsentId) && activeDisclosureConfirmation(value, scope)
 				&& this.database.prepare("SELECT 1 FROM recording_sessions WHERE session_id = ? AND owner_id = ? AND status = 'active'").get(id, this.ownerId)) {
-				this.disclosureCapture.set(id, { ...value, activatedAt: process.hrtime.bigint() });
+				this.disclosureCapture.set(state.request.request_id, { ...value, activatedAt: process.hrtime.bigint() });
 			}
 		});
 	}
@@ -583,9 +590,9 @@ export class LocalEventQueue {
 		return state;
 	}
 	private disclosureAtCapture(event: TrackerEvent, scope: EvidenceConsentState, capturedAt: bigint, candidate?: DisclosureConfirmation & { activatedAt: bigint }): DisclosureState | undefined {
-		if (!candidate || this.disclosureSealed.has(event.sessionId) || this.disclosureBlocked.has(candidate.state.request.request_id) || capturedAt < candidate.activatedAt || this.disclosureCapture.get(event.sessionId) !== candidate || !activeDisclosureConfirmation(candidate, scope)) { return undefined; }
+		if (!candidate || this.disclosureSealed.has(event.sessionId) || this.disclosureBlocked.has(candidate.state.request.request_id) || capturedAt < candidate.activatedAt || this.disclosureCapture.get(candidate.state.request.request_id) !== candidate || !activeDisclosureConfirmation(candidate, scope)) { return undefined; }
 		const latest = this.database.prepare('SELECT request_id FROM disclosure_consents WHERE session_id = ? ORDER BY rowid DESC LIMIT 1').get(event.sessionId);
-		if (latest?.request_id !== candidate.state.request.request_id) { return undefined; }
+		if (latest?.request_id !== candidate.state.request.request_id && (!candidate.state.workflowConsentId || this.readDisclosureConsent(String(latest?.request_id))?.workflowConsentId !== candidate.state.workflowConsentId)) { return undefined; }
 		const current = this.readDisclosureConsent(candidate.state.request.request_id);
 		if (!current || JSON.stringify(current) !== JSON.stringify(candidate.state) || !disclosureCoversEvent(current, scope, event)) { return undefined; }
 		return current;
@@ -607,7 +614,9 @@ export class LocalEventQueue {
 		let snapshot: DisclosureState;
 		try { snapshot = JSON.parse(JSON.stringify(state)); if (!validDisclosureState(snapshot)) { throw new Error(); } }
 		catch { return Promise.reject(new LocalEventQueueError('Invalid disclosure consent.')); }
-		this.suspendDisclosureCapture(snapshot.request.local_recording_session_id, snapshot.locallyRevoked ? snapshot.request.request_id : undefined); this.disclosureUploads.delete(snapshot.request.request_id);
+		if (snapshot.workflowConsentId && !snapshot.locallyRevoked) { this.disclosureCapture.delete(snapshot.request.request_id); }
+		else { this.suspendDisclosureCapture(snapshot.request.local_recording_session_id, snapshot.locallyRevoked ? snapshot.request.request_id : undefined); }
+		this.disclosureUploads.delete(snapshot.request.request_id);
 		return this.schedule(async () => {
 			if (!this.cipher) { throw new EvidenceEncryptionError('key_missing'); }
 			const id = snapshot.request.local_recording_session_id;

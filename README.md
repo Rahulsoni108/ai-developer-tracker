@@ -10,6 +10,8 @@ Candidates can currently use development recording commands in a local coding wo
 
 **E4.9 disclosure approvals:** [Prospective protocol-2 capture and manual verification](docs/assessment-protocol2-approvals.md). Independent disclosure choices remain unselected by default. Only new events with fresh, server-confirmed scope receive encrypted protocol-2 approvals; historical protocol-1 evidence stays restricted. Recruiter raw-content APIs remain unavailable.
 
+**One-action Rails assessment consent:** [Setup, exact candidate steps and security limits](docs/assessment-workflow-consent.md). **Start Assessment** verifies the workflow-capable Rails API and approved processor, then presents one **Agree & Start Assessment** notice covering separately persisted permissions. Use **Launch Assessment AI Session** for tracked Codex/Claude sessions; supported sessions enroll prospectively without repeated content-consent dialogs. Native/unverified chats and historical events remain excluded. Manual/development recording keeps its existing dialogs.
+
 **AI processing consent:** [Trusted Rails processor discovery, candidate controls and manual verification](docs/assessment-ai-processing-consent.md). Configure, Show and Revoke remain independent of recording, upload and recruiter disclosure. Grants require an approved server policy and explicit prospective selection. The extension never calls an LLM; evaluation also requires separate server enablement and recruiter initiation. Historical events gain no permission.
 
 ## 2. Technology Stack
@@ -153,7 +155,9 @@ Command Palette titles and IDs match `package.json`.
 | AI Developer Tracker: Show Recorded Event Summary | `ai-developer-tracker.showRecordedEventSummary` | Show event-type counts for the latest non-cancelled session's retained pending events. |
 | AI Developer Tracker: Archive Assessment Connection | `ai-developer-tracker.archiveAssessmentConnection` | Stop/drain and archive locally; preserve old evidence and credentials, then allow fresh pairing. Does not submit. |
 | AI Developer Tracker: Pair Assessment | `ai-developer-tracker.pairAssessment` | Pair with configured trusted Rails HTTPS origin, or explicit local mock. |
-| AI Developer Tracker: Start Assessment | `ai-developer-tracker.startAssessment` | Obtain Rails authorization/binding and separate consents before recording. |
+| AI Developer Tracker: Launch Assessment AI Session | `ai-developer-tracker.launchAssessmentAiSession` | Launch supported tracked Codex/Claude sessions under this recording’s explicit workflow scope. |
+| AI Developer Tracker: Revoke Assessment Workflow Consent | `ai-developer-tracker.revokeAssessmentWorkflowConsent` | Stop capture and withdraw workflow permissions; preserve evidence and report unconfirmed remote outcomes. |
+| AI Developer Tracker: Start Assessment | `ai-developer-tracker.startAssessment` | One explicit workflow notice; atomic Rails authorization/binding and independent purpose receipts before recording. |
 | AI Developer Tracker: Stop & Submit Assessment | `ai-developer-tracker.stopAndSubmitAssessment` | Stop/drain; keep submission pending until acknowledgments and server finalization. |
 | AI Developer Tracker: Enable Assessment Uploads | `ai-developer-tracker.enableAssessmentUploads` | Fresh upload consent for retained approved evidence; never restarts recording or recreates approvals. |
 | AI Developer Tracker: Revoke Assessment Credential | `ai-developer-tracker.revokeAssessmentCredential` | Confirmed stop/revoke; preserve pending evidence and remove the revoked SecretStorage credential. |
@@ -175,7 +179,7 @@ The event summary decrypts/validates inside the storage worker and returns only 
 1. A recruiter sends an invitation through the existing Rails application.
 2. The candidate opens the link, verifies email OTP and claims the interview on the existing Next.js website without creating an account.
 3. The candidate connects VS Code using a short-lived pairing code issued after verification.
-4. The candidate grants separate recording and upload consent. AI content still needs source-specific approval.
+4. Start Assessment presents one explicit notice for recording, upload, recruiter disclosure, processing and supported assessment-launched AI sessions; Rails persists the permissions separately.
 5. The candidate clicks **Start Assessment** in VS Code.
 6. Rails authorizes the start and establishes the official deadline exactly once; reconnects/restarts must not reset it.
 7. The extension records approved workspace and AI activity through privacy filtering and encrypted storage.
@@ -183,7 +187,7 @@ The event summary decrypts/validates inside the storage worker and returns only 
 
 **Manual recording conflict:** If `recording_busy` identifies an active/preparing manual recording, run **Stop Recording (Without Submitting)** and wait for local writes to drain, then run **Start Assessment**. Manual evidence is retained and never adopted by the assessment. The manual/status-bar start command now offers an explicit assessment workflow choice when Rails is paired.
 
-If Start Assessment stops after recording confirmation, inspect **Output → AI Developer Tracker** and **Show Assessment Status** for the last start prerequisite. Recording confirmation is followed by workspace/storage/baseline preparation, separate upload consent and Rails authorization. See [safe start diagnostics and retry steps](docs/assessment-start-diagnostics.md).
+If Start Assessment stops after recording confirmation, inspect **Output → AI Developer Tracker** and **Show Assessment Status** for the last start prerequisite. The workflow notice is followed by workspace/storage/baseline preparation and atomic Rails authorization with independently validated purpose requests. Unsupported workflow APIs or processor/tool preflight fail before timer start. See [safe start diagnostics and retry steps](docs/assessment-start-diagnostics.md).
 
 For an expired, revoked, deleted or otherwise unrecoverable old connection, run **Archive Assessment Connection**, review the unconfirmed-submission warning, and explicitly choose **Archive Connection**. After status says **Ready to pair a new assessment**, run **Pair Assessment** with a new code and approve recording/workspaces/uploads afresh when starting. Old evidence and credentials remain retained and isolated; archiving never implies submission. See [exact archive/re-pair and recovery instructions](docs/assessment-archive.md).
 

@@ -11,9 +11,10 @@ export class DisclosureCaptureMonitor {
 	private readonly listener: { dispose(): void };
 	constructor(private readonly recording: RecordingController, private readonly assessment: Pick<AssessmentController, 'withDisclosureContext'>,
 		private readonly consent: Pick<AssessmentDisclosureConsent, 'list' | 'inspect'>, private readonly queue: Pick<AsyncLocalEventQueue, 'suspendDisclosureCapture'>,
-		private readonly onStatus: (status: 'confirmed' | 'upload_only') => void = () => {}, private readonly intervalMs = 5000) {
+		private readonly onStatus: (status: 'confirmed' | 'upload_only') => void = () => {}, private readonly intervalMs = 5000,
+		private readonly drainBeforeSeal: (recordingId: string) => boolean = () => false) {
 		this.listener = recording.addLifecycleListener({ prepare: async () => {}, started: () => this.schedule(),
-			stopped: id => { this.request?.abort(); clearTimeout(this.timer); void this.queue.suspendDisclosureCapture(id, undefined, true).catch(() => {}); },
+			stopped: id => { this.request?.abort(); clearTimeout(this.timer); if (!this.drainBeforeSeal(id)) { void this.queue.suspendDisclosureCapture(id, undefined, true).catch(() => {}); } },
 			cancelled: id => { void this.queue.suspendDisclosureCapture(id, undefined, true).catch(() => {}); } });
 		if (recording.isRecording) { this.schedule(); }
 	}
@@ -29,7 +30,7 @@ export class DisclosureCaptureMonitor {
 				const current = () => !this.disposed && !request.signal.aborted && context.current();
 				const scoped = { ...context, current };
 				const latest = (await this.consent.list(scoped)).filter(s => s.request.local_recording_session_id === context.currentRecording).at(-1);
-				if (!latest?.receipt || latest.locallyRevoked || latest.pendingAction || latest.receipt.state !== 'active') { return; }
+				if (!latest?.receipt || latest.workflowConsentId || latest.locallyRevoked || latest.pendingAction || latest.receipt.state !== 'active') { return; }
 				const state = await this.consent.inspect(scoped, latest, AbortSignal.any([request.signal, AbortSignal.timeout(2500)]));
 				this.onStatus(state.receipt?.state === 'active' && state.receipt.upload_scope_state === 'active' ? 'confirmed' : 'upload_only');
 			});

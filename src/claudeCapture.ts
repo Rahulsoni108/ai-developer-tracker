@@ -12,6 +12,7 @@ export interface ClaudeCaptureOptions {
 	bridgePath: string;
 	nodeExecutable: string;
 	assertOutsideWorkspaces(path: string): Promise<void>;
+	authorizeSource?(recordingId: string, workspaceId: string, sourceSessionId: string): Promise<void>;
 }
 interface Capture { sourceSessionId: string; token: string; directory: string; socketDirectory?: string; server: Server; sockets: Set<Socket>; }
 /** Per-launch hook plugin; never reads or modifies a user's existing Claude configuration. */
@@ -61,6 +62,8 @@ export class ClaudeCapture {
 			});
 			server.on('error', () => {});
 			capture = { sourceSessionId, token, directory, socketDirectory, server, sockets }; this.captures.add(capture);
+			await this.options.authorizeSource?.(recordingSessionId, workspaceId, sourceSessionId);
+			if (generation !== this.generation || !this.recording.isRecording || this.recording.sessionId !== recordingSessionId) { throw new Error('Claude capture unavailable.'); }
 			await this.parser.approve({ sourceSessionId, workspaceId, root, recordingSessionId });
 			await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(socketPath, () => { server.off('error', reject); resolve(); }); });
 			if (process.platform !== 'win32') { await chmod(socketPath, 0o600); }

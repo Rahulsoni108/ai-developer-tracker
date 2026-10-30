@@ -37,6 +37,12 @@ suite('Disclosure capture refresh lifecycle', () => {
 		recording.stop(); assert.equal(signal.aborted, true); assert.deepEqual(suspended[0], [id, undefined, true]);
 		finish(); await pending; await monitor.refresh(); assert.equal(calls, 1); assert.equal(recording.isRecording, false);
 	});
+	test('workflow stop defers sealing until its owner drains admitted evidence; cancellation still seals', async () => {
+		await recording.start(); let seals = 0;
+		monitor = new DisclosureCaptureMonitor(recording, { withDisclosureContext: async () => { throw new Error('Not polled'); } },
+			{ list: async () => [], inspect: async (_c, state) => state }, { suspendDisclosureCapture: async () => { seals++; } }, undefined, 60000, () => true);
+		recording.stop(); assert.equal(seals, 0);
+	});
 	test('missing disclosure intent never registers a grant or initiates network capture authorization', async () => {
 		await recording.start(); let inspected = false;
 		const context = { current: () => true, currentRecording: randomUUID() } as DisclosureContext;

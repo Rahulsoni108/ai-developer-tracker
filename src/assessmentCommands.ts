@@ -33,7 +33,7 @@ export function formatAssessmentStatus(view: AssessmentView): string {
 	return lines.join('\n');
 }
 
-export function registerAssessmentCommands(controller: AssessmentController, mockEnabled: boolean): vscode.Disposable[] {
+export function registerAssessmentCommands(controller: AssessmentController, mockEnabled: boolean, beforeSubmit: () => Promise<void> = async () => {}): vscode.Disposable[] {
 	return [
 		vscode.commands.registerCommand(ARCHIVE_ASSESSMENT_COMMAND, async () => {
 			let accepted = false;
@@ -61,7 +61,7 @@ export function registerAssessmentCommands(controller: AssessmentController, moc
 			await controller.start(); const diagnostic = controller.view.lastStart;
 			if (diagnostic?.status === 'failed') { void vscode.window.showWarningMessage(describeAssessmentStart(diagnostic) + ' See Output → AI Developer Tracker for the prerequisite sequence.'); }
 		}),
-		vscode.commands.registerCommand(SUBMIT_ASSESSMENT_COMMAND, () => controller.stopAndSubmit()),
+		vscode.commands.registerCommand(SUBMIT_ASSESSMENT_COMMAND, async () => { await beforeSubmit(); return controller.stopAndSubmit(); }),
 		vscode.commands.registerCommand(ASSESSMENT_STATUS_COMMAND, async () => {
 			await controller.showStatus(); const view = controller.view;
 			void vscode.window.showInformationMessage(formatAssessmentStatus(view)); return view;

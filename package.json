@@ -67,6 +67,8 @@
       }
     },
     "commands": [
+      { "command": "ai-developer-tracker.launchAssessmentAiSession", "title": "AI Developer Tracker: Launch Assessment AI Session" },
+      { "command": "ai-developer-tracker.revokeAssessmentWorkflowConsent", "title": "AI Developer Tracker: Revoke Assessment Workflow Consent" },
       {"command": "ai-developer-tracker.archiveAssessmentConnection", "title": "AI Developer Tracker: Archive Assessment Connection"},
       {"command": "ai-developer-tracker.pairAssessment", "title": "AI Developer Tracker: Pair Assessment"},
       {"command": "ai-developer-tracker.startAssessment", "title": "AI Developer Tracker: Start Assessment"},

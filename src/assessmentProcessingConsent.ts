@@ -67,6 +67,16 @@ export class AssessmentProcessingConsent {
 			await this.save(context, state); return state;
 		});
 	}
+	acceptWorkflowReceipt(context: DisclosureContext, state: ProcessingState): Promise<void> {
+		return this.serial(async () => {
+			this.owner(context, state);
+			if (!validProcessingState(state) || !state.receipt || state.pendingAction || state.locallyRevoked) { throw new AssessmentApiError('protocol'); }
+			const existing = (await this.load(context)).find(s => s.request.request_id === state.request.request_id);
+			if (existing && (!sameProcessingValue(existing.request, state.request) || existing.locallyRevoked
+				|| existing.receipt?.consent_id !== state.receipt.consent_id || existing.receipt.consented_at !== state.receipt.consented_at)) { throw new AssessmentApiError('recovery_required'); }
+			await this.save(context, state);
+		});
+	}
 	list(context: DisclosureContext): Promise<ProcessingState[]> { return this.serial(() => this.load(context)); }
 	inspect(context: DisclosureContext, state: ProcessingState, signal: AbortSignal): Promise<ProcessingState> {
 		return this.serial(async () => {

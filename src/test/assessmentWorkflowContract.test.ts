@@ -1,9 +1,12 @@
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { RailsWorkflowConsentClient } from '../railsWorkflowConsentClient';
 import * as assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { canonicalSha256 } from '../canonicalJson';
 import { type AssessmentProcessorPolicy } from '../processorPolicy';
 import { validWorkflowPolicy, validWorkflowStartRequest, validWorkflowSourceRequest, workflowIntentDigest, workflowConsentNotice,
-	WORKFLOW_CONSENT_VERSION, type WorkflowPolicy, type WorkflowStartRequest } from '../assessmentWorkflowContract';
+	WORKFLOW_CONSENT_VERSION, validWorkflowStartBundle, type WorkflowPolicy, type WorkflowStartRequest } from '../assessmentWorkflowContract';
 
 function policy(): WorkflowPolicy {
 	const body = { version: 'assessment-processor-policy.v1' as const, available: true as const, purpose: 'assessment_performance_evaluation' as const,
@@ -22,6 +25,19 @@ function request(): WorkflowStartRequest {
 		providers: ['claude', 'codex'], processing_policy_digest: policy().processor_policy.policy_digest };
 }
 suite('Assessment workflow contract foundation', () => {
+ test('accepts the exact authenticated Rails explicit-purpose fixture without field or receipt invention', async () => {
+  const fixture = JSON.parse(await readFile(join(__dirname, '../../src/test/fixtures/rails-workflow-consent.v1.json'), 'utf8'));
+  const start = fixture.start.data; const auth = { connection: { mode: 'rails' as const, codingSessionId: start.coding_session_id,
+   apiOrigin: start.upload.receipt.destination_origin, uploadEndpoint: start.upload.receipt.destination_origin + '/api/v2/coding_session/extension/events',
+   credentialExpiresAt: start.upload.receipt.expires_at }, credential: 'adt_ext_' + 'x'.repeat(43) };
+  const client = new RailsWorkflowConsentClient({ send: async request => ({ status: 200, headers: {}, contentType: 'application/json',
+   body: JSON.stringify(request.endpoint.pathname.endsWith('/policy') ? fixture.policy : fixture.start) }) });
+  assert.ok(validWorkflowStartBundle(start.request));
+  assert.ok(validWorkflowPolicy(await client.policy(auth, AbortSignal.timeout(1000)), auth.connection.codingSessionId));
+  const result = await client.start(auth, start.request, AbortSignal.timeout(1000));
+  assert.equal(result.state, 'active'); assert.equal(result.confirmations.length, 1);
+  assert.equal(result.disclosure.request.upload_consent_id, result.upload.receipt!.consent_id);
+ });
 	test('requires the exact advertised capability and authenticated assessment policy', () => {
 		assert.ok(validWorkflowPolicy(policy(), '42'));
 		for (const invalid of [undefined, {}, { ...policy(), consent_version: 'assessment-workflow.v2' },

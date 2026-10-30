@@ -65,7 +65,7 @@ export class AssessmentDisclosureConsent {
 		return this.serial(async () => {
 			const stored = await this.stored(context, state);
 			if (!stored.receipt) { return stored; } // Cannot discover unknown receipts by replaying a grant.
-			await this.queue.suspendDisclosureCapture?.(stored.request.local_recording_session_id);
+			if (!stored.workflowConsentId) { await this.queue.suspendDisclosureCapture?.(stored.request.local_recording_session_id); }
 			const requestedAt = process.hrtime.bigint();
 			const receipt = await this.api.send(context.auth, stored, 'status', signal);
 			const next = { ...stored, receipt }; await this.queue.setDisclosureConsent(next);

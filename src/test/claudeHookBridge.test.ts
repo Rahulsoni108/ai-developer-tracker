@@ -23,6 +23,26 @@ suite('Claude command hook bridge and configuration isolation', () => {
 	});
 	teardown(async () => { await capture.dispose(); recording.stop(); await parser.finishRecording(); parser.dispose(); recording.dispose(); await rm(root, { recursive: true, force: true }); });
 
+	test('workflow enrollment must complete before any Claude source is approved or launched', async () => {
+		await capture.dispose();
+		let approved = false;
+		capture = new ClaudeCapture(recording, parser, { storageDirectory: join(root, 'runtime'), bridgePath: require.resolve('../claudeHookBridge'),
+			nodeExecutable: process.execPath, assertOutsideWorkspaces: async () => {},
+			authorizeSource: async (recordingId, workspaceId, sourceId) => {
+				assert.equal(recordingId, recording.sessionId); assert.equal(workspaceId, 'workspace');
+				assert.equal(parser.getApprovals(recordingId).some(s => s.sourceSessionId === sourceId), false); approved = true;
+			} });
+		const launch = await capture.create(workspace, 'workspace');
+		assert.equal(approved, true); assert.ok(parser.getApprovals(recording.sessionId!).some(s => s.sourceSessionId === launch.sourceSessionId));
+	});
+	test('failed workflow authorization creates no content capability or residual hook configuration', async () => {
+		await capture.dispose();
+		capture = new ClaudeCapture(recording, parser, { storageDirectory: join(root, 'runtime'), bridgePath: require.resolve('../claudeHookBridge'),
+			nodeExecutable: process.execPath, assertOutsideWorkspaces: async () => {}, authorizeSource: async () => { throw new Error('Synthetic denied'); } });
+		await assert.rejects(capture.create(workspace, 'workspace'));
+		assert.equal(parser.getApprovals(recording.sessionId!).length, 0); assert.equal(events.length, 0);
+		assert.deepEqual(await readdir(join(root, 'runtime')), []);
+	});
 	test('creates an additive private plugin and captures through real command stdin and authenticated IPC without touching user hooks', async () => {
 		const existing = '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"user-hook"}]}]},"permissions":{"deny":["Read(.env)"]}}';
 		await mkdir(join(workspace, '.claude')); await writeFile(join(workspace, '.claude', 'settings.json'), existing);

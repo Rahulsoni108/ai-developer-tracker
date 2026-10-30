@@ -1,46 +1,63 @@
-# Assessment workflow consent — proposed version 1
+# One explicit assessment consent action
 
-Status: contract foundation only. **Not enabled in activation or recording.** Existing consent commands, server contracts and capture restrictions remain unchanged until Rails and extension integration pass the security checks below.
+Real Rails assessments now use `assessment-workflow.v1`: one **Agree & Start Assessment** notice explicitly covers recording, scoped upload, recruiter disclosure, AI processing and prospective enrollment of supported assessment-launched AI sessions. The notice identifies workspace folders, HTTPS destination, available providers, the server-approved processor/model, retention and withdrawal terms. Nothing is preselected. Cancel sends no start or grant.
 
-## Candidate action and independent permissions
+The permissions remain independent. Each purpose has an explicit request and its own server receipt. Pairing, recording consent, a receipt or a client digest never substitutes for another permission or attests to trusted PrivacyFilter execution. Existing manual/development recording and its separate consent dialogs are unchanged.
 
-The proposed `assessment-workflow.v1` profile presents one complete notice and an explicit **Agree & Start Assessment** action. It covers recording, upload to the paired HTTPS destination, job-owning recruiter review, the current Rails-approved processing policy, and future supported assessment-launched AI sessions. No approval is preselected. Cancel leaves the assessment unstarted. Separate durable upload, disclosure and processing receipts remain authoritative; a combined notice is not a substitute for those receipts.
+## Requirements and local setup
 
-The notice must identify workspaces, destination, providers, processor/model, purpose, retention and withdrawal semantics. New origins, workspaces, provider scopes or processing policies require fresh explicit approval. Existing recording/development commands remain independent.
+1. Deploy the matching Rails workflow API and its two migrations. No development/production migrations were run by this implementation. The API contract is documented in `hiring-manager/docs/assessment-workflow-consent.md` and its OpenAPI.
+2. Configure the existing trusted HTTPS assessment origin and Rails-approved processor policy. No LLM keys belong in VS Code. Missing/disabled processor policy blocks this profile before the official timer starts; there is no silent mock or recording-only fallback.
+3. Install a supported Codex CLI (`--no-daemon` and `--cd`) and/or Claude Code CLI (`--plugin-dir`, `--session-id`, the existing hook support) and Node.js. Preflight must find at least one supported provider. Actual authenticated provider execution remains a live verification step.
+4. Any restricted development tunnel proxy must allow the five new workflow paths with their exact methods, in addition to the existing pairing/status/events/finalization routes. Preserve TLS validation, HTTPS forwarding and authentication.
 
-## Proposed control contract
+## Candidate steps
 
-These routes are **proposals, not currently usable endpoints**:
+1. Open the intended assessment workspace, pair through the existing OTP-issued code, then run **AI Developer Tracker: Start Assessment**.
+2. Read the single notice. Select **Agree & Start Assessment** only if you approve every listed purpose. Storage/workspace/baseline preparation and the atomic Rails start must complete before recording becomes active. The Rails deadline is assigned once and is never reset by retries.
+3. Run **AI Developer Tracker: Launch Assessment AI Session**, choose Codex or Claude Code and an approved workspace. This launches a supported tracked session; it does not ask for another content-consent checkbox.
+4. For Codex, sign in if required and **wait for “Assessment Codex capture ready” before entering prompts**. The private launch home is separate from personal Codex state. Credentials are not copied; the CLI is configured to require OS-keyring credential storage. Native VS Code Codex chats and sessions opened outside this managed context are not automatically captured.
+5. Claude uses the existing per-launch temporary additive hook plugin and authenticated local bridge. Source enrollment must succeed before hook content capability is approved or Claude launches. Existing user hooks/settings are not overwritten. The existing **Start Claude Code Capture** command also reuses the explicit workflow approval for this recording.
+6. Use the tools normally. Newly discovered sessions inside the managed Codex launch context are enrolled prospectively without another consent dialog. Unrelated workspaces, prior history, system/developer instructions, private reasoning and unsupported subagent content remain excluded. No AI authorship is inferred from timestamps.
+7. Use **Show Recorded Event Summary** to verify retained event-type counts. Before Stop & Submit, a non-blocking warning appears if this recording captured no AI prompts/responses. It does not invent evidence or prevent submission.
+8. **Stop & Submit Assessment** stops new capture, drains admitted checkpoints, completes/seals local sessions, closes server capture windows, uploads only approved evidence and finalizes through the unchanged reconciliation contract. Success still requires a verified Rails submission receipt.
+9. The recruiter can use the existing evaluation controls after submission. This feature grants eligible processing scope; it does not automatically call an LLM or fabricate a report. Rails evaluation/processor enablement and sufficient retained evidence are still required.
 
-- `GET /api/v2/coding_session/extension/workflow_consents/policy`: authenticated capabilities, `consent_version`, `source_mode: extension_launched_only`, provider allowlist and existing authenticated `processor_policy` object.
-- `POST .../workflow_consents/start`: atomically validate intent, start/bind using the existing service and create separate upload, code-disclosure and code-processing receipts. The exact request is `request_id`, `local_recording_session_id`, `consent_version`, `approval_action: approve_assessment_workflow`, `approved_workspace_ids`, `providers`, `processing_policy_digest`.
-- `POST .../workflow_consents/sources`: enroll a verified newly launched session using `workflow_consent_id`, `request_id`, `workspace_id`, `source`, `source_session_id`. Create narrow, prospective child disclosure/processing receipts without superseding earlier authorized sources.
-- `POST .../workflow_consents/status` and `DELETE .../workflow_consents`: exact body `workflow_consent_id`; authenticated status or explicit revocation.
+## Wire contract
 
-Control responses must retain Rails' `{data: ...}` envelope. Receipt bundle response validation, persistence and HTTP wiring are a later implementation increment; no consumer may invent a receipt or silently fall back if capabilities are unavailable. Event/approval upload sidecars and flat durable acknowledgments remain unchanged. Version-1/protocol-1 historical events must never be promoted.
+All new paths are under `/api/v2/coding_session/extension/workflow_consents`, require HTTPS and the existing paired Bearer credential, and use `{data: ...}` control responses:
 
-## Required server and storage invariants
+| Method/path | Purpose |
+| --- | --- |
+| `GET /policy` | Verify version, `extension_launched_only` capabilities and current processor policy. |
+| `POST /start` | Atomic timing/binding plus explicit independent purpose requests. |
+| `POST /sources` | Prospectively enroll one exact provider/source/workspace with explicit disclosure and processing requests. |
+| `POST /status` | Refresh the original bundle and bounded independent disclosure confirmations. |
+| `DELETE` on the base path | Explicitly revoke workflow permissions. |
 
-Start and receipt creation must commit together under the existing invitation/session lock order. Any validation or grant failure must roll back timing, binding and permission writes. Idempotent retries preserve the original deadline, request and receipts; conflict reuse is rejected. Scope registration cannot trust caller-supplied assessment ownership IDs.
+Start body is exactly `{intent, upload, disclosure, processing}`. `intent` uses the strict `WorkflowStartRequest` fields. `upload` is the complete existing upload grant. The complete code-only disclosure and processing grants reference `upload_request_id` inside this atomic bundle; Rails resolves only that reference to the real upload receipt ID. Missing approval actions, mismatched workspaces/recordings, policy changes, ownership inputs and unknown fields fail closed.
 
-Each parent grant is immutable and bound to assessment, recording, credential, destination, workspace set and exact processing policy. Each AI-source enrollment is immutable, bounded and independently scoped. Enrollment must not revoke earlier processing grants or widen existing event authorization. New enrollment is rejected when the parent, upload permission, applicable child permission, credential, policy or capture window is invalid. Concurrent revocation and enrollment share server locks.
+Source body is exactly `{intent, disclosure, processing}`. Its intent identifies the existing workflow, idempotency UUID, provider source UUID and workspace hash. Complete existing purpose requests use the real upload receipt ID, exact one-source/one-workspace scope and categories `ai_interactions`/`tool_activity`.
 
-The storage worker needs independently scoped, fresh disclosure confirmations for code and each AI session. Its current single-latest-receipt behavior cannot safely authorize this profile. Restart cannot restore live capture authority from disk alone. New event approvals must still be created atomically over exact sanitized bytes at capture time.
+Responses include the original request, server status, each resolved request/receipt and bounded disclosure `confirmations`. The workflow ID is the original start intent request UUID. The TypeScript client validates actual Rails synthetic fixtures, every scope/receipt/identity and server timing before persisting anything as approved. Event schemas, RFC 8785 digests, protocol-1/2 sidecars, encrypted queue storage and flat durable event acknowledgments remain unchanged.
 
-No source content may be read before the parent action and source authorization. Enrollment cannot backdate permissions. Events before enrollment must not be retrospectively upgraded. Failure to enroll must be visible as unavailable/partial capture. Stopping must drain admitted work before closing capture and reconciling existing finalization manifests.
+The server caps current processing scopes at 32 per assessment (including recording/code scopes), matching the existing evaluator. A workflow can enroll at most 31 AI sessions. Further requests are rejected visibly rather than silently omitting evaluation scope.
 
-## AI session linkage
+## Recovery, withdrawal and archival
 
-Claude can reuse existing per-launch temporary hooks and authenticated local bridge. Concurrent launches remain bounded. Existing unrelated hooks/settings are not overwritten.
+- Intent is stored in SecretStorage before requests. Purpose receipts and exact-event approvals use the existing encrypted SQLite infrastructure; processing receipts also remain visible to the existing secure processing consent controls.
+- Restart can recover original server receipts with read-only status. It never restores recording, upload freshness or source capture authority automatically. New recording needs fresh explicit consent, a new recording UUID and the same original Rails deadline.
+- Lost source-request outcomes retain their original request IDs. No capture becomes active from a timeout; an explicit supported retry uses the same stored request. No historical event is upgraded.
+- **Revoke Assessment Workflow Consent** stops current capture/delivery and durably records withdrawal before requesting server revocation. Local failure/network loss leaves remote outcome unconfirmed; retry is supported even after recording stops. Independent existing disclosure/processing controls remain available. Withdrawing an applicable purpose blocks future combined capture/enrollment rather than silently regranting it.
+- Disclosure withdrawal is prospective for otherwise valid historical evidence. Processing withdrawal blocks undispatched requests; previously produced reports follow Rails' retention policy. Full workflow withdrawal also withdraws uploads. None of these actions deletes evidence, recalls already processed data, submits an assessment or extends a deadline.
+- **Archive Assessment Connection** retains isolated encrypted evidence, credentials, manifests and request IDs. New assessment pairing inherits none of the archived permissions or sources.
 
-Codex workspace/time matches identify candidates only. They do not establish ownership. Investigate an assessment-only launch context before automatic enrollment. The supported `CODEX_HOME` setting isolates Codex state, but also affects authentication/configuration: never copy existing credentials or personal transcripts. Any managed launch must explicitly account for sign-in, provider-produced plaintext session storage, child processes, safe paths and teardown. Existing native VS Code chats remain unverified unless a supported mechanism supplies reliable linkage. Do not auto-confirm global session-directory matches.
+## Limitations and verification
 
-The extension does not attest to trusted execution. Client digests and session linkage assertions are consistency evidence; Rails retains independent authorization, schema, integrity and privacy checks.
+Native/unverified Codex or Claude chats are intentionally not auto-approved. Managed Codex requires a CLI version that emits the supported JSONL metadata/records in its launch home. Activity before the post-enrollment byte boundary, including a partial line begun earlier, is omitted with safe feedback. Do not enter prompts before capture-ready confirmation. Claude content depends on supported hooks/visible transcript fields; private reasoning/subagents remain excluded.
 
-## Verification and rollout gates
+Codex itself can retain **plaintext provider transcripts** in the private launch directory. Those files are not JSONL diagnostics and are not copied into the tracker workspace. The tracker queue stays encrypted and diagnostics remain metadata-only. Provider-produced files have separate retention/trust implications; there is no automatic cleanup or secure-erasure claim.
 
-Use synthetic fixtures and relevant tests only: atomic start rollback, request conflicts, source isolation, overlapping sources, historical restriction, prospective grants, independent withdrawal, revoked-credential races, policy changes, restart, archival, queue approval integrity, partial acknowledgments and finalization reconciliation. No real AI calls are needed for automated tests.
+An initial baseline prepared before server consent registration can remain protocol 1. Older events and revoked/unverified scopes never gain disclosure permission. Network/permission refresh failures stop the combined capture safely; pending local evidence remains encrypted. Existing server deadlines still apply; no upload/finalization grace period was introduced.
 
-Do not enable the new UX until both sides advertise and verify this contract. Processor/tool preflight failure must be shown before the official timer starts. Existing recordings and submitted evidence are unchanged. No deadline grace-period redesign is included.
-
-Reference: official [Codex environment variables](https://learn.chatgpt.com/docs/config-file/environment-variables) and [authentication](https://learn.chatgpt.com/docs/auth).
+Automated verification uses synthetic evidence, authenticated mock transports, actual encrypted SQLite, isolated Rails PostgreSQL, existing local mock HTTPS tests and real local Claude-hook IPC. It does not make real Codex/Claude/Groq requests or establish live provider compatibility. For live testing, verify capture-ready notices, new `ai.prompt.submitted`/`ai.response.completed`/tool and `file.diff` counts, approved Rails associations, durable acknowledgments and a submitted receipt before requesting evaluation.

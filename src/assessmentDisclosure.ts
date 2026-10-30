@@ -22,7 +22,7 @@ export interface DisclosureReceipt {
 }
 /** Encrypted control state, never an event authorization. No bearer credentials or event content. */
 export interface DisclosureState {
-	version: 1; codingSessionId: string; origin: string; credentialDigest: string;
+	version: 1; codingSessionId: string; origin: string; credentialDigest: string; workflowConsentId?: string;
 	deadline: string; request: DisclosureRequest; locallyRevoked: boolean;
 	pendingAction?: 'grant' | 'revoke'; receipt?: DisclosureReceipt;
 }
@@ -67,8 +67,8 @@ export function validDisclosureReceipt(v: DisclosureReceipt, state: DisclosureSt
 		&& v.raw_disclosure_enabled === false && v.event_authorization === 'capture_approval_contract_required';
 }
 export function validDisclosureState(v: DisclosureState): boolean {
-	return object(v) && keys(v, ['version', 'codingSessionId', 'origin', 'credentialDigest', 'deadline', 'request', 'locallyRevoked', 'pendingAction', 'receipt'])
-		&& v.version === 1 && typeof v.codingSessionId === 'string' && /^[1-9][0-9]{0,19}$/.test(v.codingSessionId)
+	return object(v) && keys(v, ['version', 'codingSessionId', 'origin', 'credentialDigest', 'deadline', 'request', 'locallyRevoked', 'pendingAction', 'receipt', 'workflowConsentId'])
+		&& (v.workflowConsentId === undefined || uuid(v.workflowConsentId)) && v.version === 1 && typeof v.codingSessionId === 'string' && /^[1-9][0-9]{0,19}$/.test(v.codingSessionId)
 		&& validOrigin(v.origin) && typeof v.credentialDigest === 'string' && /^[a-f0-9]{64}$/.test(v.credentialDigest)
 		&& utcTime(v.deadline) && validDisclosureRequest(v.request) && typeof v.locallyRevoked === 'boolean'
 		&& (v.pendingAction === undefined || ['grant', 'revoke'].includes(v.pendingAction))

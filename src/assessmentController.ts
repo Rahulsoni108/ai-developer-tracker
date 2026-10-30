@@ -1,3 +1,4 @@
+import type { AssessmentWorkflowLifecycle } from './assessmentWorkflowConsent';
 import type { DisclosureContext } from './assessmentDisclosureConsent';
 import type { AssessmentStartDiagnostic, AssessmentStartStep } from './assessmentStartDiagnostics';
 import { assessmentArchiveKey, type AssessmentArchive, type AssessmentArchiveIndex } from './assessmentArchive';
@@ -52,14 +53,14 @@ export class AssessmentController {
 		private readonly confirmUpload: (hostname: string) => Promise<boolean>,
 		private readonly onChange: (view: AssessmentView) => void = () => {}, private readonly requestTimeoutMs = 10000,
 		private readonly evidenceConsents?: AssessmentConsentLifecycle, private readonly delivery?: AssessmentDeliveryLifecycle,
-		private readonly onStartDiagnostic: (value: AssessmentStartDiagnostic) => void = () => {}) {
+		private readonly onStartDiagnostic: (value: AssessmentStartDiagnostic) => void = () => {}, private readonly workflow?: AssessmentWorkflowLifecycle) {
 		this.lifecycle = recording.addLifecycleListener({
 			preparation: 'assessment_authorization',
 			prepare: async (id, current) => {
 				if (!this.starting) { return; }
 				const generation = this.generation; const metadata = this.metadata!;
 				this.startStep('upload_consent');
-				this.consent = await this.confirmUpload(new URL(metadata.connection.uploadEndpoint).hostname);
+				this.consent = this.workflow && this.api.mode === 'rails' ? true : await this.confirmUpload(new URL(metadata.connection.uploadEndpoint).hostname);
 				if (!this.consent) { throw new AssessmentApiError('consent_required'); }
 				await this.evidence.disableDevelopmentUploads();
 				if (!current() || this.disposed || generation !== this.generation) { throw new AssessmentApiError('cancelled'); }
@@ -67,13 +68,14 @@ export class AssessmentController {
 				this.startStep('binding_write');
 				metadata.localRecordingSessionIds.push(id); await this.save('starting');
 				this.startStep('rails_start');
-				const status = await this.call(signal => this.api.startOrResume(this.auth!, { requestId: id, localRecordingSessionId: id }, signal));
+				const status = await this.call(signal => this.workflow && this.api.mode === 'rails' ? this.workflow.start(this.auth!, id, signal)
+					: this.api.startOrResume(this.auth!, { requestId: id, localRecordingSessionId: id }, signal));
 				this.startStep('binding_validation'); this.accept(status);
 				if (status.state !== 'active' || !status.localRecordingSessionIds.includes(id)
 					|| Date.parse(status.deadline!) <= Date.parse(status.serverTime)) { throw new AssessmentApiError('session_ended'); }
 				// Persist binding/deadline BEFORE RecordingController activates any collector.
 				await this.save('starting');
-				if (this.evidenceConsents) { this.startStep('evidence_consent'); await this.call(signal => this.evidenceConsents!.approve(this.auth!, id, status, signal)); }
+				if (this.evidenceConsents && !(this.workflow && this.api.mode === 'rails')) { this.startStep('evidence_consent'); await this.call(signal => this.evidenceConsents!.approve(this.auth!, id, status, signal)); }
 				if (!current() || this.disposed || generation !== this.generation) { throw new AssessmentApiError('cancelled'); }
 			},
 			started: () => {}, cancelled: id => {
@@ -86,6 +88,7 @@ export class AssessmentController {
 	}
 	private auth?: AssessmentAuthentication;
 	get mode(): AssessmentApiClient['mode'] { return this.api.mode; }
+	get workflowStartPending(): boolean { return this.starting && !!this.workflow && this.api.mode === 'rails'; }
 	get view(): AssessmentView {
 		const status = this.metadata?.serverStatus;
 		const mode = this.metadata?.connection.mode ?? (this.api.mode === 'unavailable' ? undefined : this.api.mode);
@@ -115,7 +118,9 @@ export class AssessmentController {
 			await this.loadArchiveIndex();
 			this.metadata = await this.store.load(); this.initialized = true;
 			if (!this.metadata) { this.set('unpaired'); return; }
-			this.set('recovery'); await this.authenticate(); await this.refresh();
+			this.set('recovery'); await this.authenticate();
+			if (this.workflow) { await this.call(signal => this.workflow!.recover(this.auth!, this.metadata!.localRecordingSessionIds, signal)); }
+			await this.refresh();
 			// A process restart cannot leave an old capture window implicitly open. No recording/upload is resumed.
 			if (this.evidenceConsents && this.metadata.serverStatus.state !== 'submitted') {
 				for (const id of this.metadata.localRecordingSessionIds) { await this.closeStoppedConsent(id); }
@@ -159,10 +164,19 @@ export class AssessmentController {
 				this.set(this.phase, 'recording_busy'); return;
 			}
 			if (!['paired', 'active'].includes(this.metadata.serverStatus.state)) { throw new AssessmentApiError('session_ended'); }
+			if (this.workflow && this.metadata.localRecordingSessionIds.length) {
+				// Recover an uncertain previous start before creating another recording, including without a reload.
+				await this.call(signal => this.workflow!.recover(this.auth!, this.metadata!.localRecordingSessionIds, signal));
+				if (this.evidenceConsents) { for (const id of this.metadata.localRecordingSessionIds) { await this.closeStoppedConsent(id); } }
+			}
 			this.set('starting'); this.starting = true;
 			try {
-				// Existing dialog/workspace selection is unchanged. Rails gate runs in prepare after consent.
+				if (this.workflow && this.api.mode === 'rails') { this.startStep('workflow_preflight'); await this.call(signal => this.workflow!.prepare(this.auth!, signal)); }
+				// The production callback presents one explicit workflow notice; manual recording remains unchanged.
 				this.startStep('recording_consent'); await this.recording.start();
+				if (this.workflow && !this.recording.isRecording && this.metadata.serverStatus.state === 'paired' && !this.metadata.localRecordingSessionIds.length) {
+					this.consent = false; await this.save('paired'); this.set('paired', 'consent_required'); return;
+				}
 				if (!this.recording.isRecording || !this.isAssociatedSession(this.recording.sessionId!)) { throw new AssessmentApiError('consent_required'); }
 				this.startStep('recording_activation'); await this.save('active');
 				this.startStep('assessment_active', 'active'); this.set('active'); await this.enableDelivery();

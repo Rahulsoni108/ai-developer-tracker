@@ -1,9 +1,9 @@
 import { AssessmentApiError } from './assessmentApiClient';
 
 /** Bounded control JSON, including escaped duplicate member names, without diagnostics of input. */
-export function parseRailsControlResponse(body: string): unknown {
+export function parseRailsControlResponse(body: string, maxBytes = 32768): unknown {
 	try {
-		if (Buffer.byteLength(body) > 32768) { throw new Error(); }
+		if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 262144 || Buffer.byteLength(body) > maxBytes) { throw new Error(); }
 		const frames: { object: boolean; key: boolean; names: Set<string> }[] = [];
 		const tokens = /"(?:\\.|[^"\\])*"|[{}\[\]:,]|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null/g;
 		let end = 0;

@@ -3,7 +3,7 @@ import type { WorkspaceFolder } from 'vscode';
 import type { FileTracker } from './fileTracker';
 
 /** Fixed codes only. No IDs, tokens, folder names, paths, responses or evidence. */
-export type AssessmentStartStep = 'requested' | 'manual_recording_active' | 'recording_start_pending' | 'credential_check' | 'server_status' | 'recording_consent'
+export type AssessmentStartStep = 'workflow_preflight' | 'requested' | 'manual_recording_active' | 'recording_start_pending' | 'credential_check' | 'server_status' | 'recording_consent'
 	| 'recording_consent_declined' | 'request_cancelled' | 'maintenance_active' | 'storage_unavailable' | 'workspace_required'
 	| 'workspace_storage_overlap' | 'workspace_approval' | 'workspace_approved' | 'workspace_changed' | 'workspace_unavailable'
 	| 'workspace_not_approved' | 'local_storage' | 'diff_baseline' | 'assessment_authorization' | 'upload_consent'
@@ -11,6 +11,7 @@ export type AssessmentStartStep = 'requested' | 'manual_recording_active' | 'rec
 export interface AssessmentStartDiagnostic { step: AssessmentStartStep; status: 'running' | 'failed' | 'active'; reason?: AssessmentFailure }
 export function describeAssessmentStart(value: AssessmentStartDiagnostic): string {
 	const actions: Partial<Record<AssessmentStartStep, string>> = {
+		workflow_preflight: 'Workflow start requires the supported Rails consent capability, an approved processor policy and a supported installed AI CLI. Check the paired API version and Output diagnostics. No timer starts when preflight fails.',
 		manual_recording_active: 'A separate manual recording is active. Run Stop Recording (Without Submitting), wait for local writes to drain, then run Start Assessment again. Existing evidence is retained and will not be attached to the assessment.',
 		recording_start_pending: 'Another local recording is still being prepared. Finish or cancel its dialog, or run Stop Recording (Without Submitting), then retry Start Assessment. No existing recording will be adopted.',
 		recording_consent_declined: 'Run Start Assessment again and approve recording only if you agree.',

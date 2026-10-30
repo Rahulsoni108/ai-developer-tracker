@@ -212,6 +212,36 @@ suite('Protocol-2 atomic capture and authenticated recovery', function () {
 		assert.deepEqual(body.eventApprovals.map((p: { approvalProtocolVersion: number }) => p.approvalProtocolVersion), [1, 2]);
 		assert.deepEqual(body.events, events); assert.equal(JSON.stringify(body).includes('disclosureRequestId'), false); assert.equal(JSON.stringify(body).includes('credentialDigest'), false);
 	});
+	test('independent workflow scopes retain code and two AI sources without broadening legacy grants', async () => {
+		grant.workflowConsentId = randomUUID(); await confirm();
+		const sourceGrant = (source: 'codex' | 'claude', sourceId: string): DisclosureState => {
+			const next = structuredClone(grant); next.request.request_id = randomUUID();
+			next.request.categories = ['ai_interactions', 'tool_activity']; next.request.approved_source_sessions = [{ source, source_session_id: sourceId }];
+			next.receipt = { ...next.receipt!, consent_id: randomUUID(), categories: next.request.categories, approved_source_sessions: next.request.approved_source_sessions };
+			return next;
+		};
+		const codex = sourceGrant('codex', 'codex-approved'); const claude = sourceGrant('claude', 'claude-approved');
+		await confirm(codex); await confirm(claude);
+		const code = file(); await writer.write(code);
+		const prompt = createCodexEvent({ sessionId: id, workspaceId: A, sourceSessionId: 'codex-approved', eventType: 'ai.prompt.submitted', timestamp: new Date(GRANT), payload: { text: 'Synthetic planning', sourceRecord: sourceRecord('codex') } });
+		await writer.write(prompt);
+		assert.equal(await protocol(code), 2); assert.equal(await protocol(prompt), 2);
+		assert.equal((await saved(code)).disclosureRequestId, grant.request.request_id);
+		assert.equal((await saved(prompt)).disclosureRequestId, codex.request.request_id);
+		await queue.suspendDisclosureCapture(id, codex.request.request_id);
+		const codeAfter = file(); const promptAfter = { ...prompt, eventId: randomUUID() };
+		await writer.write(codeAfter); await writer.write(promptAfter);
+		assert.equal(await protocol(codeAfter), 2); assert.equal(await protocol(promptAfter), 1);
+	});
+	test('a legacy replacement cannot reactivate workflow scopes from old confirmations', async () => {
+		grant.workflowConsentId = randomUUID(); await confirm();
+		const replacement = structuredClone(grant); delete replacement.workflowConsentId;
+		replacement.request.request_id = randomUUID(); replacement.receipt!.consent_id = randomUUID();
+		await confirm(replacement); await confirm(grant);
+		const event = file(); await writer.write(event);
+		assert.equal(await protocol(event), 2);
+		assert.equal((await saved(event)).disclosureRequestId, replacement.request.request_id);
+	});
 	test('matches the exact Rails portable Unicode/canonical digest vector and rejects metadata substitution', async () => {
 		const vector = JSON.parse(await readFile(join(__dirname, '../../src/test/fixtures/rails-assessment-approval.v2.json'), 'utf8'));
 		assert.equal(canonicalSha256(vector.event), vector.approval.eventDigest); assert.ok(validAssessmentEventApproval(vector.approval, vector.event));

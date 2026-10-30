@@ -43,7 +43,8 @@ export class ClaudeCaptureUi {
 	constructor(private readonly recording: RecordingController, private readonly files: FileTracker,
 		private readonly createCapture: (nodeExecutable: string) => ClaudeCapture,
 		private readonly notice: (reason: 'unavailable' | 'revoked' | 'failed') => void,
-		private readonly prompts: ClaudeCapturePrompts = defaultPrompts) {}
+		private readonly prompts: ClaudeCapturePrompts = defaultPrompts,
+		private readonly assessmentConsent?: (recordingId: string) => boolean | undefined) {}
 	private capture?: ClaudeCapture;
 	async start(): Promise<void> {
 		if (this.disposed || this.starting || !this.recording.isRecording) { return; }
@@ -51,7 +52,8 @@ export class ClaudeCaptureUi {
 		try {
 			const folder = await this.prompts.pick(this.files.getApprovedFolders()); if (!folder) { return; }
 			const nodeExecutable = await this.prompts.available(); if (!nodeExecutable) { this.notice('unavailable'); return; }
-			const accepted = await this.prompts.consent();
+			const scoped = this.assessmentConsent?.(session!);
+			const accepted = scoped === undefined ? await this.prompts.consent() : scoped;
 			if (!accepted || this.disposed || generation !== this.generation || this.recording.sessionId !== session || !this.recording.isRecording) { return; }
 
 			if (!this.capture) { this.capture = this.createCapture(nodeExecutable); }

@@ -1,3 +1,8 @@
+import { AssessmentWorkflowConsent, type AssessmentWorkflowLifecycle } from './assessmentWorkflowConsent';
+import { RailsWorkflowConsentClient } from './railsWorkflowConsentClient';
+import { ManagedCodexCapture } from './managedCodexCapture';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { RailsProcessorPolicyClient } from './processorPolicy';
 import { startRecordingCommand, stopRecordingCommand, type RecordingStartChoice } from './recordingCommands';
 import { DisclosureCaptureMonitor } from './disclosureCaptureMonitor';
@@ -45,6 +50,8 @@ import { AssessmentApiError, MockAssessmentApiClient, UnavailableAssessmentApiCl
 import { AssessmentConnectionStore } from './assessmentStorage';
 import { formatAssessmentStatus, registerAssessmentCommands } from './assessmentCommands';
 
+let activeWorkflow: AssessmentWorkflowConsent | undefined;
+let activeManagedCodex: ManagedCodexCapture | undefined;
 let activeAssessment: AssessmentController | undefined;
 let activeRailsApi: RailsAssessmentApiClient | undefined;
 let activeClaudeParser: ClaudeEventParser | undefined;
@@ -118,7 +125,7 @@ export async function activate(context: vscode.ExtensionContext) {
 			return false;
 		}
 		traceRecordingStart('recording_consent');
-		const consent = await vscode.window.showInformationMessage(
+		const consent = activeAssessment?.workflowStartPending ? (await activeWorkflow?.confirmRecording(isCurrentRequest) ? 'Start Recording' : undefined) : await vscode.window.showInformationMessage(
 			'Start recording file activity in all workspace folders?',
 			{ modal: true, detail: `Folders: ${folders.map(folder => folder.name).join(', ')}\n\nFile activity metadata, initial code baselines, and incremental source-code diffs are saved locally in encrypted SQLite after privacy filtering. Captured code is sensitive. JSONL diagnostics contain safe metadata only. Sensitive/generated paths and configured size limits are excluded. Recording consent does not authorize uploads. Transmitting sanitized evidence requires separate endpoint-scoped upload consent.\n\nWhen enabled, local Codex session metadata is discovered only during recording. Associations require separate confirmation. Conversation and tool content is captured only after a separate explicit consent dialog.` },
 			'Start Recording'
@@ -134,6 +141,7 @@ export async function activate(context: vscode.ExtensionContext) {
 		}
 	}, () => new Date(), traceRecordingStart);
 	activeRecording = recording;
+	const assessmentRecordingNotice = () => { if (activeAssessment?.isAssociatedSession(recording.sessionId ?? '')) { void vscode.window.showInformationMessage('Use Launch Assessment AI Session for tracker-managed Codex/Claude capture. Native or unverified chats are excluded from automatic assessment capture.'); return true; } return false; };
 	let privacyDiscovery: CodexSessionDiscovery | undefined;
 	let privacyParser: CodexEventParser | undefined;
 	const reportPersistence = (reason: PersistenceDiagnostic, code?: QueueFailureCode) => {
@@ -182,15 +190,21 @@ export async function activate(context: vscode.ExtensionContext) {
 		enqueue: async () => { throw new EventPersistenceError(); }, close: async () => {}
 	}, new JsonlWriter(() => vscode.Uri.joinPath(diagnosticsDirectory, DIAGNOSTIC_LOG_PREFIX + new Date().toISOString().slice(0, 10) + '.jsonl').fsPath), reportPersistence);
 	activePersistence = writer;
+	const interactionCounts = new Map<string, number>();
+	context.subscriptions.push(writer.onDidWrite(event => {
+		if (event.eventType !== 'ai.prompt.submitted' && event.eventType !== 'ai.response.completed') { return; }
+		interactionCounts.set(event.sessionId, (interactionCounts.get(event.sessionId) ?? 0) + 1);
+		if (interactionCounts.size > 32) { interactionCounts.delete(interactionCounts.keys().next().value!); }
+	}));
 	context.subscriptions.push(writer.attachRecording(recording, sessionId => {
 		const folders = tracker.getApprovedFolders().map(folder => ({ uri: folder.uri,
 			workspaceId: createHash('sha256').update(folder.uri.toString()).digest('hex') }));
 		return {
 			approvedWorkspaceIds: folders.map(folder => folder.workspaceId),
-			confirmedCodexSessions: (privacyDiscovery?.getRegistry() ?? []).filter(entry => entry.recordingSessionId === sessionId
+			confirmedCodexSessions: [...(activeManagedCodex?.getApprovals(sessionId) ?? []), ...(privacyDiscovery?.getRegistry() ?? []).filter(entry => entry.recordingSessionId === sessionId
 				&& entry.status === 'confirmed' && entry.reason === 'user_confirmed' && entry.sourceSessionId && entry.workspaceId)
-				.map(entry => ({ sourceSessionId: entry.sourceSessionId!, workspaceId: entry.workspaceId! })),
-			codexContentConsent: privacyParser?.hasAdmittedContentConsent(sessionId) ?? false,
+				.map(entry => ({ sourceSessionId: entry.sourceSessionId!, workspaceId: entry.workspaceId! }))],
+			codexContentConsent: (activeManagedCodex?.getApprovals(sessionId).length ?? 0) > 0 || (privacyParser?.hasAdmittedContentConsent(sessionId) ?? false),
 			confirmedClaudeSessions: activeClaudeParser?.getApprovals(sessionId) ?? [],
 			claudeContentConsent: (activeClaudeParser?.getApprovals(sessionId).length ?? 0) > 0,
 			resolveToolPath: (path, workspaceId) => {
@@ -263,7 +277,7 @@ export async function activate(context: vscode.ExtensionContext) {
 				return vscode.Disposable.from(watcher, watcher.onDidCreate(uri => created(uri.fsPath)), watcher.onDidChange(uri => changed(uri.fsPath)));
 			},
 			onDiagnostic: diagnostic => output.appendLine(diagnostics[diagnostic]),
-			onCandidatesChanged: candidates => ui?.notify(candidates)
+			onCandidatesChanged: candidates => { if (!activeAssessment?.isAssociatedSession(recording.sessionId ?? '')) { ui?.notify(candidates); } }
 		});
 		const parser = new CodexEventParser(recording, discovery, writer, {
 			isExcludedPath,
@@ -302,7 +316,7 @@ export async function activate(context: vscode.ExtensionContext) {
 				reason: diagnostic.reason, recordIndex: diagnostic.recordIndex }))
 		});
 		activeCodexReader = reader;
-		context.subscriptions.push(discovery, parser, reader, ui, vscode.commands.registerCommand(REVIEW_CODEX_SESSIONS_COMMAND, () => ui.review()));
+		context.subscriptions.push(discovery, parser, reader, ui, vscode.commands.registerCommand(REVIEW_CODEX_SESSIONS_COMMAND, () => assessmentRecordingNotice() ? undefined : ui.review()));
 	} else {
 		context.subscriptions.push(vscode.commands.registerCommand(REVIEW_CODEX_SESSIONS_COMMAND, () =>
 			vscode.window.showInformationMessage('Codex session discovery is disabled in AI Developer Tracker settings.')));
@@ -312,13 +326,19 @@ export async function activate(context: vscode.ExtensionContext) {
 	activeClaudeParser = claudeParser;
 	const claudeUi = new ClaudeCaptureUi(recording, tracker, nodeExecutable => new ClaudeCapture(recording, claudeParser, {
 		storageDirectory: join(queueStorageUri.fsPath, 'claude-runtime'), nodeExecutable, bridgePath: join(__dirname, 'claudeHookBridge.js'),
-		assertOutsideWorkspaces: async path => { await LocalEventQueue.assertStorageOutsideWorkspaces(vscode.Uri.file(path), vscode.workspace.workspaceFolders ?? []); }
+		assertOutsideWorkspaces: async path => { await LocalEventQueue.assertStorageOutsideWorkspaces(vscode.Uri.file(path), vscode.workspace.workspaceFolders ?? []); },
+		authorizeSource: async (id, workspaceId, sourceSessionId) => {
+			if (activeAssessment?.isAssociatedSession(id)) {
+				if (!activeWorkflow?.permits(id, 'claude')) { throw new AssessmentApiError('consent_required'); }
+				await activeWorkflow.enroll('claude', sourceSessionId, workspaceId);
+			}
+		}
 	}), reason => {
 		const messages = { unavailable: 'Claude Code capture requires an available Claude Code CLI and Node.js on PATH. No sessions were imported.',
 			revoked: 'Claude Code capture revoked. Local evidence is preserved; capture requires fresh approval.',
 			failed: 'Claude Code capture could not start safely. Check installation and local workspace/storage availability.' };
 		output.appendLine(messages[reason]); void vscode.window.showWarningMessage(messages[reason]);
-	});
+	}, undefined, id => activeAssessment?.isAssociatedSession(id) ? activeWorkflow?.permits(id, 'claude') ?? false : undefined);
 	activeClaudeUi = claudeUi;
 	context.subscriptions.push({ dispose: () => { void claudeUi.dispose(); claudeParser.dispose(); } },
 		vscode.commands.registerCommand(START_CLAUDE_CAPTURE_COMMAND, async () => {
@@ -348,7 +368,7 @@ export async function activate(context: vscode.ExtensionContext) {
 					await LocalEventQueue.assertStorageOutsideWorkspaces(vscode.Uri.file(path), vscode.workspace.workspaceFolders ?? []);
 				}
 			},
-			drain: async () => { await diffs.flush(); await tracker.flush(); await activeCodexReader?.flush(); await activeCodexParser?.flush(); await activeClaudeParser?.flush(); await correlator.flush(); await writer.flush(); },
+			drain: async () => { await diffs.flush(); await tracker.flush(); await activeManagedCodex?.flush(); await activeCodexReader?.flush(); await activeCodexParser?.flush(); await activeClaudeParser?.flush(); await correlator.flush(); await writer.flush(); },
 			cleared: async () => {
 				await diffs.clearStoppedEvidence(); await correlator.clearStoppedEvidence(); activeDiscovery?.clearStoppedRegistry(); writer.resetAfterCleanup();
 				const health = await queue!.getHealth(); renderHealth(health);
@@ -463,9 +483,11 @@ export async function activate(context: vscode.ExtensionContext) {
 	}
 
 	const flushStoppedRecording = async (stoppedSession: string | undefined): Promise<void> => {
-		await diffs.flush(); await tracker.flush(); await activeCodexReader?.flush(); await activeCodexParser?.flush();
+		await diffs.flush(); await tracker.flush(); await activeManagedCodex?.flush(); await activeCodexReader?.flush(); await activeCodexParser?.flush();
 		await activeClaudeParser?.flush(); await activeDiscovery?.flush(); await activeClaudeParser?.finishRecording();
 		await correlator.finishSession(stoppedSession); await writer.flush(); await writer.completeSession(stoppedSession);
+		if (stoppedSession) { await queue?.suspendDisclosureCapture(stoppedSession, undefined, true); }
+		await activeWorkflow?.flush();
 	};
 	const mockAssessments = vscode.workspace.getConfiguration('ai-developer-tracker.assessment.mock').inspect<boolean>('enabled')?.globalValue === true;
 	const assessmentOrigin = vscode.workspace.getConfiguration('ai-developer-tracker.assessment').inspect<string>('apiOrigin')?.globalValue ?? '';
@@ -492,6 +514,11 @@ export async function activate(context: vscode.ExtensionContext) {
 			output.appendLine('Assessment delivery status: ' + status);
 			if (status === 'authentication') { void activeAssessment?.showStatus(); }
 		}) : undefined;
+	const workflowLifecycle: AssessmentWorkflowLifecycle | undefined = queue && assessmentApi instanceof RailsAssessmentApiClient ? {
+		prepare: (auth, signal) => activeWorkflow!.prepare(auth, signal),
+		start: (auth, id, signal) => activeWorkflow!.start(auth, id, signal),
+		recover: (auth, ids, signal) => activeWorkflow!.recover(auth, ids, signal)
+	} : undefined;
 	const assessment = new AssessmentController(assessmentApi, assessmentStore, recording, {
 		flushStopped: async id => {
 			await flushStoppedRecording(id);
@@ -503,9 +530,8 @@ export async function activate(context: vscode.ExtensionContext) {
 	}, async hostname => (await vscode.window.showWarningMessage(`Allow assessment uploads to ${hostname}?`, { modal: true,
 		detail: `Separate upload consent: sanitized code, diffs, AI conversations and tool activity may be transmitted for this paired assessment. Recording consent alone does not allow uploads.\n\nSelected workspace identifiers: ${tracker.getApprovedFolders().map(folder => createHash('sha256').update(folder.uri.toString()).digest('hex')).join(', ')}\nEvent categories: ${PRIVACY_EVENT_TYPES.join(', ')}\nScope: assessment_evidence (assessment-evidence.v1), limited to this assessment/recording and destination. Expires at the earliest server assessment deadline, credential expiry or revocation. Disable Uploads revokes consent; Stop & Submit closes the capture window after local writes drain.\n\n${mockAssessments ? 'Local mock only: no evidence is transmitted.' : 'The pinned R4.2D Rails contract sends only encrypted-queue events with verifiable capture-time approvals and matching scoped receipts. A receipt alone never authorizes an event. Stop & Submit freezes evidence, closes capture windows, uploads approved events and requests Rails finalization. Success requires a verified durable submission receipt before the original deadline.'} Reload requires fresh upload consent; Codex/Claude content still requires separate source approval.` }, 'Allow Assessment Uploads')) === 'Allow Assessment Uploads',
 	view => { assessmentStatus.text = `Assessment: ${view.archiving ? 'archiving' : view.state === 'unpaired' && view.archivedCount ? 'ready to pair' : view.state.replace(/_/g, ' ')}${view.mode === 'mock' ? ' (mock)' : ''}`;
-		assessmentStatus.tooltip = formatAssessmentStatus(view); if (view.state === 'unpaired' && !view.archivedCount) { assessmentStatus.hide(); } else { assessmentStatus.show(); } }, 10000, assessmentConsents, assessmentDelivery, value => output.appendLine(describeAssessmentStart(value)));
+		assessmentStatus.tooltip = formatAssessmentStatus(view); if (view.state === 'unpaired' && !view.archivedCount) { assessmentStatus.hide(); } else { assessmentStatus.show(); } }, 10000, assessmentConsents, assessmentDelivery, value => output.appendLine(describeAssessmentStart(value)), workflowLifecycle);
 	activeAssessment = assessment;
-	await assessment.initialize();
 	const disclosureClient = queue && assessmentApi instanceof RailsAssessmentApiClient ? new RailsDisclosureConsentClient() : undefined;
 	if (disclosureClient) { context.subscriptions.push(disclosureClient); }
 	const approvedAssessmentSources = (id: string) => [
@@ -521,8 +547,70 @@ export async function activate(context: vscode.ExtensionContext) {
 	const processorPolicyClient = processingClient ? new RailsProcessorPolicyClient() : undefined;
 	if (processorPolicyClient) { context.subscriptions.push(processorPolicyClient); }
 	const processingConsent = queue && processingClient ? new AssessmentProcessingConsent(context.secrets, queue, processingClient, approvedAssessmentSources, scope => processorPolicyClient!.get(scope.auth, AbortSignal.timeout(10000))) : undefined;
-	if (disclosureConsent && queue) { context.subscriptions.push(new DisclosureCaptureMonitor(recording, assessment, disclosureConsent, queue)); }
-	context.subscriptions.push(assessmentStatus, ...registerAssessmentCommands(assessment, mockAssessments),
+	if (queue && assessmentApi instanceof RailsAssessmentApiClient && processingConsent) {
+		const messages = { ready: 'Assessment permissions ready. Use Launch Assessment AI Session for tracked Codex/Claude work; unrelated native chats are excluded.',
+			source_ready: 'Assessment AI session capture ready.', source_blocked: 'Assessment AI session authorization failed. No unapproved session content was imported.',
+			unavailable: 'Assessment permission refresh failed or consent changed. Capture stopped safely; evidence is preserved. Check Assessment Status before resuming.',
+			withdrawn: 'Assessment workflow consent withdrawn. Existing evidence is retained; withdrawal is not submission or deletion.' };
+		activeWorkflow = new AssessmentWorkflowConsent(recording, queue, context.secrets, new RailsWorkflowConsentClient(),
+			() => (vscode.workspace.workspaceFolders ?? []).map(folder => createHash('sha256').update(folder.uri.toString()).digest('hex')),
+			async detail => await vscode.window.showWarningMessage('Agree to this assessment recording, upload, disclosure and AI-processing scope?', { modal: true,
+				detail: 'Workspace folders: ' + (vscode.workspace.workspaceFolders ?? []).map(folder => folder.name).join(', ') + '\n\n' + detail }, 'Agree & Start Assessment') === 'Agree & Start Assessment',
+			async (auth, state) => processingConsent.acceptWorkflowReceipt({ auth, localSessionIds: [state.request.local_recording_session_id],
+				currentRecording: state.request.local_recording_session_id,
+				current: () => assessment.isAssociatedSession(state.request.local_recording_session_id) && !assessment.view.archiving }, state),
+			code => { output.appendLine(messages[code]); if (code !== 'source_ready') { void vscode.window.showInformationMessage(messages[code]); } },
+			async () => {
+				const available: ('codex' | 'claude')[] = [];
+				const results = await Promise.allSettled([
+					promisify(execFile)('codex', ['--help'], { timeout: 5000, maxBuffer: 65536 }),
+					promisify(execFile)('claude', ['--help'], { timeout: 5000, maxBuffer: 65536 })
+				]);
+				if (results[0].status === 'fulfilled' && results[0].value.stdout.includes('--no-daemon') && results[0].value.stdout.includes('--cd')) { available.push('codex'); }
+				if (results[1].status === 'fulfilled' && results[1].value.stdout.includes('--plugin-dir') && results[1].value.stdout.includes('--session-id')) { available.push('claude'); }
+				return available;
+			});
+		activeManagedCodex = new ManagedCodexCapture(recording, writer, activeWorkflow, join(queueStorageUri.fsPath, 'provider-runtime', 'codex'),
+			async path => LocalEventQueue.assertStorageOutsideWorkspaces(vscode.Uri.file(path), vscode.workspace.workspaceFolders ?? []),
+			reason => { const message = { waiting: 'Codex launch prepared. Sign in if requested, then wait for capture-ready confirmation before entering assessment prompts. Native Codex chats are not included.',
+				ready: 'Assessment Codex capture ready.', unavailable: 'Assessment Codex session could not be verified or enrolled. No unrelated conversations were imported.',
+				pre_enrollment_omitted: 'Codex activity before source enrollment was omitted. Wait for capture-ready confirmation before entering assessment prompts.' }[reason];
+				output.appendLine(message); void vscode.window.showInformationMessage(message); });
+		context.subscriptions.push(activeWorkflow, { dispose: () => { void activeManagedCodex?.dispose(); } },
+			vscode.commands.registerCommand('ai-developer-tracker.launchAssessmentAiSession', async () => {
+				try {
+					const id = recording.sessionId;
+					if (!id || !assessment.isAssociatedSession(id) || !recording.isRecording) { throw new AssessmentApiError('consent_required'); }
+					const provider = await vscode.window.showQuickPick(['Codex', 'Claude Code'], { title: 'Launch a tracked assessment AI session' });
+					if (!provider) { return; }
+					if (provider === 'Claude Code') { await claudeUi.start(); return; }
+					const folders = tracker.getApprovedFolders(); const folder = folders.length === 1 ? folders[0] : (await vscode.window.showQuickPick(folders.map(folder => ({ label: folder.name, folder })), { title: 'Assessment workspace' }))?.folder;
+					if (!folder || !activeWorkflow!.permits(id, 'codex')) { throw new AssessmentApiError('consent_required'); }
+					const help = (await promisify(execFile)('codex', ['--help'], { timeout: 5000, maxBuffer: 65536 })).stdout;
+					if (!help.includes('--no-daemon') || !help.includes('--cd')) { throw new AssessmentApiError('unavailable'); }
+					const launch = await activeManagedCodex!.create(folder.uri.fsPath, createHash('sha256').update(folder.uri.toString()).digest('hex'));
+					const terminal = vscode.window.createTerminal({ name: 'Codex assessment session', cwd: vscode.Uri.file(launch.root), shellPath: 'codex',
+						shellArgs: ['--no-daemon', '--cd', launch.root, '-c', 'cli_auth_credentials_store="keyring"'],
+						env: { CODEX_HOME: launch.home, OPENAI_API_KEY: null, CODEX_API_KEY: null } }); terminal.show();
+				} catch { void vscode.window.showWarningMessage('Assessment AI launch unavailable. Check active workflow consent, installed CLI support and approved workspace. No unrelated sessions were imported.'); }
+			}),
+			vscode.commands.registerCommand('ai-developer-tracker.revokeAssessmentWorkflowConsent', async () => {
+				if (await vscode.window.showWarningMessage('Withdraw assessment recording and evidence permissions?', { modal: true,
+					detail: 'Stops capture and delivery, preserves encrypted evidence, and requests server revocation. This does not delete already processed data or submit the assessment. Network failure leaves remote revocation unconfirmed.' }, 'Withdraw Assessment Permissions') !== 'Withdraw Assessment Permissions') { return; }
+				try { await assessment.withDisclosureContext(false, async scope => {
+					const id = scope.currentRecording ?? scope.localSessionIds.at(-1); if (!id) { throw new AssessmentApiError('consent_required'); }
+					await assessment.revokeUploadConsent(); await activeWorkflow!.revoke(scope.auth, id);
+				}); } catch { void vscode.window.showWarningMessage('Permissions are not confirmed revoked on Rails. Local capture/delivery remain blocked; evidence is retained. Retry the relevant revoke command after restoring connectivity.'); }
+			}));
+	}
+	await assessment.initialize();
+	if (disclosureConsent && queue) { context.subscriptions.push(new DisclosureCaptureMonitor(recording, assessment, disclosureConsent, queue, undefined, 5000, id => !!workflowLifecycle && assessment.isAssociatedSession(id))); }
+	context.subscriptions.push(assessmentStatus, ...registerAssessmentCommands(assessment, mockAssessments, async () => {
+		const id = recording.sessionId;
+		if (recording.isRecording && id && assessment.isAssociatedSession(id) && !interactionCounts.get(id)) {
+			void vscode.window.showWarningMessage('No AI prompt/response events were captured in this recording. Submission will continue with the evidence actually retained. Native/unverified chats are excluded; use Launch Assessment AI Session and wait for capture-ready confirmation. Use Show Recorded Event Summary to inspect counts.');
+		}
+	}),
 		...registerDisclosureCommands(assessment, disclosureConsent),
 		...registerProcessingCommands(assessment, processingConsent),
 		vscode.workspace.onDidChangeConfiguration(event => {
@@ -591,7 +679,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
 // VS Code disposes the commands and controller in context.subscriptions.
 export async function deactivate(): Promise<void> {
-	await activeAssessment?.dispose(); activeRailsApi?.dispose(); activeRailsApi = undefined;
+	await activeAssessment?.dispose(); activeWorkflow?.dispose(); activeWorkflow = undefined;
+	await activeManagedCodex?.flush(); await activeManagedCodex?.dispose(); activeManagedCodex = undefined; activeRailsApi?.dispose(); activeRailsApi = undefined;
 	await activeClaudeUi?.dispose(); activeClaudeUi = undefined;
 	await activeUploads?.dispose(); activeUploads = undefined;
 	const stoppedSession = activeRecording?.sessionId;
