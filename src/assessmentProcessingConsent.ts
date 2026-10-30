@@ -1,3 +1,4 @@
+import { validAssessmentProcessorPolicy, isAssessmentProcessorPolicy, processorScope, type TrustedProcessor } from './processorPolicy';
 import { createHash, randomUUID } from 'node:crypto';
 import type { SecretStorage } from 'vscode';
 import { AssessmentApiError } from './assessmentApiClient';
@@ -13,9 +14,9 @@ import type { ProcessingApi } from './railsProcessingConsentClient';
 
 type Secrets = Pick<SecretStorage, 'get' | 'store'>;
 type Sources = { workspaceId: string; session: DisclosureSource }[];
-/** A future authenticated policy-discovery/provisioning adapter must supply this. Never settings or receipt-derived. */
-export type TrustedProcessorPolicy = (context: DisclosureContext) => Promise<ProcessorScope | undefined>;
-export const PROCESSOR_UNAVAILABLE = 'AI processing consent is unavailable: Rails has not supplied a trusted processor policy (provider, model, HTTPS origin and configuration digest). No processing grant was sent. Recording, upload and recruiter disclosure choices are unchanged.';
+/** Authenticated Rails policy discovery supplies this; synthetic legacy scopes are test-only. Never settings or receipt-derived. */
+export type TrustedProcessorPolicy = (context: DisclosureContext) => Promise<TrustedProcessor | undefined>;
+export const PROCESSOR_UNAVAILABLE = 'AI processing consent is unavailable: Rails has not supplied an available, approved processor policy (provider, model, HTTPS origin and configuration digest). No processing grant was sent. Recording, upload and recruiter disclosure choices are unchanged.';
 
 /** Optional control ledger. No collector/uploader consumes this as evidence approval. */
 export class AssessmentProcessingConsent {
@@ -23,11 +24,11 @@ export class AssessmentProcessingConsent {
 	private readonly withdrawn = new Set<string>();
 	constructor(private readonly secrets: Secrets, private readonly queue: Pick<LocalEventQueue, 'getEvidenceConsent'>,
 		private readonly api: ProcessingApi, private readonly approvedSources: (id: string) => Sources,
-		// R5.0C supplies no discovery contract. Production deliberately has no policy source.
+		// No policy is trusted by default. Production explicitly injects the pinned Rails client.
 		private readonly trustedPolicy: TrustedProcessorPolicy = async () => undefined) {}
-	async processor(context: DisclosureContext): Promise<ProcessorScope | undefined> {
+	async processor(context: DisclosureContext): Promise<TrustedProcessor | undefined> {
 		this.current(context); const scope = await this.trustedPolicy(context); this.current(context);
-		if (scope !== undefined && !validProcessorScope(scope)) { throw new AssessmentApiError('protocol'); }
+		if (scope !== undefined && !(isAssessmentProcessorPolicy(scope) ? validAssessmentProcessorPolicy(scope) && scope.coding_session_id === context.auth.connection.codingSessionId : validProcessorScope(scope))) { throw new AssessmentApiError('protocol'); }
 		return scope === undefined ? undefined : structuredClone(scope);
 	}
 	async choices(context: DisclosureContext) {
@@ -35,18 +36,19 @@ export class AssessmentProcessingConsent {
 		return { workspaceIds: [...upload.request.approved_workspace_ids], sources: this.approvedSources(context.currentRecording!)
 			.filter(s => upload.request.approved_workspace_ids.includes(s.workspaceId)) };
 	}
-	grant(context: DisclosureContext, selection: ProcessingSelection, processor: ProcessorScope, signal: AbortSignal): Promise<ProcessingState> {
+	grant(context: DisclosureContext, selection: ProcessingSelection, processor: TrustedProcessor, signal: AbortSignal): Promise<ProcessingState> {
 		return this.serial(async () => {
 			const verified = await this.processor(context);
-			if (!verified || !sameProcessingValue(verified, processor)) { throw new AssessmentApiError('unavailable'); }
+			if (!verified || !sameProcessingValue(isAssessmentProcessorPolicy(verified) ? verified.policy_digest : verified, isAssessmentProcessorPolicy(processor) ? processor.policy_digest : processor)) { throw new AssessmentApiError('unavailable'); }
 			const upload = await this.upload(context); this.current(context, signal);
 			const sources = this.approvedSources(context.currentRecording!).filter(s => selection.workspaceIds.includes(s.workspaceId)).map(s => disclosureSourceKey(s.session));
 			if (selection.workspaceIds.some(w => !upload.request.approved_workspace_ids.includes(w))
 				|| selection.sourceSessions.some(s => !sources.includes(disclosureSourceKey(s)))
 				|| selection.categories.some(c => !upload.request.event_types.some(eventType => disclosureCategoryForEvent({ eventType } as TrackerEvent) === c))) { throw new AssessmentApiError('consent_required'); }
 			const request: ProcessingRequest = { request_id: randomUUID(), local_recording_session_id: context.currentRecording!, upload_consent_id: upload.receipt!.consent_id,
-				approval_action: 'approve_assessment_ai_processing', consent_version: PROCESSING_VERSION, purpose: PROCESSING_PURPOSE,
-				retention_policy_version: PROCESSING_RETENTION, external_processing_permitted: true, processor_scope: verified,
+				approval_action: 'approve_assessment_ai_processing', consent_version: isAssessmentProcessorPolicy(verified) ? verified.consent_version : PROCESSING_VERSION, purpose: PROCESSING_PURPOSE,
+				retention_policy_version: isAssessmentProcessorPolicy(verified) ? verified.retention_policy_version : PROCESSING_RETENTION, external_processing_permitted: true, processor_scope: processorScope(verified),
+				...(isAssessmentProcessorPolicy(verified) ? { processing_policy_digest: verified.policy_digest } : {}),
 				categories: [...selection.categories].sort(), approved_workspace_ids: [...selection.workspaceIds].sort(),
 				approved_source_sessions: [...selection.sourceSessions].sort((a, b) => disclosureSourceKey(a).localeCompare(disclosureSourceKey(b))) };
 			const states = await this.load(context);
@@ -55,7 +57,7 @@ export class AssessmentProcessingConsent {
 			const sameRequest = (r: ProcessingRequest) => ({ ...r, request_id: '' });
 			if (last?.pendingAction === 'grant' && !sameProcessingValue(sameRequest(last.request), sameRequest(request))) { throw new AssessmentApiError('recovery_required'); }
 			let state: ProcessingState = last?.pendingAction === 'grant' ? last : { version: 1, codingSessionId: upload.codingSessionId,
-				origin: upload.origin, credentialDigest: upload.credentialDigest!, deadline: upload.deadline, request, locallyRevoked: false, pendingAction: 'grant' };
+				origin: upload.origin, credentialDigest: upload.credentialDigest!, deadline: upload.deadline, request, ...(isAssessmentProcessorPolicy(verified) ? { policy: verified } : {}), locallyRevoked: false, pendingAction: 'grant' };
 			if (!validProcessingState(state) || state.locallyRevoked || this.withdrawn.has(state.request.request_id)) { throw new AssessmentApiError('consent_required'); }
 			await this.save(context, state); this.current(context, signal);
 			const receipt = await this.api.send(context.auth, state, 'grant', signal);

@@ -1,3 +1,5 @@
+import { canonicalSha256 } from '../canonicalJson';
+import { PROCESSING_DISPATCH_LIMITATIONS, RailsProcessorPolicyClient, validAssessmentProcessorPolicy, type AssessmentProcessorPolicy } from '../processorPolicy';
 import * as assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -27,11 +29,12 @@ const signal = () => AbortSignal.timeout(5000);
 const selection = () => ({ categories: ['code_changes' as const], workspaceIds: [workspaceId], sourceSessions: [] });
 function receipt(request: ProcessingRequest): ProcessingReceipt {
 	return { consent_id: randomUUID(), local_recording_session_id: request.local_recording_session_id, upload_consent_id: request.upload_consent_id,
-		consent_version: PROCESSING_VERSION, purpose: PROCESSING_PURPOSE, retention_policy_version: PROCESSING_RETENTION,
+		consent_version: request.consent_version, purpose: PROCESSING_PURPOSE, retention_policy_version: request.retention_policy_version,
+		...(request.processing_policy_digest ? { processing_policy_digest: request.processing_policy_digest } : {}),
 		external_processing_permitted: request.external_processing_permitted, processor_scope: request.processor_scope,
 		categories: request.categories, approved_workspace_ids: request.approved_workspace_ids, approved_source_sessions: request.approved_source_sessions,
 		consented_at: now, capture_until: deadline, expires_at: '2030-01-02T10:00:01.000Z', revoked_at: null,
-		external_processing_enabled: false, limitations: PROCESSING_LIMITATIONS, state: request.external_processing_permitted ? 'preparation_only' : 'declined' };
+		external_processing_enabled: false, limitations: request.processing_policy_digest ? PROCESSING_DISPATCH_LIMITATIONS : PROCESSING_LIMITATIONS, state: request.external_processing_permitted ? 'preparation_only' : 'declined' };
 }
 
 suite('Assessment AI processing consent', () => {
@@ -257,6 +260,58 @@ suite('Assessment AI processing consent', () => {
 			assert.equal(await queue.getUploadPrivacyContext(event), undefined);
 		} finally { await queue.close(); await rm(root, { recursive: true, force: true }); }
 	});
+
+	test('authenticated policy discovery grants version-2 consent and preserves immutable policy after restart', async () => {
+		const policy = syntheticPolicy(); const policyCalls: UploadHttpRequest[] = [];
+		const discovery = new RailsProcessorPolicyClient({ send: async input => { policyCalls.push(input); return { status: 200, contentType: 'application/json', body: JSON.stringify({ data: policy }) }; } });
+		manager = coordinator(c => discovery.get(c.auth, signal()));
+		const choice = ui([['code_changes'], [workspaceId]]); await performProcessingAction('grant', context, manager, choice.result, signal());
+		assert.equal(policyCalls.length, 2); // Fetch for display and fresh pre-grant verification.
+		assert.ok(policyCalls.every(c => c.method === 'GET' && c.body === '' && c.endpoint.origin === auth.connection.apiOrigin && c.token === auth.credential));
+		assert.ok(policyCalls.every(c => c.endpoint.pathname === '/api/v2/coding_session/extension/processor_policy'));
+		let state = (await manager.list(context))[0]; assert.equal(state.request.consent_version, 'assessment-ai-processing.v2');
+		assert.equal(state.request.processing_policy_digest, policy.policy_digest); assert.equal(state.policy!.processor.name, 'Synthetic Processor');
+		manager = coordinator(); state = (await manager.list(context))[0];
+		assert.equal((await manager.inspect(context, state, signal())).receipt!.processing_policy_digest, policy.policy_digest);
+		assert.equal((await manager.revoke(context, state, signal())).receipt!.state, 'revoked');
+	});
+	test('new disclosure notice displays exact processor, categories and prospective withdrawal/report terms without preselection', async () => {
+		const notices: string[] = []; const choice = ui([['ai_interactions'], [workspaceId], [source]]);
+		choice.result.confirm = async text => { notices.push(text); return false; };
+		assert.equal(await chooseProcessing(choice.result, syntheticPolicy(), await manager.choices(context)), undefined);
+		for (const term of ['Synthetic Processor', 'synthetic-model', 'assessment-ai-processing.v2', 'cannot be recalled', '30-day', 'ai_interactions', 'Historical evidence gains no permission']) { assert.ok(notices[0].includes(term)); }
+		assert.equal(calls.length, 0);
+	});
+	test('discovery rejects wrong assessment, modified terms/digests, unknown versions, private extra fields and authentication failures', async () => {
+		for (const data of [{ ...syntheticPolicy(), coding_session_id: '43' }, { ...syntheticPolicy(), version: 'unknown' },
+			{ ...syntheticPolicy(), api_key: 'PRIVATE' }, { ...syntheticPolicy(), processor: { ...syntheticPolicy().processor, name: 'Different Processor' } },
+			{ ...syntheticPolicy(), terms: { ...syntheticPolicy().terms, reports_after_withdrawal: 'forever' } }]) {
+			await assert.rejects(new RailsProcessorPolicyClient({ send: async () => ({ status: 200, contentType: 'application/json', body: JSON.stringify({ data }) }) }).get(auth, signal()), AssessmentApiError);
+		}
+		for (const status of [401, 403, 302, 503]) { await assert.rejects(new RailsProcessorPolicyClient({ send: async () => ({ status, body: 'PRIVATE' }) }).get(auth, signal()), e => e instanceof AssessmentApiError && !e.message.includes('PRIVATE')); }
+	});
+	test('unavailable trusted policy never turns into a grant or an arbitrary provider choice', async () => {
+		const discovery = new RailsProcessorPolicyClient({ send: async () => ({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: {
+			version: 'assessment-processor-policy.v1', available: false, reason: 'processor_policy_unavailable', evaluation_enabled: false, server_time: now, coding_session_id: '42'
+		} }) }) });
+		manager = coordinator(c => discovery.get(c.auth, signal())); const choice = ui();
+		await performProcessingAction('grant', context, manager, choice.result, signal());
+		assert.equal(choice.selections(), 0); assert.equal(calls.length, 0);
+	});
+	test('changed policy between display and grant cannot broaden consent or silently fall back to legacy', async () => {
+		const shown = syntheticPolicy(); const changed = syntheticPolicy(false); manager = coordinator(async () => changed);
+		await assert.rejects(manager.grant(context, selection(), shown, signal())); assert.equal(calls.length, 0); assert.equal(secrets.size, 0);
+		assert.equal(validAssessmentProcessorPolicy(shown), true);
+	});
+	function syntheticPolicy(enabled = true): AssessmentProcessorPolicy {
+		const body = { version: 'assessment-processor-policy.v1' as const, available: true as const, purpose: 'assessment_performance_evaluation' as const,
+			consent_version: 'assessment-ai-processing.v2' as const, retention_policy_version: 'assessment-report-retention.v1' as const,
+			processor: { id: 'synthetic-operator', name: 'Synthetic Processor', description: 'Synthetic test provider', external: true as const },
+			processor_scope: processor, categories: ['ai_interactions', 'code_changes', 'tool_activity'], evaluation_enabled: enabled,
+			terms: { provider_data_policy: 'operator_approved_no_training' as const, withdrawal: 'blocks_undispatched_requests' as const,
+				reports_after_withdrawal: 'retain_until_expiry' as const, report_retention_days: 30, prepared_input_persistence: 'none' as const, prospective_only: true as const } };
+		return { ...body, policy_digest: canonicalSha256(body), coding_session_id: '42', server_time: now };
+	}
 	test('all processing commands are contributed and registered without automatically enabling consent', async function () {
 		this.timeout(15000); const extension = vscode.extensions.all.find(e => e.packageJSON.name === 'ai-developer-tracker'); assert.ok(extension); await extension.activate();
 		const commands = await vscode.commands.getCommands();

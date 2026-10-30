@@ -1,3 +1,4 @@
+import { PROCESSING_DISPATCH_VERSION, PROCESSING_REPORT_RETENTION, PROCESSING_DISPATCH_LIMITATIONS, validAssessmentProcessorPolicy, type AssessmentProcessorPolicy } from './processorPolicy';
 import { canonicalJson } from './canonicalJson';
 import { DISCLOSURE_CATEGORIES, disclosureSourceKey, validDisclosureSources, type DisclosureCategory, type DisclosureSource } from './assessmentDisclosure';
 import { utcTime } from './evidenceConsent';
@@ -14,8 +15,8 @@ export interface ProcessorScope {
 export interface ProcessingSelection { categories: DisclosureCategory[]; workspaceIds: string[]; sourceSessions: DisclosureSource[] }
 export interface ProcessingRequest {
 	request_id: string; local_recording_session_id: string; upload_consent_id: string;
-	approval_action: 'approve_assessment_ai_processing'; consent_version: typeof PROCESSING_VERSION;
-	purpose: typeof PROCESSING_PURPOSE; retention_policy_version: typeof PROCESSING_RETENTION;
+	approval_action: 'approve_assessment_ai_processing'; consent_version: typeof PROCESSING_VERSION | typeof PROCESSING_DISPATCH_VERSION;
+	purpose: typeof PROCESSING_PURPOSE; retention_policy_version: typeof PROCESSING_RETENTION | typeof PROCESSING_REPORT_RETENTION; processing_policy_digest?: string;
 	external_processing_permitted: boolean; processor_scope: ProcessorScope;
 	categories: DisclosureCategory[]; approved_workspace_ids: string[]; approved_source_sessions: DisclosureSource[];
 }
@@ -25,17 +26,17 @@ export const PROCESSING_LIMITATIONS = {
 } as const;
 export interface ProcessingReceipt {
 	consent_id: string; local_recording_session_id: string; upload_consent_id: string;
-	consent_version: typeof PROCESSING_VERSION; purpose: typeof PROCESSING_PURPOSE;
-	retention_policy_version: typeof PROCESSING_RETENTION; external_processing_permitted: boolean;
+	consent_version: typeof PROCESSING_VERSION | typeof PROCESSING_DISPATCH_VERSION; purpose: typeof PROCESSING_PURPOSE;
+	retention_policy_version: typeof PROCESSING_RETENTION | typeof PROCESSING_REPORT_RETENTION; processing_policy_digest?: string; external_processing_permitted: boolean;
 	processor_scope: ProcessorScope; categories: DisclosureCategory[]; approved_workspace_ids: string[]; approved_source_sessions: DisclosureSource[];
 	consented_at: string; capture_until: string; expires_at: string; revoked_at: string | null;
-	external_processing_enabled: false; limitations: typeof PROCESSING_LIMITATIONS;
+	external_processing_enabled: false; limitations: typeof PROCESSING_LIMITATIONS | typeof PROCESSING_DISPATCH_LIMITATIONS;
 	state: 'preparation_only' | 'declined' | 'revoked' | 'expired';
 }
 /** SecretStorage control ledger only. Never an event approval or authority to call a model. */
 export interface ProcessingState {
 	version: 1; codingSessionId: string; origin: string; credentialDigest: string; deadline: string;
-	request: ProcessingRequest; receipt?: ProcessingReceipt; locallyRevoked: boolean; pendingAction?: 'grant' | 'revoke';
+	request: ProcessingRequest; receipt?: ProcessingReceipt; policy?: AssessmentProcessorPolicy; locallyRevoked: boolean; pendingAction?: 'grant' | 'revoke';
 }
 const requestKeys = ['request_id', 'local_recording_session_id', 'upload_consent_id', 'approval_action', 'consent_version', 'purpose',
 	'retention_policy_version', 'external_processing_permitted', 'processor_scope', 'categories', 'approved_workspace_ids', 'approved_source_sessions'];
@@ -53,10 +54,14 @@ export function validProcessorScope(v: unknown): v is ProcessorScope {
 		&& v.provider === 'openai_compatible' && typeof v.model === 'string' && /^[a-zA-Z0-9_.:/-]{1,128}$/.test(v.model)
 		&& validOrigin(v.origin) && typeof v.configuration_digest === 'string' && /^[a-f0-9]{64}$/.test(v.configuration_digest);
 }
+function validProcessingVersion(v: Record<string, unknown>): boolean {
+	return v.consent_version === PROCESSING_VERSION ? v.retention_policy_version === PROCESSING_RETENTION && !Object.hasOwn(v, 'processing_policy_digest')
+		: v.consent_version === PROCESSING_DISPATCH_VERSION && v.retention_policy_version === PROCESSING_REPORT_RETENTION && typeof v.processing_policy_digest === 'string' && /^[a-f0-9]{64}$/.test(v.processing_policy_digest);
+}
 export function validProcessingRequest(v: unknown): v is ProcessingRequest {
-	return exactObject(v, requestKeys) && [v.request_id, v.local_recording_session_id, v.upload_consent_id].every(uuid)
-		&& v.approval_action === 'approve_assessment_ai_processing' && v.consent_version === PROCESSING_VERSION
-		&& v.purpose === PROCESSING_PURPOSE && v.retention_policy_version === PROCESSING_RETENTION
+	return exactObject(v, requestKeys, ['processing_policy_digest']) && [v.request_id, v.local_recording_session_id, v.upload_consent_id].every(uuid)
+		&& v.approval_action === 'approve_assessment_ai_processing' && validProcessingVersion(v)
+		&& v.purpose === PROCESSING_PURPOSE
 		&& typeof v.external_processing_permitted === 'boolean' && validProcessorScope(v.processor_scope)
 		&& list(v.categories, 3, c => DISCLOSURE_CATEGORIES.includes(c as DisclosureCategory))
 		&& list(v.approved_workspace_ids, 32, w => typeof w === 'string' && /^[a-f0-9]{64}$/.test(w))
@@ -66,9 +71,9 @@ export function validProcessingRequest(v: unknown): v is ProcessingRequest {
 }
 const sameList = (a: unknown, b: string[]): boolean => Array.isArray(a) && sameProcessingValue([...a].sort(), [...b].sort());
 export function validProcessingReceipt(v: unknown, request: ProcessingRequest, deadline: string, previous?: ProcessingReceipt): v is ProcessingReceipt {
-	if (!validProcessingRequest(request) || !utcTime(deadline) || !exactObject(v, receiptKeys) || !uuid(v.consent_id)
+	if (!validProcessingRequest(request) || !utcTime(deadline) || !exactObject(v, receiptKeys, ['processing_policy_digest']) || !uuid(v.consent_id)
 		|| v.local_recording_session_id !== request.local_recording_session_id || v.upload_consent_id !== request.upload_consent_id
-		|| v.consent_version !== PROCESSING_VERSION || v.purpose !== PROCESSING_PURPOSE || v.retention_policy_version !== PROCESSING_RETENTION
+		|| v.consent_version !== request.consent_version || v.purpose !== PROCESSING_PURPOSE || !validProcessingVersion(v) || v.processing_policy_digest !== request.processing_policy_digest
 		|| v.external_processing_permitted !== request.external_processing_permitted || !validProcessorScope(v.processor_scope)
 		|| !sameProcessingValue(v.processor_scope, request.processor_scope) || !sameList(v.categories, request.categories)
 		|| !sameList(v.approved_workspace_ids, request.approved_workspace_ids) || !validDisclosureSources(v.approved_source_sessions)
@@ -76,7 +81,7 @@ export function validProcessingReceipt(v: unknown, request: ProcessingRequest, d
 		|| !utcTime(v.consented_at) || !utcTime(v.capture_until) || !utcTime(v.expires_at)
 		|| Date.parse(v.capture_until) <= Date.parse(v.consented_at) || Date.parse(v.capture_until) > Date.parse(deadline)
 		|| Date.parse(v.expires_at) - Date.parse(v.consented_at) !== 24 * 60 * 60 * 1000
-		|| v.external_processing_enabled !== false || !sameProcessingValue(v.limitations, PROCESSING_LIMITATIONS)
+		|| v.external_processing_enabled !== false || !sameProcessingValue(v.limitations, request.consent_version === PROCESSING_VERSION ? PROCESSING_LIMITATIONS : PROCESSING_DISPATCH_LIMITATIONS)
 		|| !['preparation_only', 'declined', 'revoked', 'expired'].includes(v.state as string)
 		|| v.revoked_at !== null && (!utcTime(v.revoked_at) || Date.parse(v.revoked_at) < Date.parse(v.consented_at))
 		|| (v.state === 'revoked') !== (v.revoked_at !== null)
@@ -90,10 +95,11 @@ export function validProcessingReceipt(v: unknown, request: ProcessingRequest, d
 	return true;
 }
 export function validProcessingState(v: unknown): v is ProcessingState {
-	return exactObject(v, ['version', 'codingSessionId', 'origin', 'credentialDigest', 'deadline', 'request', 'locallyRevoked'], ['receipt', 'pendingAction'])
+	return exactObject(v, ['version', 'codingSessionId', 'origin', 'credentialDigest', 'deadline', 'request', 'locallyRevoked'], ['receipt', 'pendingAction', 'policy'])
 		&& v.version === 1 && typeof v.codingSessionId === 'string' && /^[1-9][0-9]{0,19}$/.test(v.codingSessionId) && validOrigin(v.origin)
 		&& typeof v.credentialDigest === 'string' && /^[a-f0-9]{64}$/.test(v.credentialDigest) && utcTime(v.deadline)
-		&& validProcessingRequest(v.request) && typeof v.locallyRevoked === 'boolean'
+		&& validProcessingRequest(v.request) && (v.request.consent_version === PROCESSING_VERSION ? v.policy === undefined : validAssessmentProcessorPolicy(v.policy)
+			&& v.policy.coding_session_id === v.codingSessionId && v.policy.policy_digest === v.request.processing_policy_digest && sameProcessingValue(v.policy.processor_scope, v.request.processor_scope)) && typeof v.locallyRevoked === 'boolean'
 		&& (v.pendingAction === undefined || ['grant', 'revoke'].includes(v.pendingAction as string))
 		&& (!v.locallyRevoked || v.pendingAction !== 'grant') && (v.receipt === undefined || validProcessingReceipt(v.receipt, v.request, v.deadline));
 }

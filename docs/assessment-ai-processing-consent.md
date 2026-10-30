@@ -1,197 +1,54 @@
-# E5.0 — Candidate AI processing consent
+# Candidate AI processing consent and trusted processor discovery
 
-## Implemented and blocked boundaries
+The existing Configure/Show/Revoke commands now use authenticated Rails processor discovery. Missing or unapproved policy remains unavailable; there is no arbitrary processor URL field, settings override, receipt-derived policy, mock production fallback or direct extension-to-LLM request.
 
-This extension implements the Rails R5.0C `assessment-ai-processing.v1` control
-contract from `hiring-manager` commit `bfd07d1`, checked against
-`docs/assessment-evaluation-preparation.md`, `swagger/v2/swagger.yaml`,
-`ProcessingConsentRequest`, `ProcessingConsentService`, `ProcessingPolicy` and
-`AssessmentAiProcessingConsentSerializer`.
-
-**Live granting is intentionally unavailable.** R5.0C has no authenticated
-processor-policy discovery endpoint, and the existing pairing/status contract
-does not provision a trusted processor policy. The extension cannot identify an
-approved external provider, model, origin or configuration digest. Configure
-therefore displays an unavailable message and sends **no grant**. There is no
-arbitrary provider URL field, settings override, receipt-derived policy or mock
-fallback. Do not paste processor configuration, consent IDs or credentials into
-settings to work around this boundary.
-
-The three palette commands are installed:
+Commands:
 
 - **AI Developer Tracker: Configure Assessment AI Processing Consent**
 - **AI Developer Tracker: Show Assessment AI Processing Consent**
 - **AI Developer Tracker: Revoke Assessment AI Processing Consent**
 
-The exact grant client and explicit selection flow are implemented and tested
-using a synthetic injected trusted-policy source. Production does not supply
-that source. No real grant or live AI processing was verified. Status and revoke
-use only known, locally retained receipts for the current assessment; they
-cannot discover consent created elsewhere. A missing local receipt is not proof
-that no server consent exists. R5.0C exposes no receipt-list/recovery endpoint.
+## Trusted Rails contract
 
-## Independent choices and policy semantics
+`GET /api/v2/coding_session/extension/processor_policy` uses the paired session credential over existing certificate-verified HTTPS. No body/query or evidence is sent. The response must be a bounded, duplicate-key-free `{data: ...}` envelope, with matching coding_session_id and valid server_time. No redirects or certificate bypass. Exact policy fields/version/digest are validated before display and fetched again before granting.
 
-Processing consent does not replace recording, upload, content-capture or
-recruiter disclosure consent. Once trusted policy discovery is implemented,
-candidates can explicitly select categories, approved workspaces and confirmed,
-content-approved Codex/Claude sessions. Every choice starts unselected. Cancelling,
-choosing nothing or declining confirmation sends no request and changes no
-existing permission. Code-only selection carries no AI sessions.
+Available policy version: `assessment-processor-policy.v1`. It identifies public processor id/name/description/external status, processor_scope (backend/provider/model/origin/configuration_digest), purpose, categories, enablement and withdrawal/retention terms. A compatibility label such as openai_compatible does not establish provider identity. Operator-approved identity and data policy come from Rails. The RFC8785 SHA-256 policy digest excludes only policy_digest, server_time and coding_session_id. This is a consistency check, not trusted-execution attestation.
 
-The notice identifies the processing purpose, possible external service use and
-the supplied processor configuration. An `openai_compatible` adapter name alone
-does not identify an approved provider; trusted discovery must additionally
-supply sufficient provider/policy disclosures before enabling production UX.
+V2 grant uses the existing endpoint `POST /api/v2/coding_session/extension/processing_consents`, existing scope/request fields and exactly:
 
-Current Rails receipts permit **preparation only**, never model dispatch.
-`external_processing_enabled` is false; provider retention is `not_approved`.
-Consent is prospective: Rails enforces its stored event watermark and capture
-window. No old event, approval, manifest or receipt is rewritten by these controls.
+- consent_version: `assessment-ai-processing.v2`
+- retention_policy_version: `assessment-report-retention.v1`
+- processing_policy_digest: the displayed and freshly revalidated Rails policy digest
 
-Withdrawal and supersession block future preparation under that processing
-receipt, including previously captured evidence. This differs from historical
-recruiter-disclosure semantics. Withdrawal neither deletes evidence nor reverses
-processing already performed. The policy for any future existing reports is
-unresolved; this release creates no reports. Capture ends at the server's
-`capture_until`; processing permission expires 24 hours after `consented_at`.
-Those are distinct times. The extension never manufactures `server_time`, extends
-these dates or uses its wall clock to renew permission.
+Other exact fields: request_id, local_recording_session_id, upload_consent_id, approval_action=approve_assessment_ai_processing, purpose=assessment_performance_evaluation, external_processing_permitted, processor_scope, categories, approved_workspace_ids, approved_source_sessions. Source entries are `{source, source_session_id}`. No prompts, code or provider credentials are part of consent requests.
 
-## Exact Rails HTTPS control mapping
+Status remains POST `/api/v2/coding_session/extension/processing_consents/status`; revoke remains DELETE `/api/v2/coding_session/extension/processing_consents`. Both use only consent_id and local_recording_session_id in the body. Receipts must echo immutable scope and policy digest, server capture/expiry timestamps and supported limitations. Status/revoke cannot discover receipts created elsewhere: no local receipt is not proof of no server consent.
 
-Requests use the current paired session-scoped SecretStorage bearer, the pinned
-Rails origin and the existing certificate-verifying transport. Redirects are
-not followed. Request bodies contain scope identifiers only, not event payloads,
-prompts, code, model keys or caller ownership IDs. JSON bodies are bounded to
-4096 bytes. Responses are bounded to 32768 bytes, reject duplicate keys, and
-require a single `{ "data": ... }` envelope.
+V2 limitations: retention_policy_version=assessment-report-retention.v1; prepared_input_persistence=none; external_processing_enabled=false; provider_retention=operator_approved_no_training; withdrawal=blocks_undispatched_requests; existing_report_policy=retain_until_expiry. Receipt state preparation_only means consent alone does not dispatch anything. A separately enabled Rails deployment, recruiter action and current server authorization are required. Legacy v1 receipts retain original preparation-only semantics/limitations and never become dispatchable.
 
-| Action | Method and path | Body |
-| --- | --- | --- |
-| Grant | POST `/api/v2/coding_session/extension/processing_consents` | Exact request below |
-| Status | POST `/api/v2/coding_session/extension/processing_consents/status` | `consent_id`, `local_recording_session_id` |
-| Revoke | DELETE `/api/v2/coding_session/extension/processing_consents` | `consent_id`, `local_recording_session_id` |
+See Rails `docs/assessment-ai-evaluation.md` and OpenAPI for complete server fields and operator requirements. No existing upload, event approval, submission or finalization format changes.
 
-Illustrative grant with synthetic identifiers; not an approved production processor:
+## Explicit choices and lifecycle
 
-```json
-{
-  "request_id": "10000000-0000-4000-8000-000000000001",
-  "local_recording_session_id": "10000000-0000-4000-8000-000000000002",
-  "upload_consent_id": "10000000-0000-4000-8000-000000000003",
-  "approval_action": "approve_assessment_ai_processing",
-  "consent_version": "assessment-ai-processing.v1",
-  "purpose": "assessment_performance_evaluation",
-  "retention_policy_version": "ephemeral-preparation.v1",
-  "external_processing_permitted": true,
-  "processor_scope": {
-    "backend": "direct",
-    "provider": "openai_compatible",
-    "model": "synthetic-model",
-    "origin": "https://processor.invalid",
-    "configuration_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-  },
-  "categories": ["code_changes"],
-  "approved_workspace_ids": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
-  "approved_source_sessions": []
-}
-```
+Configure requires a current active assessment recording, independent upload authorization and approved workspace scope. All category, workspace and confirmed/content-approved Codex/Claude session choices start unselected. Code-only selection needs no AI sessions. The confirmation displays processor name/identity/description, provider/model/origin, selected categories/scope, external use, purpose, enablement, report retention and withdrawal terms. Cancel or decline sends no grant. It does not silently revoke another grant; use Revoke explicitly.
 
-The response `data` must echo all requested scope (excluding `request_id` and
-`approval_action`) and include `consent_id`, `consented_at`, `capture_until`,
-`expires_at`, nullable `revoked_at`, `external_processing_enabled: false`,
-`limitations` and `state`. Supported states: `preparation_only`, `declined`,
-`revoked`, `expired`. The immutable scope/receipt must not change during status
-or revoke. `limitations` must exactly match the R5.0C policy:
+Recording/upload/content-capture/recruiter disclosure/AI processing remain separate. A grant does not change an event or durable event approval. Rails watermarks/capture windows exclude historical events, including earlier submitted assessments. Captured evidence still must independently pass protocol-2 disclosure, privacy and submission reconciliation checks.
 
-```json
-{
-  "retention_policy_version": "ephemeral-preparation.v1",
-  "prepared_input_persistence": "none",
-  "external_processing_enabled": false,
-  "provider_retention": "not_approved",
-  "withdrawal": "blocks_future_preparation",
-  "existing_report_policy": "unresolved_no_reports_created"
-}
-```
+Withdrawal blocks requests not yet transmitted. An already transmitted request cannot be recalled. Under the explicit v2 policy, generated reports remain reviewable until the configured run expiry. Withdrawal does not delete evidence/reports/provider data. The existing 24-hour processing receipt expiry and server capture_until are distinct. No client clock extends either.
 
-## Recovery, isolation and storage
+Scope intents/receipts and the verified policy snapshot reside only in SecretStorage, hashed by origin/assessment and bound to credential generation and recording. No bearer copy in the ledger, no plaintext Memento/settings/diagnostics/JSONL receipts. Save intent before network; explicit uncertain-outcome retry reuses its UUID and scope. Restart never replays grants. Pending revocation remains visibly unconfirmed until a valid revoked receipt returns. Policy changes during selection prevent granting; never silently downgrade to v1. Archive/re-pair/credential changes cannot transfer another assessment's scope or ledger.
 
-Optional control intents/receipts reside only in VS Code **SecretStorage**, under
-an origin/assessment-hashed key, with recording and credential-generation binding.
-No bearer copy is stored in the ledger. Unknown/malformed state fails closed.
-No plaintext settings, Memento, diagnostic or JSONL receipt copy is written.
-New receipt state is never an event-approval input or authority to call an LLM.
+## Manual synthetic verification
 
-Intent is saved before a request. An explicitly confirmed retry of an unresolved
-grant reuses its original idempotency UUID and scope. Restart does not replay
-anything. Unknown-outcome withdrawal never replays a grant to discover a receipt;
-it stays recovery-required. A pending withdrawal is saved before DELETE and can
-be explicitly retried after connectivity returns. It is not reported as confirmed
-server revocation until a validated revoked receipt returns. There are no timers,
-background processing workers or automatic grant retries.
+1. Use trusted local HTTPS Rails with the new processor-policy implementation. Compile (`npm run compile`) and reload the Extension Development Host. Pair/start a NEW synthetic assessment through the normal lifecycle.
+2. With missing operator policy, Configure must show unavailable and send no consent POST. Recording remains independent. Do not invent processor IDs/scopes to work around this.
+3. After the operator approves a synthetic/live-test processor and explicit retention policy, Configure must display exact discovery details. Select independent categories/workspaces/AI sessions and confirm. Grant BEFORE capturing new eligible evidence. If live evaluation is intended, the reviewed enabled policy must already be configured before this grant; changing enablement changes its digest and requires a new prospective grant.
+4. Show must return the validated server state and original dates, never claim that preparation equals evaluation. Existing privacy, upload approvals and Stop & Submit remain unchanged.
+5. Revoke explicitly; offline revocation stays unconfirmed and can be explicitly retried. Reload and check receipt isolation, no automatic grant and no direct provider traffic. Test archives/new pairing with synthetic records, preserving old evidence.
+6. Recruiter evaluation and report access occur only through Rails after finalization. No real provider call was made by automated tests. Never disable TLS or put processor credentials in this extension.
 
-Assessment context is rechecked across dialogs and async operations. Archive,
-credential changes, stop, or re-pair cannot supply a grant to a new assessment.
-Old SecretStorage ledgers remain isolated and retained; there is no archive
-consent-restore workflow. Authentication failures leave evidence intact and do
-not establish whether the server assessment was deleted. Status shows only fixed
-states and server receipt dates, never private receipt/session IDs or scope bodies.
+## Validation and known limitations
 
-## Manual verification now
+Compile and ESLint passed. **119 selected tests passed** across processing consent (30), existing recording, disclosure, archive and finalization. The compiled extension validator also accepted the actual synthetic Rails policy response and canonical digest. Fixtures use mocked HTTP and dummy values, no candidate content or real model requests.
 
-1. Run `npm run compile`, launch/reload the Extension Development Host, configure
-   the existing trusted HTTPS Rails assessment origin and pair a development
-   assessment normally. Never use real candidate evidence for verification.
-2. Start the assessment with the existing independent recording/workspace/upload
-   choices. Run **Configure Assessment AI Processing Consent**. Expect the trusted
-   processor unavailable message and **no processing-consent POST**. Recording
-   must continue normally. Do not attempt a guessed processor scope.
-3. Run **Show Assessment AI Processing Consent** and **Revoke Assessment AI
-   Processing Consent**. With no local receipts, expect the explicit no-local-
-   receipt message; no lookup, revocation or permission assertion is fabricated.
-4. Reload, repeat status and verify no automatic grant/evaluation. Existing
-   disclosure commands, encrypted events, upload and Stop & Submit retain their
-   existing behavior. Do not delete evidence to test this feature.
-5. Successful live grant/status/revoke testing is blocked pending the discovery
-   contract below. After implementing that separate integration, verify category/
-   workspace/source choices start unselected, cancel sends nothing, Rails receipts
-   remain preparation-only, explicit retries reuse request IDs and offline revoke
-   remains visibly unconfirmed until validated by Rails. Never disable TLS checks.
-
-## Outstanding backend and integration dependencies
-
-1. Agree and implement authenticated, assessment-scoped processor-policy discovery
-   (or verified deployment provisioning), including the exact processor scope and
-   clear provider identity, purpose and retention/withdrawal disclosure. Supply
-   validity/version semantics so stale policy cannot authorize a grant. No such
-   endpoint or response is invented by this change.
-2. Wire only that reviewed source into `TrustedProcessorPolicy` and the consent UI.
-   Recheck the selected policy immediately before sending. Existing receipts are
-   not a discovery source. Candidate settings are not trusted provisioning.
-3. Define server receipt discovery/recovery if candidates need to inspect or revoke
-   a grant without its local receipt, including an interrupted grant whose response
-   was lost. Until then, unknown outcomes require server/operator-assisted recovery.
-4. External evidence dispatch and existing-report withdrawal policy remain blocked
-   by R5.0C. This extension does not implement evaluation or relax that boundary.
-
-## Focused validation
-
-```sh
-npm run compile
-npm run lint
-node node_modules/@vscode/test-cli/out/bin.mjs --code-version 1.141.1 --run out/test/assessmentProcessingConsent.test.js
-```
-
-Tests inject synthetic trusted policies and mocked HTTPS control responses; no
-Rails, candidate evidence or AI provider is contacted. Relevant existing consent,
-recording, assessment, archive, upload/finalization regression suites are run
-separately; unrelated feature suites are intentionally excluded.
-
-E5.0 validation: TypeScript and ESLint passed. The final selected run passed
-**168 tests**: 25 processing-consent cases plus 143 relevant existing regressions
-(`assessmentDisclosure`, `disclosureCapture`, `disclosureCaptureMonitor`,
-`assessmentController`, `assessmentArchive`, `assessmentFinalization`,
-`assessmentWorkflow.e2e`, `recordingCommands`, `assessmentCommands`). The complete
-unrelated extension suite and live grants were not run.
+The extension cannot verify a provider's contractual no-training claim; it relies on approved server configuration. Server discovery/worker deployment and fresh prospective v2 grants are required for live evaluation. Previously retained v1 evidence remains restricted. Locally missing consent receipts cannot be recovered via a list endpoint. Ambiguous prompt provenance, incomplete source diffs and missing task context limit what Rails may evaluate. Existing reports may outlive withdrawal only under the explicitly displayed retention policy.

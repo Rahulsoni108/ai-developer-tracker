@@ -1,3 +1,4 @@
+import { isAssessmentProcessorPolicy, processorScope, type TrustedProcessor } from './processorPolicy';
 import * as vscode from 'vscode';
 import { AssessmentApiError } from './assessmentApiClient';
 import type { AssessmentController } from './assessmentController';
@@ -12,12 +13,13 @@ export const CONFIGURE_PROCESSING_COMMAND = 'ai-developer-tracker.configureAsses
 export const STATUS_PROCESSING_COMMAND = 'ai-developer-tracker.showAssessmentAiProcessingConsent';
 export const REVOKE_PROCESSING_COMMAND = 'ai-developer-tracker.revokeAssessmentAiProcessingConsent';
 export const PROCESSING_NOTICE = 'assessment-ai-processing.v1 — AI may analyze permitted assessment activity for performance evaluation, potentially through an external AI service. This is separate from recording, upload, AI content capture and recruiter disclosure consent. Only newly captured, independently authorized evidence can qualify; old evidence gains no permission. Rails currently permits preparation only: external processing is disabled and provider retention is not approved. Withdrawal blocks future preparation, including previously captured evidence under that receipt; it does not delete evidence or undo prior processing. The policy for any future reports remains unresolved; no reports are created in this release.';
+const currentNotice = 'Consent does not dispatch evidence. Rails must independently verify current policy, processing authorization and evidence eligibility for every evaluation. Recording, upload and recruiter disclosure choices are unchanged.';
 const statusNotice = 'External AI processing is disabled by the current Rails policy. Consent does not start evaluation or change evidence, recording, upload or recruiter disclosure permissions.';
 export interface ProcessingUI extends DisclosureChoiceUI {
 	message(text: string): void;
 	choose(states: ProcessingState[]): Promise<ProcessingState | undefined>;
 }
-export async function chooseProcessing(ui: DisclosureChoiceUI, processor: ProcessorScope,
+export async function chooseProcessing(ui: DisclosureChoiceUI, processor: TrustedProcessor,
 	scope: Awaited<ReturnType<AssessmentProcessingConsent['choices']>>): Promise<ProcessingSelection | undefined> {
 	const categories = await ui.select('Choose optional AI processing categories', CATEGORY_CHOICES.map(c => ({ ...c })));
 	if (!categories?.length) { return undefined; }
@@ -30,7 +32,9 @@ export async function chooseProcessing(ui: DisclosureChoiceUI, processor: Proces
 		const selected = await ui.select('Choose confirmed, content-approved AI sessions for processing', eligible.map((s, i) => ({ label: `${s.session.source === 'codex' ? 'Codex' : 'Claude Code'} session ${i + 1}`, value: s.session, picked: false })));
 		if (!selected?.length) { return undefined; } sourceSessions = selected;
 	}
-	if (!await ui.confirm(`${PROCESSING_NOTICE}\n\nTrusted processor configuration: ${processor.provider}; model: ${processor.model}; origin: ${processor.origin}. Purpose: assessment_performance_evaluation. The compatible adapter name alone does not identify or approve an external provider.`)) { return undefined; }
+	const configuration = processorScope(processor);
+	const notice = isAssessmentProcessorPolicy(processor) ? `assessment-ai-processing.v2 — AI may analyze only newly captured, independently authorized assessment activity for performance evaluation through the external service ${processor.processor.name} (${processor.processor.id}): ${processor.processor.description}. This is separate from recording, upload, content capture and recruiter disclosure. Withdrawal blocks requests not yet dispatched; transmitted requests cannot be recalled. Existing reports remain reviewable until their approved ${processor.terms.report_retention_days}-day expiry; withdrawal does not delete evidence or undo processing. Provider data handling: operator-approved no training. Evaluation is ${processor.evaluation_enabled ? 'enabled by the deployment policy; recruiter initiation is still required' : 'disabled by the deployment policy'}. Historical evidence gains no permission.` : PROCESSING_NOTICE;
+	if (!await ui.confirm(`${notice}\n\nProcessor: ${configuration.provider}; model: ${configuration.model}; origin: ${configuration.origin}. Selected categories: ${categories.join(', ')}. Selected approved workspaces: ${workspaceIds.length}. Selected confirmed AI sessions: ${sourceSessions.length}.`)) { return undefined; }
 	return { categories, workspaceIds, sourceSessions };
 }
 /** Injectable command body: plaintext evidence never enters this control path. */
@@ -41,15 +45,15 @@ export async function performProcessingAction(action: ProcessingAction, context:
 		const selected = await chooseProcessing(ui, processor, await consent.choices(context));
 		if (!selected) { ui.message('No new AI processing consent granted. Existing choices are unchanged; use Revoke Assessment AI Processing Consent to withdraw a previous grant.'); return; }
 		const state = await consent.grant(context, selected, processor, signal);
-		ui.message(`AI processing consent registered: ${state.pendingAction ? 'server action unconfirmed' : state.receipt!.state}. ${statusNotice}`); return;
+		ui.message(`AI processing consent registered: ${state.pendingAction ? 'server action unconfirmed' : state.receipt!.state}. ${state.policy ? currentNotice : statusNotice}`); return;
 	}
 	const states = await consent.list(context);
-	if (!states.length) { ui.message(`No AI processing consent is recorded locally for this assessment. This is not a server-wide consent search. ${PROCESSOR_UNAVAILABLE}`); return; }
+	if (!states.length) { ui.message(`No AI processing consent is recorded locally for this assessment. This is not a server-wide consent search. Configure consent only after Rails supplies a trusted processor policy.`); return; }
 	const selected = states.length === 1 ? states[0] : await ui.choose(states); if (!selected) { return; }
-	if (action === 'revoke' && !await ui.confirm('Withdraw AI processing consent? This blocks future preparation under this receipt, including previously captured evidence. It does not delete evidence or undo processing already performed. Local withdrawal intent is saved before contacting Rails; network failure leaves server revocation unconfirmed. Recording, upload and recruiter disclosure choices are unchanged.')) { return; }
+	if (action === 'revoke' && !await ui.confirm((selected.policy ? `Withdraw AI processing consent? Requests not yet dispatched will be blocked. Transmitted requests cannot be recalled. Existing reports remain reviewable until their approved ${selected.policy.terms.report_retention_days}-day expiry. Evidence is not deleted. Local intent is saved before contacting Rails; retry if server revocation is unconfirmed.` : 'Withdraw AI processing consent? This blocks future preparation under this receipt, including previously captured evidence. It does not delete evidence or undo processing already performed. Local withdrawal intent is saved before contacting Rails; network failure leaves server revocation unconfirmed. Recording, upload and recruiter disclosure choices are unchanged.'))) { return; }
 	const state = await (action === 'revoke' ? consent.revoke(context, selected, signal) : consent.inspect(context, selected, signal));
 	ui.message(`AI processing: ${state.locallyRevoked ? 'locally withdrawn; ' : ''}${state.pendingAction ? 'server action unconfirmed' : state.receipt?.state === 'revoked' ? 'revoked (server confirmed)' : state.receipt?.state ?? 'unconfirmed'}.
-${state.receipt ? `Last confirmed capture window: ${state.receipt.consented_at} to ${state.receipt.capture_until}. Processing receipt expires: ${state.receipt.expires_at}. ` : ''}${statusNotice}`);
+${state.receipt ? `Last confirmed capture window: ${state.receipt.consented_at} to ${state.receipt.capture_until}. Processing receipt expires: ${state.receipt.expires_at}. ` : ''}${state.policy ? currentNotice : statusNotice}`);
 }
 export function registerProcessingCommands(controller: Pick<AssessmentController, 'withDisclosureContext'>, consent?: AssessmentProcessingConsent): vscode.Disposable[] {
 	const ui: ProcessingUI = {

@@ -1,3 +1,4 @@
+import { RailsProcessorPolicyClient } from './processorPolicy';
 import { startRecordingCommand, stopRecordingCommand, type RecordingStartChoice } from './recordingCommands';
 import { DisclosureCaptureMonitor } from './disclosureCaptureMonitor';
 import { registerDisclosureCommands } from './assessmentDisclosureCommands';
@@ -517,8 +518,9 @@ export async function activate(context: vscode.ExtensionContext) {
 	const disclosureConsent = queue && disclosureClient ? new AssessmentDisclosureConsent(queue, disclosureClient, approvedAssessmentSources) : undefined;
 	const processingClient = queue && assessmentApi instanceof RailsAssessmentApiClient ? new RailsProcessingConsentClient() : undefined;
 	if (processingClient) { context.subscriptions.push(processingClient); }
-	// No trusted processor discovery is exposed by R5.0C. Do not infer it from settings or old receipts.
-	const processingConsent = queue && processingClient ? new AssessmentProcessingConsent(context.secrets, queue, processingClient, approvedAssessmentSources) : undefined;
+	const processorPolicyClient = processingClient ? new RailsProcessorPolicyClient() : undefined;
+	if (processorPolicyClient) { context.subscriptions.push(processorPolicyClient); }
+	const processingConsent = queue && processingClient ? new AssessmentProcessingConsent(context.secrets, queue, processingClient, approvedAssessmentSources, scope => processorPolicyClient!.get(scope.auth, AbortSignal.timeout(10000))) : undefined;
 	if (disclosureConsent && queue) { context.subscriptions.push(new DisclosureCaptureMonitor(recording, assessment, disclosureConsent, queue)); }
 	context.subscriptions.push(assessmentStatus, ...registerAssessmentCommands(assessment, mockAssessments),
 		...registerDisclosureCommands(assessment, disclosureConsent),

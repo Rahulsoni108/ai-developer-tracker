@@ -10,7 +10,7 @@ Candidates can currently use development recording commands in a local coding wo
 
 **E4.9 disclosure approvals:** [Prospective protocol-2 capture and manual verification](docs/assessment-protocol2-approvals.md). Independent disclosure choices remain unselected by default. Only new events with fresh, server-confirmed scope receive encrypted protocol-2 approvals; historical protocol-1 evidence stays restricted. Recruiter raw-content APIs remain unavailable.
 
-**E5.0 AI processing consent:** [Candidate controls, Rails contract and manual verification](docs/assessment-ai-processing-consent.md). Configure, Show and Revoke commands are separate from recording, upload and recruiter disclosure. Live grants remain unavailable until Rails provides trusted processor-policy discovery/provisioning. No permission is inferred, no historical events are upgraded and no AI evaluation is started.
+**AI processing consent:** [Trusted Rails processor discovery, candidate controls and manual verification](docs/assessment-ai-processing-consent.md). Configure, Show and Revoke remain independent of recording, upload and recruiter disclosure. Grants require an approved server policy and explicit prospective selection. The extension never calls an LLM; evaluation also requires separate server enablement and recruiter initiation. Historical events gain no permission.
 
 ## 2. Technology Stack
 
