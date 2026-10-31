@@ -552,7 +552,8 @@ export async function activate(context: vscode.ExtensionContext) {
 			source_ready: 'Assessment AI session capture ready.', source_blocked: 'Assessment AI session authorization failed. No unapproved session content was imported.',
 			unavailable: 'Assessment permission refresh failed or consent changed. Capture stopped safely; evidence is preserved. Check Assessment Status before resuming.',
 			withdrawn: 'Assessment workflow consent withdrawn. Existing evidence is retained; withdrawal is not submission or deletion.' };
-		activeWorkflow = new AssessmentWorkflowConsent(recording, queue, context.secrets, new RailsWorkflowConsentClient(),
+		activeWorkflow = new AssessmentWorkflowConsent(recording, queue, context.secrets, new RailsWorkflowConsentClient(undefined,
+			check => output.appendLine(`Assessment workflow response validation failed: ${check}. No response content was logged.`)),
 			() => (vscode.workspace.workspaceFolders ?? []).map(folder => createHash('sha256').update(folder.uri.toString()).digest('hex')),
 			async detail => await vscode.window.showWarningMessage('Agree to this assessment recording, upload, disclosure and AI-processing scope?', { modal: true,
 				detail: 'Workspace folders: ' + (vscode.workspace.workspaceFolders ?? []).map(folder => folder.name).join(', ') + '\n\n' + detail }, 'Agree & Start Assessment') === 'Agree & Start Assessment',

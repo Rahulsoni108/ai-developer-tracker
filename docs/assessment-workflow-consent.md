@@ -54,6 +54,10 @@ The server caps current processing scopes at 32 per assessment (including record
 
 ## Limitations and verification
 
+### Start-response validation
+
+Rails serializes the same disclosure receipt independently in `disclosure` and `confirmations`; their `server_time` observations may differ by milliseconds. The extension validates each observation and compares all remaining receipt identity, scope, window and revocation fields. Frozen timestamps must not be assumed. Output reports only fixed validation-stage codes such as `confirmation_identity` or `processing_receipt`, never response contents. After a failed start, compile/reload the extension and inspect Assessment Status before retrying; read-only receipt recovery preserves existing bindings and deadlines. Do not clear evidence, re-pair or manually reset server timing to resolve a protocol error.
+
 Native/unverified Codex or Claude chats are intentionally not auto-approved. Managed Codex requires a CLI version that emits the supported JSONL metadata/records in its launch home. Activity before the post-enrollment byte boundary, including a partial line begun earlier, is omitted with safe feedback. Do not enter prompts before capture-ready confirmation. Claude content depends on supported hooks/visible transcript fields; private reasoning/subagents remain excluded.
 
 Codex itself can retain **plaintext provider transcripts** in the private launch directory. Those files are not JSONL diagnostics and are not copied into the tracker workspace. The tracker queue stays encrypted and diagnostics remain metadata-only. Provider-produced files have separate retention/trust implications; there is no automatic cleanup or secure-erasure claim.

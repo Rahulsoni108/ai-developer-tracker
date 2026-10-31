@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { RailsWorkflowConsentClient } from '../railsWorkflowConsentClient';
+import { AssessmentApiError } from '../assessmentApiClient';
 import * as assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { canonicalSha256 } from '../canonicalJson';
@@ -25,6 +26,49 @@ function request(): WorkflowStartRequest {
 		providers: ['claude', 'codex'], processing_policy_digest: policy().processor_policy.policy_digest };
 }
 suite('Assessment workflow contract foundation', () => {
+ test('accepts the same immutable disclosure receipt serialized at different server times', async () => {
+  const fixture = JSON.parse(await readFile(join(__dirname, '../../src/test/fixtures/rails-workflow-consent.v1.json'), 'utf8'));
+  const start = fixture.start.data;
+  // Rails serializes confirmations and the primary receipt separately; each samples Time.current.
+  start.disclosure.receipt.server_time = new Date(Date.parse(start.confirmations[0].receipt.server_time) + 7).toISOString();
+  const auth = { connection: { mode: 'rails' as const, codingSessionId: start.coding_session_id,
+   apiOrigin: start.upload.receipt.destination_origin, uploadEndpoint: start.upload.receipt.destination_origin + '/api/v2/coding_session/extension/events',
+   credentialExpiresAt: start.upload.receipt.expires_at }, credential: 'adt_ext_' + 'x'.repeat(43) };
+  const client = new RailsWorkflowConsentClient({ send: async () => ({ status: 200, headers: {}, contentType: 'application/json', body: JSON.stringify(fixture.start) }) });
+  const result = await client.start(auth, start.request, AbortSignal.timeout(1000));
+  assert.equal(result.state, 'active'); assert.equal(result.disclosure.receipt!.consent_id, result.confirmations[0].receipt!.consent_id);
+ });
+ test('different observation times never permit changed receipt identity, scope, windows or revocation', async () => {
+  for (const change of ['identity', 'window', 'workspace', 'recording', 'revocation', 'invalid_time', 'expired_time']) {
+   const fixture = JSON.parse(await readFile(join(__dirname, '../../src/test/fixtures/rails-workflow-consent.v1.json'), 'utf8'));
+   const start = fixture.start.data; const receipt = start.confirmations[0].receipt;
+   start.disclosure.receipt.server_time = new Date(Date.parse(receipt.server_time) + 7).toISOString();
+   if (change === 'identity') { receipt.consent_id = randomUUID(); }
+   if (change === 'window') { receipt.consented_at = new Date(Date.parse(receipt.consented_at) + 1).toISOString(); }
+   if (change === 'workspace') { receipt.approved_workspace_ids = ['f'.repeat(64)]; }
+   if (change === 'recording') { receipt.local_recording_session_id = randomUUID(); }
+   if (change === 'revocation') { receipt.state = 'revoked'; receipt.revoked_at = receipt.server_time; }
+   if (change === 'invalid_time') { receipt.server_time = 'invalid'; }
+   if (change === 'expired_time') { receipt.server_time = receipt.expires_at; }
+   const diagnostics: string[] = [];
+   const auth = { connection: { mode: 'rails' as const, codingSessionId: start.coding_session_id,
+    apiOrigin: start.upload.receipt.destination_origin, uploadEndpoint: start.upload.receipt.destination_origin + '/api/v2/coding_session/extension/events',
+    credentialExpiresAt: start.upload.receipt.expires_at }, credential: 'adt_ext_' + 'x'.repeat(43) };
+   const client = new RailsWorkflowConsentClient({ send: async () => ({ status: 200, headers: {}, contentType: 'application/json', body: JSON.stringify(fixture.start) }) }, check => diagnostics.push(check));
+   await assert.rejects(client.start(auth, start.request, AbortSignal.timeout(1000)), error => error instanceof AssessmentApiError && error.code === 'protocol', change);
+   assert.equal(diagnostics.length, 1); assert.match(diagnostics[0], /^confirmation_(identity|scope)$/);
+   assert.equal(JSON.stringify(diagnostics).includes(receipt.consent_id), false);
+  }
+ });
+ test('malformed responses report a fixed stage even if the diagnostic callback fails', async () => {
+  const fixture = JSON.parse(await readFile(join(__dirname, '../../src/test/fixtures/rails-workflow-consent.v1.json'), 'utf8')); const start = fixture.start.data;
+  const auth = { connection: { mode: 'rails' as const, codingSessionId: start.coding_session_id,
+   apiOrigin: start.upload.receipt.destination_origin, uploadEndpoint: start.upload.receipt.destination_origin + '/api/v2/coding_session/extension/events', credentialExpiresAt: start.upload.receipt.expires_at }, credential: 'adt_ext_' + 'x'.repeat(43) };
+  const diagnostics: string[] = [];
+  const client = new RailsWorkflowConsentClient({ send: async () => ({ status: 200, headers: {}, contentType: 'application/json', body: '{"data":"synthetic-malformed"}' }) }, check => { diagnostics.push(check); throw new Error('synthetic diagnostic error'); });
+  await assert.rejects(client.start(auth, start.request, AbortSignal.timeout(1000)), error => error instanceof AssessmentApiError && error.code === 'protocol');
+  assert.deepEqual(diagnostics, ['response_shape']);
+ });
  test('accepts the exact authenticated Rails explicit-purpose fixture without field or receipt invention', async () => {
   const fixture = JSON.parse(await readFile(join(__dirname, '../../src/test/fixtures/rails-workflow-consent.v1.json'), 'utf8'));
   const start = fixture.start.data; const auth = { connection: { mode: 'rails' as const, codingSessionId: start.coding_session_id,

@@ -124,6 +124,18 @@ suite('Explicit workflow consent integration', () => {
   assert.ok(await queue.getPendingCount());
   assert.equal([...secrets.values()].some(s => s.includes(auth.credential) && s.startsWith('{')), false);
  });
+ test('realistic independent serialization times still activate recording and encrypted protocol-2 capture', async () => {
+  mutation = value => {
+   const copy = JSON.parse(JSON.stringify(value));
+   if (copy.disclosure) { copy.disclosure.receipt.server_time = new Date(Date.parse(START) + 7).toISOString(); }
+   return copy;
+  };
+  await controller.start(); assert.equal(controller.view.state, 'active', JSON.stringify(controller.view));
+  const event = createFileEvent({ sessionId: recording.sessionId!, source: 'vscode', workspaceId: W, eventType: 'file.modified', timestamp: new Date(START), payload: { relativePath: 'synthetic.ts' } });
+  await writer.write(event);
+  const proof = await queue.getAssessmentUploadContext(event, { codingSessionId: '42', origin, consentReceiptId: uploadId, serverTime: START });
+  assert.equal(proof?.assessmentEventApproval?.approvalProtocolVersion, 2);
+ });
  test('stop drains the final admitted checkpoint before capture sealing without losing its approval', async () => {
   await controller.start(); const id = recording.sessionId!; recording.stop();
   const event = createFileEvent({ sessionId: id, source: 'vscode', workspaceId: W, eventType: 'file.modified', timestamp: new Date(START), payload: { relativePath: 'final-checkpoint.ts' } });
