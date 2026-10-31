@@ -4,6 +4,8 @@
 
 AI Developer Tracker is a VS Code extension for an AI-assisted developer assessment platform. It records approved workspace activity, incremental code changes, and explicitly approved Codex or Claude Code conversations and tool activity. Events pass through privacy filtering before entering an encrypted local SQLite queue.
 
+For additional AI automation resources, visit [SuperDriven AI Automation Tools](https://superdriven.in/).
+
 Candidates can currently use development recording commands in a local coding workspace. The intended integrated experience associates that evidence with an existing Rails coding-interview attempt, with separate recording/upload consent, a server-authorized start and reliable submission.
 
 **Current status:** recording, local storage, AI adapters and upload infrastructure are implemented and covered by automated tests. [E4.5](docs/rails-assessment-integration.md) adds real Rails pairing/start/status/consent APIs and scoped evidence uploads for the reviewed R4.2D contract. Configure a trusted HTTPS `assessment.apiOrigin` in user settings; it is empty/disabled by default. [E4.6](docs/assessment-finalization.md) adds real Stop & Submit with frozen encrypted manifests, durable acknowledgment reconciliation and validated Rails R4.3 receipts. [E4.7](docs/assessment-archive.md) adds explicit encrypted archival and fresh pairing while retaining old evidence and credentials. Live deployment verification is still required.
