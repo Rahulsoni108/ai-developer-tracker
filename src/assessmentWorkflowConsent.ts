@@ -4,6 +4,7 @@ import type { RecordingController } from './recording';
 import { AssessmentApiError, type AssessmentAuthentication, type AssessmentServerStatus } from './assessmentApiClient';
 import { assessmentArchiveKey } from './assessmentStorage';
 import { canonicalSha256 } from './canonicalJson';
+import { NATIVE_SESSION_VERSION, nativeIdentityDigest, validNativeSourceBundle, type NativeSessionIdentity, type NativeSourceBundle } from './assessmentNativeSession';
 import { PRIVACY_EVENT_TYPES } from './privacyFilter';
 import type { LocalEventQueue } from './localEventQueue';
 import type { ProcessingState } from './processingConsent';
@@ -50,7 +51,12 @@ export class AssessmentWorkflowConsent implements AssessmentWorkflowLifecycle {
  }
  async prepare(auth: AssessmentAuthentication, signal: AbortSignal): Promise<void> {
   this.clear(); const generation = this.generation; const policy = await this.client.policy(auth, signal);
-  const available = await this.availableProviders(); policy.providers = policy.providers.filter(provider => available.includes(provider));
+  const available = await this.availableProviders();
+  if (!available.includes('codex')) {
+   const native = await this.client.sessionCapabilities(auth, signal);
+   if (native?.modes.native_confirmed.includes('codex')) { available.push('codex'); }
+  }
+  policy.providers = policy.providers.filter(provider => available.includes(provider));
   if (!policy.providers.length) { throw new AssessmentApiError('unavailable'); }
   if (generation !== this.generation || signal.aborted || !validWorkflowPolicy(policy, auth.connection.codingSessionId)) { throw new AssessmentApiError('cancelled'); }
   this.prepared = { auth, policy, workspaces: [...this.workspaceIds()].sort(), approved: false };
@@ -91,7 +97,26 @@ export class AssessmentWorkflowConsent implements AssessmentWorkflowLifecycle {
    && Number(process.hrtime.bigint() - this.live.confirmedAt) / 1000000 < 5000
    && canonicalSha256([...this.workspaceIds()].sort()) === canonicalSha256(this.live.ledger.bundle.intent.approved_workspace_ids);
  }
- enroll(provider: WorkflowProvider, sourceId: string, workspaceId: string): Promise<string> {
+ enroll(provider: WorkflowProvider, sourceId: string, workspaceId: string): Promise<string> { return this.enrollSource(provider, sourceId, workspaceId); }
+ async supportsNative(): Promise<boolean> {
+  const live = this.live;
+  if (!live || !this.permits(live.recordingId, 'codex')) { return false; }
+  const capability = await this.client.sessionCapabilities(live.auth, AbortSignal.timeout(10000));
+  return !!capability && this.live === live && this.permits(live.recordingId, 'codex');
+ }
+ async enrollNative(identity: NativeSessionIdentity, confirm: (notice: string) => Promise<boolean>): Promise<string | undefined> {
+  const live = this.live; const generation = this.generation;
+  if (!live || !live.ledger.bundle.intent.approved_workspace_ids.includes(identity.workspaceId) || !await this.supportsNative()) { throw new AssessmentApiError('unavailable'); }
+  const policy = live.ledger.policy.processor_policy;
+  const accepted = await confirm(`Connect only this verified native Codex assessment session (ending ${identity.sourceSessionId.slice(-8)}, created ${identity.createdAt})? `
+   + 'Confirm that this exact conversation belongs to your current assessment workspace. Only activity appended after authorization will be captured; previous history, unrelated chats and private reasoning are excluded. '
+   + `This separately approves local prompt/visible-response/tool capture, scoped uploads to ${new URL(live.auth.connection.apiOrigin).hostname}, recruiter review, and external assessment evaluation by ${policy.processor.name} (${policy.processor_scope.model}) for this one session. `
+   + `Reports are retained for ${policy.terms.report_retention_days} days. Disclosure withdrawal is prospective; processing withdrawal blocks undispatched work and does not delete already processed data. Declining makes no grant.`);
+  if (!accepted) { return undefined; }
+  if (this.live !== live || generation !== this.generation || !this.permits(live.recordingId, 'codex')) { throw new AssessmentApiError('cancelled'); }
+  return this.enrollSource('codex', identity.sourceSessionId, identity.workspaceId, identity);
+ }
+ private enrollSource(provider: WorkflowProvider, sourceId: string, workspaceId: string, native?: NativeSessionIdentity): Promise<string> {
   const operation = this.pending.then(async () => {
    const live = this.live; const generation = this.generation;
    if (!live || !this.permits(live.recordingId, provider) || !live.ledger.bundle.intent.approved_workspace_ids.includes(workspaceId)) { throw new AssessmentApiError('consent_required'); }
@@ -105,22 +130,29 @@ export class AssessmentWorkflowConsent implements AssessmentWorkflowLifecycle {
     processing: { ...common, request_id: randomUUID(), approval_action: 'approve_assessment_ai_processing', consent_version: 'assessment-ai-processing.v2', purpose: 'assessment_performance_evaluation',
      external_processing_permitted: true, retention_policy_version: 'assessment-report-retention.v1', processor_scope: policy.processor_scope, processing_policy_digest: policy.policy_digest } };
    // Preserve unresolved source intent, too. A lost response never authorizes capture.
-   const key = this.key(live.auth, live.recordingId) + '.source.' + sourceId;
+   if (native) {
+    const next: NativeSourceBundle = { ...bundle, intent: { ...bundle.intent, authorization_version: NATIVE_SESSION_VERSION, connection_mode: 'native_confirmed' as const,
+     approval_action: 'approve_native_assessment_session' as const, source_identity: { source_file_reference: native.sourceFileReference, created_at: native.createdAt }, identity_digest: '' } };
+    next.intent.identity_digest = nativeIdentityDigest(live.auth.connection.codingSessionId, next); bundle = next;
+   }
+   const key = this.key(live.auth, live.recordingId) + (native ? '.native.codex.' : '.source.') + sourceId;
    const prior = await this.secrets.get(key);
    if (prior) {
     if (Buffer.byteLength(prior) > 16384) { throw new AssessmentApiError('storage'); }
     const saved = JSON.parse(prior) as WorkflowSourceBundle;
-    if (!validWorkflowSourceBundle(saved) || saved.intent.source !== provider || saved.intent.source_session_id !== sourceId
+    if (!(native ? validNativeSourceBundle(saved) : validWorkflowSourceBundle(saved)) || saved.intent.source !== provider || saved.intent.source_session_id !== sourceId
      || saved.intent.workspace_id !== workspaceId || saved.intent.workflow_consent_id !== live.ledger.bundle.intent.request_id
      || saved.disclosure.local_recording_session_id !== live.recordingId || saved.disclosure.upload_consent_id !== parent.upload.receipt!.consent_id
-     || saved.processing.processing_policy_digest !== policy.policy_digest) { throw new AssessmentApiError('storage'); }
+     || saved.processing.processing_policy_digest !== policy.policy_digest
+     || native && (!validNativeSourceBundle(saved) || canonicalSha256(saved.intent.source_identity) !== canonicalSha256({ source_file_reference: native.sourceFileReference, created_at: native.createdAt })
+      || nativeIdentityDigest(live.auth.connection.codingSessionId, saved) !== saved.intent.identity_digest)) { throw new AssessmentApiError('storage'); }
     bundle = saved;
    } else { await this.secrets.store(key, JSON.stringify(bundle)); }
-   const requestedAt = process.hrtime.bigint(); const result = await this.client.enroll(live.auth, bundle, AbortSignal.timeout(10000));
+   const requestedAt = process.hrtime.bigint(); const result = native ? await this.client.enrollNative(live.auth, bundle as NativeSourceBundle, AbortSignal.timeout(10000)) : await this.client.enroll(live.auth, bundle, AbortSignal.timeout(10000));
    await this.persist(live.auth, result, live.ledger.policy);
    if (result.state !== 'active' || generation !== this.generation || !this.recording.isRecording) { throw new AssessmentApiError('consent_required'); }
    await this.confirmReceipts(result, requestedAt); live.confirmedAt = requestedAt; this.notice('source_ready');
-   return result.disclosure.receipt!.consented_at;
+   return [result.disclosure.receipt!.consented_at, result.processing.receipt!.consented_at].sort().at(-1)!;
   });
   this.pending = operation.catch(() => { this.notice('source_blocked'); }); return operation;
  }

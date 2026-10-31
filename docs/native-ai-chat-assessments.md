@@ -1,6 +1,10 @@
 # E5.1 — Native chat investigation and capture health
 
-## Delivery status
+## E5.2 update
+
+This document records the original E5.1 investigation. Its launched-only blocker still applies to old servers/grants. E5.2 now adds a **separate** explicit native Codex capability and connector; see [the implemented contract and current manual QA](native-session-authorization.md). Native Claude remains disabled. Historical findings below do not describe the new capability as unavailable.
+
+## Original E5.1 delivery status
 
 **Native assessment chat connection is blocked by the current backend authorization contract. This change does not enable native Codex/Claude capture under a launched-only grant.** It implements the compatible early capture-health surface, accurate managed-reader readiness, explicit connection diagnostics and tests. Rails and frontend are unchanged.
 

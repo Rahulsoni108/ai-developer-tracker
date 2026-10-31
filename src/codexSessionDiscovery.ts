@@ -7,7 +7,7 @@ import type { RecordingController, RecordingLifecycle } from './recording';
 import { readSessionMetadata, type MetadataResult } from './codexMetadata';
 
 export type DiscoveryStatus = 'eligible' | 'confirmed' | 'rejected' | 'ambiguous';
-export const DISCOVERY_REASONS = ['recent_workspace_match', 'multiple_matches', 'user_confirmed', 'user_rejected', 'historical', 'outside_workspace', 'future_timestamp', 'creation_time_unverified', 'invalid_metadata', 'missing_metadata', 'incomplete_metadata', 'oversized_metadata', 'working_directory_unverified', 'duplicate_source_id', 'metadata_changed', 'filename_mismatch'] as const;
+export const DISCOVERY_REASONS = ['recent_workspace_match', 'selected_workspace_match', 'multiple_matches', 'user_confirmed', 'user_rejected', 'historical', 'outside_workspace', 'future_timestamp', 'creation_time_unverified', 'invalid_metadata', 'missing_metadata', 'incomplete_metadata', 'oversized_metadata', 'working_directory_unverified', 'duplicate_source_id', 'metadata_changed', 'filename_mismatch'] as const;
 export type DiscoveryReason = typeof DISCOVERY_REASONS[number];
 
 /** Sanitized registry: no absolute cwd, transcript paths, account IDs, or content. */
@@ -34,6 +34,8 @@ export interface ConfirmedCodexFile {
 interface Disposable { dispose(): void; }
 export type DiscoveryDiagnostic = 'missing_directory' | 'unsafe_directory' | 'read_failed' | 'scan_limit' | 'registry_limit' | 'watcher_unavailable';
 export interface DiscoveryOptions {
+	/** Candidate-selected exact record only; never a global historical scan. */
+	selectedSessionFile?: string;
 	sessionsDirectory?: string;
 	pollIntervalMs?: number;
 	maxMetadataBytes?: number;
@@ -158,7 +160,7 @@ export class CodexSessionDiscovery implements RecordingLifecycle, Disposable {
 	}
 	getConfirmationCandidates(): CodexSessionRegistration[] {
 		return this.getRegistry().filter(entry => entry.recordingSessionId === this.recording.sessionId
-			&& (entry.reason === 'recent_workspace_match' || entry.reason === 'multiple_matches'));
+			&& (['recent_workspace_match', 'multiple_matches', 'selected_workspace_match'].includes(entry.reason)));
 	}
 	isConfirmed(sourceFileId: string, recordingSessionId: string, sourceSessionId: string): boolean {
 		const run = this.run;
@@ -295,6 +297,7 @@ export class CodexSessionDiscovery implements RecordingLifecycle, Disposable {
 		return days;
 	}
 	private layoutAllowed(run: Run, path: string): boolean {
+		if (this.options.selectedSessionFile) { return !!run.root && path.endsWith('.jsonl') && samePath(resolve(run.root, path), resolve(this.options.selectedSessionFile)); }
 		const parts = path.split(sep);
 		return path.endsWith('.jsonl') && (parts.length === 1
 			|| (parts.length === 4 && this.dateDirectories(run).includes(parts.slice(0, 3).join('/'))));
@@ -317,6 +320,13 @@ export class CodexSessionDiscovery implements RecordingLifecycle, Disposable {
 
 	private async scan(run: Run): Promise<void> {
 		if (!run.scopes.length || !this.current(run) || !await this.initializeRoot(run)) { return; }
+		if (this.options.selectedSessionFile) {
+			const selected = resolve(this.options.selectedSessionFile);
+			if (!isAbsolute(this.options.selectedSessionFile) || !inside(run.root!, selected)) { this.diagnostic(run, 'unsafe_directory'); return; }
+			const part = relative(run.root!, selected);
+			if (!this.layoutAllowed(run, part)) { this.diagnostic(run, 'unsafe_directory'); return; }
+			await this.inspect(run, part); this.publish(run); return;
+		}
 		let budget = this.maxEntries;
 		for (const part of ['', ...this.dateDirectories(run).map(day => day.split('/').join(sep))]) {
 			if (!this.current(run) || budget <= 0) { break; }
@@ -417,7 +427,7 @@ export class CodexSessionDiscovery implements RecordingLifecycle, Disposable {
 			const cache: FileCache = { relativePath: part, fingerprint: signature, complete: false };
 			run.files.set(part, cache);
 			// Old files (including old sessions appended during recording) are never opened.
-			if (stat.birthtimeMs > 0 && stat.birthtimeMs < run.startMs) {
+			if (!this.options.selectedSessionFile && stat.birthtimeMs > 0 && stat.birthtimeMs < run.startMs) {
 				cache.complete = true; this.entry(run, part, 'rejected', 'historical'); return;
 			}
 			const result = await this.read(run, part);
@@ -428,7 +438,7 @@ export class CodexSessionDiscovery implements RecordingLifecycle, Disposable {
 			cache.complete = true;
 			const metadata = result.metadata;
 			const created = Date.parse(metadata.createdAt);
-			if (created < run.startMs) { this.entry(run, part, 'rejected', 'historical'); return; }
+			if (!this.options.selectedSessionFile && created < run.startMs) { this.entry(run, part, 'rejected', 'historical'); return; }
 			if (created > this.now().getTime()) { this.entry(run, part, 'ambiguous', 'future_timestamp'); return; }
 			const match = await this.workspace(run, metadata.cwd);
 			if (match === 'outside') { this.entry(run, part, 'rejected', 'outside_workspace'); return; }
@@ -443,8 +453,8 @@ export class CodexSessionDiscovery implements RecordingLifecycle, Disposable {
 				this.registry.delete(id); return;
 			}
 			run.sourceIds.set(metadata.sourceSessionId, id);
-			this.entry(run, part, stat.birthtimeMs > 0 ? 'eligible' : 'ambiguous',
-				stat.birthtimeMs > 0 ? 'recent_workspace_match' : 'creation_time_unverified', {
+			this.entry(run, part, this.options.selectedSessionFile || stat.birthtimeMs > 0 ? 'eligible' : 'ambiguous',
+				this.options.selectedSessionFile ? 'selected_workspace_match' : stat.birthtimeMs > 0 ? 'recent_workspace_match' : 'creation_time_unverified', {
 				sourceSessionId: metadata.sourceSessionId, workspaceId: match.scope.workspaceId,
 				createdAt: metadata.createdAt, workspaceRelativeCwd: match.relativeCwd, codexVersion: metadata.codexVersion
 			});
@@ -453,11 +463,11 @@ export class CodexSessionDiscovery implements RecordingLifecycle, Disposable {
 
 	private publish(run: Run): void {
 		if (!this.current(run)) { return; }
-		const matches = [...this.registry.values()].filter(entry => ['recent_workspace_match', 'multiple_matches', 'user_confirmed'].includes(entry.reason));
+		const matches = [...this.registry.values()].filter(entry => ['recent_workspace_match', 'selected_workspace_match', 'multiple_matches', 'user_confirmed'].includes(entry.reason));
 		for (const entry of matches) {
 			if (entry.status !== 'confirmed') {
 				entry.status = matches.length > 1 ? 'ambiguous' : 'eligible';
-				entry.reason = matches.length > 1 ? 'multiple_matches' : 'recent_workspace_match';
+				entry.reason = this.options.selectedSessionFile ? 'selected_workspace_match' : matches.length > 1 ? 'multiple_matches' : 'recent_workspace_match';
 			}
 		}
 		const candidates = this.getConfirmationCandidates();

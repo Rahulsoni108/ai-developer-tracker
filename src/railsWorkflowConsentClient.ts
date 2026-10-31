@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { AssessmentApiError, type AssessmentAuthentication, type AssessmentServerStatus } from './assessmentApiClient';
 import { validConnection, validServerStatus } from './assessmentStorage';
 import { canonicalSha256 } from './canonicalJson';
+import { NATIVE_SESSION_VERSION, nativeIdentityDigest, validNativeCapabilities, validNativeSourceBundle, type NativeSessionCapabilities, type NativeSourceBundle } from './assessmentNativeSession';
 import { exactObject, parseRailsControlResponse } from './railsControlResponse';
 import { HttpsEventTransport, type UploadTransport } from './httpsEventTransport';
 import { utcTime, validConsentState, type EvidenceConsentState } from './evidenceConsent';
@@ -36,6 +37,26 @@ export class RailsWorkflowConsentClient {
  async enroll(auth: AssessmentAuthentication, bundle: WorkflowSourceBundle, signal: AbortSignal): Promise<WorkflowReceipts> {
   if (!validWorkflowSourceBundle(bundle)) { this.invalid('request'); }
   return this.receipts(auth, await this.send(auth, '/sources', 'POST', bundle, signal), bundle);
+ }
+ async sessionCapabilities(auth: AssessmentAuthentication, signal: AbortSignal): Promise<NativeSessionCapabilities | undefined> {
+  const data = await this.send(auth, '/session_capabilities', 'GET', undefined, signal, true);
+  if (data === undefined) { return undefined; }
+  if (!validNativeCapabilities(data, auth.connection.codingSessionId) || Date.parse(data.server_time) >= Date.parse(auth.connection.credentialExpiresAt!)) { this.invalid('response_shape'); }
+  return data;
+ }
+ async enrollNative(auth: AssessmentAuthentication, bundle: NativeSourceBundle, signal: AbortSignal): Promise<WorkflowReceipts> {
+  if (!validNativeSourceBundle(bundle) || nativeIdentityDigest(auth.connection.codingSessionId, bundle) !== bundle.intent.identity_digest) { this.invalid('request'); }
+  const data = await this.send(auth, '/native_sources', 'POST', bundle, signal);
+  if (!exactObject(data, ['authorization_version', 'connection_mode', 'identity_digest', 'authorization'])
+   || data.authorization_version !== NATIVE_SESSION_VERSION || data.connection_mode !== 'native_confirmed' || data.identity_digest !== bundle.intent.identity_digest) { this.invalid('response_shape'); }
+  return this.receipts(auth, data.authorization, bundle);
+ }
+ async recoverNative(auth: AssessmentAuthentication, bundle: NativeSourceBundle, signal: AbortSignal): Promise<WorkflowReceipts> {
+  if (!validNativeSourceBundle(bundle) || nativeIdentityDigest(auth.connection.codingSessionId, bundle) !== bundle.intent.identity_digest) { this.invalid('request'); }
+  const data = await this.send(auth, '/native_sources/status', 'POST', { workflow_consent_id: bundle.intent.workflow_consent_id, request_id: bundle.intent.request_id }, signal);
+  if (!exactObject(data, ['authorization_version', 'connection_mode', 'identity_digest', 'authorization'])
+   || data.authorization_version !== NATIVE_SESSION_VERSION || data.connection_mode !== 'native_confirmed' || data.identity_digest !== bundle.intent.identity_digest) { this.invalid('response_shape'); }
+  return this.receipts(auth, data.authorization, bundle); // Receipt inspection never enables a reader.
  }
  async recover(auth: AssessmentAuthentication, bundle: WorkflowStartBundle, signal: AbortSignal): Promise<WorkflowReceipts> {
   return this.receipts(auth, await this.send(auth, '/status', 'POST', { workflow_consent_id: bundle.intent.request_id }, signal), bundle);
@@ -94,11 +115,12 @@ export class RailsWorkflowConsentClient {
    || !confirmations.some(s => canonicalSha256(comparable(s)) === canonicalSha256(comparable(disclosure)))) { this.invalid('confirmation_identity'); }
   return { workflowId, state: value.state as WorkflowReceipts['state'], status, upload: { ...upload, captureClosed: upload.receipt.state === 'stopped' }, disclosure, processing, confirmations };
  }
- private async send(auth: AssessmentAuthentication, path: string, method: 'GET' | 'POST' | 'DELETE', body: unknown, signal: AbortSignal): Promise<unknown> {
+ private async send(auth: AssessmentAuthentication, path: string, method: 'GET' | 'POST' | 'DELETE', body: unknown, signal: AbortSignal, optionalCapability = false): Promise<unknown> {
   try {
    if (!validConnection(auth.connection) || auth.connection.mode !== 'rails' || !/^adt_ext_[A-Za-z0-9_-]{43}$/.test(auth.credential)) { throw new AssessmentApiError('authentication'); }
    const response = await this.transport.send({ endpoint: new URL(BASE + path, auth.connection.apiOrigin), method, token: auth.credential,
     body: body === undefined ? '' : JSON.stringify(body), signal: AbortSignal.any([signal, AbortSignal.timeout(10000)]) });
+   if (optionalCapability && response.status === 404) { return undefined; }
    if ([401,403].includes(response.status)) { throw new AssessmentApiError('authentication'); }
    if (response.status !== 200) { throw new AssessmentApiError([404,409,413,415,422,426].includes(response.status) ? 'rejected' : 'unavailable'); }
    if (!/^application\/json(?:\s*;|$)/i.test(response.contentType ?? '')) { this.invalid('content_type'); }

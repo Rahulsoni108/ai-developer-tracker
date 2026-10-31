@@ -1,6 +1,7 @@
 import { AssessmentWorkflowConsent, type AssessmentWorkflowLifecycle } from './assessmentWorkflowConsent';
 import { RailsWorkflowConsentClient } from './railsWorkflowConsentClient';
 import { ManagedCodexCapture } from './managedCodexCapture';
+import { NativeCodexCapture } from './nativeCodexCapture';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { AssessmentAiCaptureHealth, AI_CAPTURE_STATUS_COMMAND, CONNECT_AI_CHAT_COMMAND, NATIVE_CHAT_CONTRACT_BLOCKER, describeAiCaptureHealth, stopAssessmentCaptureForWorkspaceChange } from './assessmentAiCaptureHealth';
@@ -34,7 +35,7 @@ import { RecordingController, START_RECORDING_COMMAND, STOP_RECORDING_COMMAND } 
 import { FileTracker, isExcludedPath } from './fileTracker';
 import { JsonlWriter } from './jsonlWriter';
 import { DiffTracker, DEFAULT_DIFF_OPTIONS } from './diffTracker';
-import { CodexSessionDiscovery, type DiscoveryDiagnostic } from './codexSessionDiscovery';
+import { codexSessionsDirectory, CodexSessionDiscovery, type DiscoveryDiagnostic } from './codexSessionDiscovery';
 import { CodexDiscoveryUi, REVIEW_CODEX_SESSIONS_COMMAND } from './codexDiscoveryUi';
 import { createHash } from 'node:crypto';
 import { CodexJsonlReader } from './codexJsonlReader';
@@ -53,6 +54,7 @@ import { formatAssessmentStatus, registerAssessmentCommands } from './assessment
 
 let activeWorkflow: AssessmentWorkflowConsent | undefined;
 let activeManagedCodex: ManagedCodexCapture | undefined;
+let activeNativeCodex: NativeCodexCapture | undefined;
 let activeAssessment: AssessmentController | undefined;
 let activeRailsApi: RailsAssessmentApiClient | undefined;
 let activeClaudeParser: ClaudeEventParser | undefined;
@@ -204,14 +206,25 @@ export async function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand(CONNECT_AI_CHAT_COMMAND, async () => {
 			const id = recording.sessionId;
 			if (!recording.isRecording || !id || !activeAssessment?.isAssociatedSession(id)) { void vscode.window.showInformationMessage('Start the paired assessment before connecting an AI session.'); return; }
-			const action = await vscode.window.showWarningMessage(NATIVE_CHAT_CONTRACT_BLOCKER, 'Launch Optional Tracked Session', 'Show AI Capture Status');
-			if (action === 'Launch Optional Tracked Session' && recording.isRecording && recording.sessionId === id) { await vscode.commands.executeCommand('ai-developer-tracker.launchAssessmentAiSession'); }
-			if (action === 'Show AI Capture Status') { await vscode.commands.executeCommand(AI_CAPTURE_STATUS_COMMAND); }
+			try {
+				const provider = await vscode.window.showQuickPick(['Codex', 'Claude Code'], { title: 'Connect an existing assessment AI chat' });
+				if (!provider) { return; }
+				if (provider === 'Claude Code') { void vscode.window.showInformationMessage('Native Claude Code connection is unavailable: this adapter verifies only its per-launch authenticated hooks. Existing chats are not scanned or imported. The optional tracked Claude launch remains available.'); return; }
+				if (!activeNativeCodex || !await activeWorkflow?.supportsNative()) { void vscode.window.showWarningMessage(NATIVE_CHAT_CONTRACT_BLOCKER); return; }
+				const configured = vscode.workspace.getConfiguration('ai-developer-tracker.codex').inspect<string>('sessionsDirectory')?.globalValue;
+				const directory = codexSessionsDirectory(configured);
+				const selected = await vscode.window.showOpenDialog({ defaultUri: vscode.Uri.file(directory), canSelectFiles: true, canSelectFolders: false, canSelectMany: false,
+					filters: { 'Codex session records': ['jsonl'] }, title: 'Select the exact Codex session record for this assessment chat', openLabel: 'Verify selected session' });
+				if (!selected?.[0] || selected[0].scheme !== 'file' || recording.sessionId !== id) { return; }
+				await activeNativeCodex.connect(selected[0].fsPath, directory, tracker.getApprovedFolders().map(folder => ({ path: folder.uri.fsPath,
+					workspaceId: createHash('sha256').update(folder.uri.toString()).digest('hex') })), async detail =>
+					await vscode.window.showWarningMessage('Authorize this exact native Codex assessment conversation?', { modal: true, detail }, 'Confirm & Connect This Session') === 'Confirm & Connect This Session');
+			} catch { void vscode.window.showWarningMessage('Native AI connection unavailable. Check server capability, active consent and the selected session metadata/workspace. No unrelated conversation content was imported.'); }
 		}));
 	const captureHealthPoll = setInterval(() => {
 		const id = recording.sessionId; if (!id || !activeAssessment?.isAssociatedSession(id)) { return; }
 		const before = captureHealth.view.state;
-		captureHealth.reconcile('codex', activeWorkflow?.permits(id, 'codex') ? (activeManagedCodex?.getApprovals(id) ?? []).map(s => s.sourceSessionId) : []);
+		captureHealth.reconcile('codex', activeWorkflow?.permits(id, 'codex') ? [...activeManagedCodex?.getApprovals(id) ?? [], ...activeNativeCodex?.getApprovals(id) ?? []].map(s => s.sourceSessionId) : []);
 		captureHealth.reconcile('claude', activeWorkflow?.permits(id, 'claude') ? (activeClaudeParser?.getApprovals(id) ?? []).filter(s => activeClaudeParser?.canCapture(s.sourceSessionId)).map(s => s.sourceSessionId) : []);
 		if (before !== 'interrupted' && captureHealth.view.state === 'interrupted') { void vscode.window.showWarningMessage('AI capture interrupted: the approved reader or current source scope is no longer available. Check Show Assessment AI Capture Status before continuing.'); }
 	}, 2000);
@@ -233,10 +246,10 @@ export async function activate(context: vscode.ExtensionContext) {
 			workspaceId: createHash('sha256').update(folder.uri.toString()).digest('hex') }));
 		return {
 			approvedWorkspaceIds: folders.map(folder => folder.workspaceId),
-			confirmedCodexSessions: [...(activeManagedCodex?.getApprovals(sessionId) ?? []), ...(privacyDiscovery?.getRegistry() ?? []).filter(entry => entry.recordingSessionId === sessionId
+			confirmedCodexSessions: [...(activeManagedCodex?.getApprovals(sessionId) ?? []), ...(activeNativeCodex?.getApprovals(sessionId) ?? []), ...(privacyDiscovery?.getRegistry() ?? []).filter(entry => entry.recordingSessionId === sessionId
 				&& entry.status === 'confirmed' && entry.reason === 'user_confirmed' && entry.sourceSessionId && entry.workspaceId)
 				.map(entry => ({ sourceSessionId: entry.sourceSessionId!, workspaceId: entry.workspaceId! }))],
-			codexContentConsent: (activeManagedCodex?.getApprovals(sessionId).length ?? 0) > 0 || (privacyParser?.hasAdmittedContentConsent(sessionId) ?? false),
+			codexContentConsent: (activeManagedCodex?.getApprovals(sessionId).length ?? 0) > 0 || (activeNativeCodex?.getApprovals(sessionId).length ?? 0) > 0 || (privacyParser?.hasAdmittedContentConsent(sessionId) ?? false),
 			confirmedClaudeSessions: activeClaudeParser?.getApprovals(sessionId) ?? [],
 			claudeContentConsent: (activeClaudeParser?.getApprovals(sessionId).length ?? 0) > 0,
 			resolveToolPath: (path, workspaceId) => {
@@ -408,7 +421,7 @@ export async function activate(context: vscode.ExtensionContext) {
 					await LocalEventQueue.assertStorageOutsideWorkspaces(vscode.Uri.file(path), vscode.workspace.workspaceFolders ?? []);
 				}
 			},
-			drain: async () => { await diffs.flush(); await tracker.flush(); await activeManagedCodex?.flush(); await activeCodexReader?.flush(); await activeCodexParser?.flush(); await activeClaudeParser?.flush(); await correlator.flush(); await writer.flush(); },
+			drain: async () => { await diffs.flush(); await tracker.flush(); await activeManagedCodex?.flush(); await activeNativeCodex?.flush(); await activeCodexReader?.flush(); await activeCodexParser?.flush(); await activeClaudeParser?.flush(); await correlator.flush(); await writer.flush(); },
 			cleared: async () => {
 				await diffs.clearStoppedEvidence(); await correlator.clearStoppedEvidence(); activeDiscovery?.clearStoppedRegistry(); writer.resetAfterCleanup();
 				const health = await queue!.getHealth(); renderHealth(health);
@@ -523,7 +536,7 @@ export async function activate(context: vscode.ExtensionContext) {
 	}
 
 	const flushStoppedRecording = async (stoppedSession: string | undefined): Promise<void> => {
-		await diffs.flush(); await tracker.flush(); await activeManagedCodex?.flush(); await activeCodexReader?.flush(); await activeCodexParser?.flush();
+		await diffs.flush(); await tracker.flush(); await activeManagedCodex?.flush(); await activeNativeCodex?.flush(); await activeCodexReader?.flush(); await activeCodexParser?.flush();
 		await activeClaudeParser?.flush(); await activeDiscovery?.flush(); await activeClaudeParser?.finishRecording();
 		await correlator.finishSession(stoppedSession); await writer.flush(); await writer.completeSession(stoppedSession);
 		if (stoppedSession) { await queue?.suspendDisclosureCapture(stoppedSession, undefined, true); }
@@ -576,6 +589,7 @@ export async function activate(context: vscode.ExtensionContext) {
 	const disclosureClient = queue && assessmentApi instanceof RailsAssessmentApiClient ? new RailsDisclosureConsentClient() : undefined;
 	if (disclosureClient) { context.subscriptions.push(disclosureClient); }
 	const approvedAssessmentSources = (id: string) => [
+		...([...(activeManagedCodex?.getApprovals(id) ?? []), ...(activeNativeCodex?.getApprovals(id) ?? [])].map(entry => ({ workspaceId: entry.workspaceId, session: { source: 'codex' as const, source_session_id: entry.sourceSessionId } }))),
 			...(privacyParser?.hasAdmittedContentConsent(id) ? (privacyDiscovery?.getRegistry() ?? []).filter(entry => entry.recordingSessionId === id
 				&& entry.status === 'confirmed' && entry.reason === 'user_confirmed' && entry.sourceSessionId && entry.workspaceId)
 				.map(entry => ({ workspaceId: entry.workspaceId!, session: { source: 'codex' as const, source_session_id: entry.sourceSessionId! } })) : []),
@@ -589,8 +603,8 @@ export async function activate(context: vscode.ExtensionContext) {
 	if (processorPolicyClient) { context.subscriptions.push(processorPolicyClient); }
 	const processingConsent = queue && processingClient ? new AssessmentProcessingConsent(context.secrets, queue, processingClient, approvedAssessmentSources, scope => processorPolicyClient!.get(scope.auth, AbortSignal.timeout(10000))) : undefined;
 	if (queue && assessmentApi instanceof RailsAssessmentApiClient && processingConsent) {
-		const messages = { ready: 'Assessment permissions ready. Use Launch Assessment AI Session for tracked Codex/Claude work; unrelated native chats are excluded.',
-			source_ready: 'Assessment AI session capture ready.', source_blocked: 'Assessment AI session authorization failed. No unapproved session content was imported.',
+		const messages = { ready: 'Assessment permissions ready. Use Connect Current AI Chat for a separately confirmed native Codex session, or optionally Launch Assessment AI Session. Unrelated chats remain excluded.',
+			source_ready: 'Assessment AI source authorization confirmed. Reader initialization is still required before capture-ready.', source_blocked: 'Assessment AI session authorization failed. No unapproved session content was imported.',
 			unavailable: 'Assessment permission refresh failed or consent changed. Capture stopped safely; evidence is preserved. Check Assessment Status before resuming.',
 			withdrawn: 'Assessment workflow consent withdrawn. Existing evidence is retained; withdrawal is not submission or deletion.' };
 		activeWorkflow = new AssessmentWorkflowConsent(recording, queue, context.secrets, new RailsWorkflowConsentClient(undefined,
@@ -612,6 +626,18 @@ export async function activate(context: vscode.ExtensionContext) {
 				if (results[1].status === 'fulfilled' && results[1].value.stdout.includes('--plugin-dir') && results[1].value.stdout.includes('--session-id')) { available.push('claude'); }
 				return available;
 			});
+		activeNativeCodex = new NativeCodexCapture(recording, writer, activeWorkflow, state => {
+			if (state === 'initializing') { captureHealth.initializing('codex'); }
+			if (state === 'declined') { captureHealth.cancelInitializing('codex'); }
+			if (state === 'ready') { captureHealth.readerReady('codex', (activeNativeCodex?.getApprovals(recording.sessionId ?? '') ?? []).map(s => s.sourceSessionId)); }
+			if (state === 'interrupted' || state === 'unavailable') { captureHealth.interrupted('codex'); }
+			const message = { initializing: 'Native Codex capture initializing; selected metadata only is being verified.', ready: 'AI capture ready — native Codex. Only new authorized messages will be captured.',
+				interrupted: 'Native Codex capture interrupted. Existing evidence is retained. Reconnect the verified source or restart an authorized recording; no history is replayed.',
+				unavailable: 'Native Codex capture unavailable. Verify the exact selected record, approved workspace, server capability and consent. No conversation history was imported.',
+				declined: 'Native Codex connection declined. No native-session authorization or content capture was enabled.' }[state];
+			output.appendLine(message); void vscode.window.showInformationMessage(message);
+		});
+		context.subscriptions.push({ dispose: () => { void activeNativeCodex?.dispose(); } });
 		activeManagedCodex = new ManagedCodexCapture(recording, writer, activeWorkflow, join(queueStorageUri.fsPath, 'provider-runtime', 'codex'),
 			async path => LocalEventQueue.assertStorageOutsideWorkspaces(vscode.Uri.file(path), vscode.workspace.workspaceFolders ?? []),
 			reason => {
@@ -654,7 +680,7 @@ export async function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(assessmentStatus, ...registerAssessmentCommands(assessment, mockAssessments, async () => {
 		const id = recording.sessionId;
 		if (recording.isRecording && id && assessment.isAssociatedSession(id) && !interactionCounts.get(id)) {
-			void vscode.window.showWarningMessage('No AI prompt/response events were captured in this recording. Submission will continue with the evidence actually retained. Native/unverified chats are excluded; use Launch Assessment AI Session and wait for capture-ready confirmation. Use Show Recorded Event Summary to inspect counts.');
+			void vscode.window.showWarningMessage('No AI prompt/response events were captured in this recording. Submission will continue with the evidence actually retained. Use Connect Current AI Chat for supported native Codex sessions or the optional Launch Assessment AI Session, and wait for verified capture-ready confirmation. Use Show Recorded Event Summary to inspect counts.');
 		}
 	}),
 		...registerDisclosureCommands(assessment, disclosureConsent),
@@ -726,6 +752,7 @@ export async function activate(context: vscode.ExtensionContext) {
 // VS Code disposes the commands and controller in context.subscriptions.
 export async function deactivate(): Promise<void> {
 	await activeAssessment?.dispose(); activeWorkflow?.dispose(); activeWorkflow = undefined;
+	await activeNativeCodex?.flush(); await activeNativeCodex?.dispose(); activeNativeCodex = undefined;
 	await activeManagedCodex?.flush(); await activeManagedCodex?.dispose(); activeManagedCodex = undefined; activeRailsApi?.dispose(); activeRailsApi = undefined;
 	await activeClaudeUi?.dispose(); activeClaudeUi = undefined;
 	await activeUploads?.dispose(); activeUploads = undefined;

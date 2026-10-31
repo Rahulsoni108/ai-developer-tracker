@@ -82,6 +82,49 @@ suite('Incremental Codex JSONL reader', () => {
 		await rm(temporary, { recursive: true, force: true });
 	});
 
+	test('native prospective mode reads only the EOF delimiter before new authorized data and never replays a reset', async () => {
+		const file = await session(record()); const end = (await stat(file.path)).size;
+		const reads: { position: number; length: number }[] = []; let approved = false; let initialized = 0;
+		const source = registry();
+		await configure({ prospectiveOnly: true, canCaptureContent: () => approved, onInitialized: () => { initialized++; } }, {
+			...source, openConfirmedSession: async id => {
+				const opened = await source.openConfirmedSession(id); if (!opened) { return undefined; }
+				const original = opened.handle;
+				return { ...opened, handle: { stat: () => original.stat(), close: () => original.close(),
+					read: async (buffer: Buffer, offset: number, length: number, position: number) => {
+						reads.push({ position, length }); return original.read(buffer, offset, length, position);
+					} } as unknown as FileHandle };
+			}
+		});
+		assert.equal(reads.length, 0); assert.equal(initialized, 0);
+		approved = true; await reader.readNow();
+		assert.deepEqual(reads, [{ position: end - 1, length: 1 }]); assert.equal(initialized, 1); assert.equal(records.length, 0);
+		await appendFile(file.path, record()); await reader.readNow();
+		assert.equal(records.length, 1); assert.ok(reads.slice(2).every(r => r.position >= end));
+		approved = false; reads.length = 0; await appendFile(file.path, record()); await reader.readNow();
+		assert.equal(reads.length, 0); assert.equal(records.length, 1);
+		approved = true; await writeFile(file.path, file.header); await reader.readNow();
+		assert.ok(diagnostics.some(d => d.reason === 'stream_reset')); assert.equal(records.length, 1);
+	});
+
+	test('native permission withdrawal during async verification prevents subsequent content reads', async () => {
+		const file = await session(record()); let approved = true; let withdraw = false; let reads = 0;
+		const source = registry();
+		await configure({ prospectiveOnly: true, canCaptureContent: () => approved }, {
+			...source, openConfirmedSession: async id => {
+				const opened = await source.openConfirmedSession(id); if (!opened) { return undefined; }
+				const original = opened.handle;
+				return { ...opened, verify: async () => { const valid = await opened.verify(); if (withdraw) { approved = false; } return valid; },
+					handle: { stat: () => original.stat(), close: () => original.close(),
+						read: async (buffer: Buffer, offset: number, length: number, position: number) => { reads++; return original.read(buffer, offset, length, position); }
+					} as unknown as FileHandle };
+			}
+		});
+		reads = 0; withdraw = true; await appendFile(file.path, record()); await reader.readNow();
+		// One bounded anchor integrity check can precede the await; no appended evidence is read.
+		assert.ok(reads <= 1); assert.equal(records.length, 0);
+	});
+
 	test('reads a single confirmed record and emits only safe metadata', async () => {
 		const file = await session();
 		await reader.readNow();

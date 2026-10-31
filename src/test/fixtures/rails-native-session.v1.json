@@ -1,0 +1,390 @@
+{
+  "data": {
+    "authorization_version": "assessment-ai-session.v1",
+    "connection_mode": "native_confirmed",
+    "identity_digest": "d4fce417579745764d43abacd001edf9744cbc42c40863c96cdea3b0ac543c72",
+    "authorization": {
+      "consent_version": "assessment-workflow.v1",
+      "workflow_consent_id": "1df8a078-7b3c-434c-9cd7-e01e5224b15b",
+      "coding_session_id": "282",
+      "state": "active",
+      "server_time": "2030-01-01T10:00:00.000Z",
+      "request": {
+        "intent": {
+          "workflow_consent_id": "1df8a078-7b3c-434c-9cd7-e01e5224b15b",
+          "request_id": "15d6eaf7-b7e7-4294-b8be-26ab44b9eb1c",
+          "workspace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "source": "codex",
+          "source_session_id": "d1f2641c-2742-4c0d-ae92-55501aaed42b",
+          "authorization_version": "assessment-ai-session.v1",
+          "connection_mode": "native_confirmed",
+          "approval_action": "approve_native_assessment_session",
+          "source_identity": {
+            "source_file_reference": "codex-file:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "created_at": "2030-01-01T09:00:00.000Z"
+          },
+          "identity_digest": "d4fce417579745764d43abacd001edf9744cbc42c40863c96cdea3b0ac543c72"
+        },
+        "disclosure": {
+          "local_recording_session_id": "e2782105-3ce2-4ecd-8ee7-ca6469aa02ab",
+          "upload_consent_id": "dc8de243-ba1b-4083-bd2e-e9f2497cf1f8",
+          "approved_workspace_ids": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "categories": [
+            "ai_interactions",
+            "tool_activity"
+          ],
+          "approved_source_sessions": [
+            {
+              "source": "codex",
+              "source_session_id": "d1f2641c-2742-4c0d-ae92-55501aaed42b"
+            }
+          ],
+          "request_id": "3ee946db-a205-4787-937b-684e7f139786",
+          "approval_action": "approve_recruiter_disclosure",
+          "consent_version": "assessment-disclosure.v1",
+          "audience": "job_owning_recruiter",
+          "purpose": "assessment_review"
+        },
+        "processing": {
+          "local_recording_session_id": "e2782105-3ce2-4ecd-8ee7-ca6469aa02ab",
+          "upload_consent_id": "dc8de243-ba1b-4083-bd2e-e9f2497cf1f8",
+          "approved_workspace_ids": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "categories": [
+            "ai_interactions",
+            "tool_activity"
+          ],
+          "approved_source_sessions": [
+            {
+              "source": "codex",
+              "source_session_id": "d1f2641c-2742-4c0d-ae92-55501aaed42b"
+            }
+          ],
+          "request_id": "6eb43ad8-425b-48d2-b621-e0fd6b01eb3c",
+          "approval_action": "approve_assessment_ai_processing",
+          "consent_version": "assessment-ai-processing.v2",
+          "processing_policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "purpose": "assessment_performance_evaluation",
+          "external_processing_permitted": true,
+          "retention_policy_version": "assessment-report-retention.v1",
+          "processor_scope": {
+            "backend": "direct",
+            "provider": "openai_compatible",
+            "model": "synthetic-model",
+            "origin": "https://synthetic-processor.example",
+            "configuration_digest": "524b5967d7d062b05820271a3a2cab330d2fd7cef7eb97b083c8da6beb4c80fc"
+          }
+        }
+      },
+      "confirmations": [
+        {
+          "request": {
+            "local_recording_session_id": "e2782105-3ce2-4ecd-8ee7-ca6469aa02ab",
+            "approved_workspace_ids": [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ],
+            "categories": [
+              "code_changes"
+            ],
+            "approved_source_sessions": [],
+            "request_id": "f403a55f-0eca-4502-82b3-86c9ecf953d3",
+            "approval_action": "approve_recruiter_disclosure",
+            "consent_version": "assessment-disclosure.v1",
+            "audience": "job_owning_recruiter",
+            "purpose": "assessment_review",
+            "upload_consent_id": "dc8de243-ba1b-4083-bd2e-e9f2497cf1f8"
+          },
+          "receipt": {
+            "consent_id": "6c9e9e02-99a4-4bac-8d1e-ffd7f8646648",
+            "consent_version": "assessment-disclosure.v1",
+            "audience": "job_owning_recruiter",
+            "purpose": "assessment_review",
+            "categories": [
+              "code_changes"
+            ],
+            "approved_workspace_ids": [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ],
+            "approved_source_sessions": [],
+            "upload_consent_id": "dc8de243-ba1b-4083-bd2e-e9f2497cf1f8",
+            "local_recording_session_id": "e2782105-3ce2-4ecd-8ee7-ca6469aa02ab",
+            "consented_at": "2030-01-01T10:00:00.000Z",
+            "expires_at": "2030-01-01T11:30:00.000Z",
+            "revoked_at": null,
+            "server_time": "2030-01-01T10:00:00.000Z",
+            "state": "active",
+            "upload_scope_state": "active",
+            "raw_disclosure_enabled": false,
+            "event_authorization": "capture_approval_contract_required"
+          }
+        },
+        {
+          "request": {
+            "local_recording_session_id": "e2782105-3ce2-4ecd-8ee7-ca6469aa02ab",
+            "upload_consent_id": "dc8de243-ba1b-4083-bd2e-e9f2497cf1f8",
+            "approved_workspace_ids": [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ],
+            "categories": [
+              "ai_interactions",
+              "tool_activity"
+            ],
+            "approved_source_sessions": [
+              {
+                "source": "codex",
+                "source_session_id": "d1f2641c-2742-4c0d-ae92-55501aaed42b"
+              }
+            ],
+            "request_id": "3ee946db-a205-4787-937b-684e7f139786",
+            "approval_action": "approve_recruiter_disclosure",
+            "consent_version": "assessment-disclosure.v1",
+            "audience": "job_owning_recruiter",
+            "purpose": "assessment_review"
+          },
+          "receipt": {
+            "consent_id": "4884bbec-7f5a-474e-b6b6-6ef66a3d1dce",
+            "consent_version": "assessment-disclosure.v1",
+            "audience": "job_owning_recruiter",
+            "purpose": "assessment_review",
+            "categories": [
+              "ai_interactions",
+              "tool_activity"
+            ],
+            "approved_workspace_ids": [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ],
+            "approved_source_sessions": [
+              {
+                "source": "codex",
+                "source_session_id": "d1f2641c-2742-4c0d-ae92-55501aaed42b"
+              }
+            ],
+            "upload_consent_id": "dc8de243-ba1b-4083-bd2e-e9f2497cf1f8",
+            "local_recording_session_id": "e2782105-3ce2-4ecd-8ee7-ca6469aa02ab",
+            "consented_at": "2030-01-01T10:00:00.000Z",
+            "expires_at": "2030-01-01T11:30:00.000Z",
+            "revoked_at": null,
+            "server_time": "2030-01-01T10:00:00.000Z",
+            "state": "active",
+            "upload_scope_state": "active",
+            "raw_disclosure_enabled": false,
+            "event_authorization": "capture_approval_contract_required"
+          }
+        }
+      ],
+      "status": {
+        "coding_session_id": "282",
+        "state": "active",
+        "server_time": "2030-01-01T10:00:00.000Z",
+        "started_at": "2030-01-01T10:00:00.000Z",
+        "deadline": "2030-01-01T11:30:00.000Z",
+        "local_recording_session_ids": [
+          "e2782105-3ce2-4ecd-8ee7-ca6469aa02ab"
+        ]
+      },
+      "upload": {
+        "request": {
+          "request_id": "0f8d38ac-2ca4-43ca-a8c3-402fd1e9818d",
+          "local_recording_session_id": "e2782105-3ce2-4ecd-8ee7-ca6469aa02ab",
+          "approval_action": "approve_upload",
+          "consent_version": "assessment-evidence.v1",
+          "scope": "assessment_evidence",
+          "approved_workspace_ids": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "event_types": [
+            "file.created",
+            "file.modified",
+            "file.saved",
+            "file.deleted",
+            "file.diff",
+            "file.baseline",
+            "file.gap",
+            "ai.prompt.submitted",
+            "ai.response.completed",
+            "ai.tool.started",
+            "ai.tool.completed",
+            "ai.tool.failed",
+            "ai.tool.incomplete",
+            "ai.session.started",
+            "ai.session.ended",
+            "activity.relationship.created",
+            "activity.relationship.updated"
+          ]
+        },
+        "receipt": {
+          "consent_id": "dc8de243-ba1b-4083-bd2e-e9f2497cf1f8",
+          "consent_version": "assessment-evidence.v1",
+          "scope": "assessment_evidence",
+          "event_types": [
+            "activity.relationship.created",
+            "activity.relationship.updated",
+            "ai.prompt.submitted",
+            "ai.response.completed",
+            "ai.session.ended",
+            "ai.session.started",
+            "ai.tool.completed",
+            "ai.tool.failed",
+            "ai.tool.incomplete",
+            "ai.tool.started",
+            "file.baseline",
+            "file.created",
+            "file.deleted",
+            "file.diff",
+            "file.gap",
+            "file.modified",
+            "file.saved"
+          ],
+          "destination_origin": "https://assessment.example.test",
+          "local_recording_session_id": "e2782105-3ce2-4ecd-8ee7-ca6469aa02ab",
+          "approved_workspace_ids": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "consented_at": "2030-01-01T10:00:00.000Z",
+          "expires_at": "2030-01-01T11:30:00.000Z",
+          "server_time": "2030-01-01T10:00:00.000Z",
+          "state": "active",
+          "evidence_window": {
+            "starts_at": "2030-01-01T10:00:00.000Z",
+            "ends_at": "2030-01-01T11:30:00.000Z"
+          },
+          "upload_authorized": false,
+          "privacy_authorization": "unverified"
+        }
+      },
+      "disclosure": {
+        "request": {
+          "local_recording_session_id": "e2782105-3ce2-4ecd-8ee7-ca6469aa02ab",
+          "upload_consent_id": "dc8de243-ba1b-4083-bd2e-e9f2497cf1f8",
+          "approved_workspace_ids": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "categories": [
+            "ai_interactions",
+            "tool_activity"
+          ],
+          "approved_source_sessions": [
+            {
+              "source": "codex",
+              "source_session_id": "d1f2641c-2742-4c0d-ae92-55501aaed42b"
+            }
+          ],
+          "request_id": "3ee946db-a205-4787-937b-684e7f139786",
+          "approval_action": "approve_recruiter_disclosure",
+          "consent_version": "assessment-disclosure.v1",
+          "audience": "job_owning_recruiter",
+          "purpose": "assessment_review"
+        },
+        "receipt": {
+          "consent_id": "4884bbec-7f5a-474e-b6b6-6ef66a3d1dce",
+          "consent_version": "assessment-disclosure.v1",
+          "audience": "job_owning_recruiter",
+          "purpose": "assessment_review",
+          "categories": [
+            "ai_interactions",
+            "tool_activity"
+          ],
+          "approved_workspace_ids": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "approved_source_sessions": [
+            {
+              "source": "codex",
+              "source_session_id": "d1f2641c-2742-4c0d-ae92-55501aaed42b"
+            }
+          ],
+          "upload_consent_id": "dc8de243-ba1b-4083-bd2e-e9f2497cf1f8",
+          "local_recording_session_id": "e2782105-3ce2-4ecd-8ee7-ca6469aa02ab",
+          "consented_at": "2030-01-01T10:00:00.000Z",
+          "expires_at": "2030-01-01T11:30:00.000Z",
+          "revoked_at": null,
+          "server_time": "2030-01-01T10:00:00.000Z",
+          "state": "active",
+          "upload_scope_state": "active",
+          "raw_disclosure_enabled": false,
+          "event_authorization": "capture_approval_contract_required"
+        }
+      },
+      "processing": {
+        "request": {
+          "local_recording_session_id": "e2782105-3ce2-4ecd-8ee7-ca6469aa02ab",
+          "upload_consent_id": "dc8de243-ba1b-4083-bd2e-e9f2497cf1f8",
+          "approved_workspace_ids": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "categories": [
+            "ai_interactions",
+            "tool_activity"
+          ],
+          "approved_source_sessions": [
+            {
+              "source": "codex",
+              "source_session_id": "d1f2641c-2742-4c0d-ae92-55501aaed42b"
+            }
+          ],
+          "request_id": "6eb43ad8-425b-48d2-b621-e0fd6b01eb3c",
+          "approval_action": "approve_assessment_ai_processing",
+          "consent_version": "assessment-ai-processing.v2",
+          "processing_policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "purpose": "assessment_performance_evaluation",
+          "external_processing_permitted": true,
+          "retention_policy_version": "assessment-report-retention.v1",
+          "processor_scope": {
+            "backend": "direct",
+            "provider": "openai_compatible",
+            "model": "synthetic-model",
+            "origin": "https://synthetic-processor.example",
+            "configuration_digest": "524b5967d7d062b05820271a3a2cab330d2fd7cef7eb97b083c8da6beb4c80fc"
+          }
+        },
+        "receipt": {
+          "consent_id": "3cc2df13-2a24-497c-aa49-f74f844b1f39",
+          "consent_version": "assessment-ai-processing.v2",
+          "purpose": "assessment_performance_evaluation",
+          "external_processing_permitted": true,
+          "processor_scope": {
+            "backend": "direct",
+            "provider": "openai_compatible",
+            "model": "synthetic-model",
+            "origin": "https://synthetic-processor.example",
+            "configuration_digest": "524b5967d7d062b05820271a3a2cab330d2fd7cef7eb97b083c8da6beb4c80fc"
+          },
+          "categories": [
+            "ai_interactions",
+            "tool_activity"
+          ],
+          "approved_workspace_ids": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "approved_source_sessions": [
+            {
+              "source": "codex",
+              "source_session_id": "d1f2641c-2742-4c0d-ae92-55501aaed42b"
+            }
+          ],
+          "retention_policy_version": "assessment-report-retention.v1",
+          "local_recording_session_id": "e2782105-3ce2-4ecd-8ee7-ca6469aa02ab",
+          "upload_consent_id": "dc8de243-ba1b-4083-bd2e-e9f2497cf1f8",
+          "consented_at": "2030-01-01T10:00:00.000Z",
+          "capture_until": "2030-01-01T11:30:00.000Z",
+          "expires_at": "2030-01-02T10:00:00.000Z",
+          "revoked_at": null,
+          "processing_policy_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "external_processing_enabled": false,
+          "limitations": {
+            "retention_policy_version": "assessment-report-retention.v1",
+            "prepared_input_persistence": "none",
+            "external_processing_enabled": false,
+            "provider_retention": "operator_approved_no_training",
+            "withdrawal": "blocks_undispatched_requests",
+            "existing_report_policy": "retain_until_expiry"
+          },
+          "state": "preparation_only"
+        }
+      }
+    }
+  }
+}

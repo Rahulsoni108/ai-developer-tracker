@@ -30,6 +30,10 @@ export interface CodexReaderDiagnostic {
 	recordIndex?: number;
 }
 export interface CodexReaderOptions {
+	/** Explicit native connection: skip all earlier bytes; never replay on reset. */
+	prospectiveOnly?: boolean;
+	initialGeneration?: number;
+	onInitialized?: (registration: Readonly<CodexSessionRegistration>) => void;
 	pollIntervalMs?: number;
 	chunkBytes?: number;
 	maxRecordBytes?: number;
@@ -91,7 +95,7 @@ function safeTimestamp(value: unknown): string | undefined {
 
 export class CodexJsonlReader implements RecordingLifecycle {
 	private readonly lifecycle: { dispose(): void };
-	private readonly limits: Required<Omit<CodexReaderOptions, 'onRecord' | 'onDiagnostic' | 'canCaptureContent' | 'onSourceRecord'>>;
+	private readonly limits: Required<Omit<CodexReaderOptions, 'onRecord' | 'onDiagnostic' | 'canCaptureContent' | 'onSourceRecord' | 'prospectiveOnly' | 'initialGeneration' | 'onInitialized'>>;
 	private run: Run | undefined;
 	private timer: ReturnType<typeof setInterval> | undefined;
 	private pending: Promise<void> = Promise.resolve();
@@ -103,6 +107,7 @@ export class CodexJsonlReader implements RecordingLifecycle {
 		private readonly discovery: DiscoveryRegistry,
 		private readonly options: CodexReaderOptions = {}
 	) {
+		if (options.initialGeneration !== undefined && (!Number.isSafeInteger(options.initialGeneration) || options.initialGeneration < 0 || options.initialGeneration > 1000000)) { throw new Error('Invalid reader generation'); }
 		this.limits = {
 			pollIntervalMs: options.pollIntervalMs ?? 1000, chunkBytes: options.chunkBytes ?? 16384,
 			maxRecordBytes: options.maxRecordBytes ?? 262144, maxBufferedBytes: options.maxBufferedBytes ?? 2097152,
@@ -173,7 +178,7 @@ export class CodexJsonlReader implements RecordingLifecycle {
 	private newCursor(entry: CodexSessionRegistration): Cursor {
 		return { sourceFileId: entry.sourceFileId, sourceSessionId: entry.sourceSessionId!,
 			offset: 0, recordIndex: 0, partial: Buffer.alloc(0), dropping: false,
-			anchorLength: 0, lineStartOffset: 0, generation: 0, diagnostics: new Set() };
+			anchorLength: 0, lineStartOffset: 0, generation: this.options.initialGeneration ?? 0, diagnostics: new Set() };
 	}
 
 	private async tick(run: Run): Promise<void> {
@@ -207,13 +212,29 @@ export class CodexJsonlReader implements RecordingLifecycle {
 		const file = await this.discovery.openConfirmedSession(cursor.sourceFileId);
 		if (!file) { this.diagnostic(run, 'file_unavailable', cursor, true); return 0; }
 		const buffer = Buffer.alloc(this.limits.chunkBytes);
+		const contentAllowed = () => !this.options.prospectiveOnly || !!this.options.canCaptureContent?.(file.registration);
 		let consumed = 0;
 		try {
 			if (!this.authorized(run, cursor) || !file.isCurrent()) { return 0; }
+			if (this.options.prospectiveOnly && !this.options.canCaptureContent?.(file.registration)) { return 0; }
 			const stat = await file.handle.stat();
 			if (!this.authorized(run, cursor) || !file.isCurrent()) { return 0; }
 			cursor.diagnostics.delete('file_unavailable');
 			const identity = stat.dev + ':' + stat.ino + ':' + stat.birthtimeMs;
+			if (this.options.prospectiveOnly && cursor.fileIdentity === undefined) {
+				if (!this.options.canCaptureContent?.(file.registration) || !await file.verify() || !this.authorized(run, cursor)) { return 0; }
+				const delimiter = Buffer.alloc(1);
+				try {
+					if (!contentAllowed()) { return 0; }
+					if (stat.size && (await file.handle.read(delimiter, 0, 1, stat.size - 1)).bytesRead !== 1) { throw new Error('Reader boundary unavailable'); }
+					if (!file.isCurrent() || !await file.verify() || !this.authorized(run, cursor) || !contentAllowed()) { return 0; }
+					cursor.offset = stat.size; cursor.lineStartOffset = stat.size; cursor.dropping = stat.size > 0 && delimiter[0] !== 10;
+					cursor.fileIdentity = identity; cursor.lastSize = stat.size; cursor.lastMtime = stat.mtimeMs;
+					cursor.anchorLength = stat.size ? 1 : 0; cursor.anchorHash = stat.size ? digest(delimiter) : undefined;
+					this.options.onInitialized?.(Object.freeze({ ...file.registration }));
+				} finally { delimiter.fill(0); }
+				return 0;
+			}
 			let reset = (cursor.fileIdentity !== undefined && cursor.fileIdentity !== identity)
 				|| stat.size < cursor.offset || (cursor.lastSize !== undefined && stat.size < cursor.lastSize)
 				|| (cursor.lastSize === stat.size && cursor.lastMtime !== stat.mtimeMs);
@@ -221,13 +242,14 @@ export class CodexJsonlReader implements RecordingLifecycle {
 			if (!reset && cursor.anchorHash) {
 				const anchor = Buffer.alloc(cursor.anchorLength);
 				try {
-					if (!this.authorized(run, cursor) || !file.isCurrent()) { return 0; }
+					if (!this.authorized(run, cursor) || !file.isCurrent() || !contentAllowed()) { return 0; }
 					const result = await file.handle.read(anchor, 0, anchor.length, cursor.offset - anchor.length);
 					if (!this.authorized(run, cursor) || !file.isCurrent()) { return 0; }
 					reset = result.bytesRead !== anchor.length || digest(anchor) !== cursor.anchorHash;
 				} finally { anchor.fill(0); }
 			}
 			if (reset) {
+				if (this.options.prospectiveOnly) { this.diagnostic(run, 'stream_reset', cursor, true); return 0; }
 				if (!await this.discovery.revalidateConfirmedSession(cursor.sourceFileId)
 					|| !this.authorized(run, cursor) || !file.isCurrent() || !await file.verify()) { return 0; }
 				this.clearPartial(run, cursor); cursor.dropping = false; cursor.offset = 0;
@@ -237,11 +259,12 @@ export class CodexJsonlReader implements RecordingLifecycle {
 			}
 			// Snapshot EOF: continuous appenders cannot monopolize one tick.
 			const end = stat.size;
-			while (consumed < budget && cursor.offset < end && this.authorized(run, cursor) && file.isCurrent()) {
-				if (!await file.verify() || !this.authorized(run, cursor)) { break; }
+			while (consumed < budget && cursor.offset < end && this.authorized(run, cursor) && file.isCurrent()
+				&& (!this.options.prospectiveOnly || this.options.canCaptureContent?.(file.registration))) {
+				if (!await file.verify() || !this.authorized(run, cursor) || !contentAllowed()) { break; }
 				const length = Math.min(buffer.length, budget - consumed, end - cursor.offset);
 				const result = await file.handle.read(buffer, 0, length, cursor.offset);
-				if (!this.authorized(run, cursor) || !file.isCurrent() || !await file.verify()) { break; }
+				if (!this.authorized(run, cursor) || !file.isCurrent() || !await file.verify() || !contentAllowed()) { break; }
 				if (!result.bytesRead) { break; }
 				const bytes = buffer.subarray(0, result.bytesRead);
 				cursor.offset += bytes.length; consumed += bytes.length;

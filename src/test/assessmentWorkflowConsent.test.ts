@@ -1,6 +1,6 @@
 import * as assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile, appendFile, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { canonicalSha256 } from '../canonicalJson';
@@ -10,9 +10,11 @@ import { AssessmentConnectionStore } from '../assessmentStorage';
 import { AssessmentWorkflowConsent, createWorkflowBundle } from '../assessmentWorkflowConsent';
 import { RailsWorkflowConsentClient } from '../railsWorkflowConsentClient';
 import { validWorkflowStartBundle, validWorkflowSourceBundle, type WorkflowPolicy } from '../assessmentWorkflowContract';
+import { validNativeSourceBundle, nativeIdentityDigest, NATIVE_SESSION_VERSION } from '../assessmentNativeSession';
 import { PROCESSING_DISPATCH_LIMITATIONS } from '../processorPolicy';
+import { NativeCodexCapture } from '../nativeCodexCapture';
 import { EventPersistence } from '../eventPersistence';
-import { createFileEvent } from '../eventSchema';
+import { createFileEvent, createCodexEvent } from '../eventSchema';
 import { openTestWorkerQueue } from './queueTestKeys';
 import type { AsyncLocalEventQueue } from '../asyncLocalEventQueue';
 import type { AssessmentApiClient, AssessmentAuthentication, AssessmentServerStatus } from '../assessmentApiClient';
@@ -45,6 +47,7 @@ suite('Explicit workflow consent integration', () => {
  let disclosures: { request: DisclosureRequest; receipt: Record<string,unknown> }[];
  let processing: Map<string,{ request: ProcessingRequest; receipt: Record<string,unknown> }>;
  let workspaceIds: string[]; let mutation: ((value: unknown) => unknown) | undefined;
+ let nativeSupported: boolean; let nativeSources: { sourceSessionId: string; workspaceId: string }[];
  const json = (data: unknown) => ({ status: 200, headers: {}, contentType: 'application/json', body: JSON.stringify({ data: mutation ? mutation(data) : data }) });
  function response(bundle: WorkflowStartBundle | WorkflowSourceBundle) {
   const localId = 'upload' in bundle ? bundle.intent.local_recording_session_id : bundle.disclosure.local_recording_session_id;
@@ -82,11 +85,16 @@ suite('Explicit workflow consent integration', () => {
   if (path === fail) { throw new Error('Synthetic network failure'); }
   const body = request.body ? JSON.parse(request.body) : {};
   if (path === 'policy') { assert.equal(request.method, 'GET'); return json(policy()); }
+  if (path === 'session_capabilities') { return nativeSupported ? json({ authorization_version: NATIVE_SESSION_VERSION, coding_session_id: '42', server_time: START,
+   modes: { extension_launched: ['codex','claude'], native_confirmed: ['codex'] }, requires_explicit_confirmation: true, prospective_only: true })
+   : { status: 404, headers: {}, contentType: 'application/json', body: '{"error":"Unavailable"}' }; }
   if (path === 'start') {
    assert.ok(validWorkflowStartBundle(body)); initial = body; addScopes(body); status = { ...status, state: 'active', startedAt: START, deadline: END, localRecordingSessionIds: [...status.localRecordingSessionIds, body.intent.local_recording_session_id] };
    return json(response(body));
   }
   if (path === 'sources') { assert.ok(validWorkflowSourceBundle(body)); addScopes(body); return json(response(body)); }
+  if (path === 'native_sources') { assert.ok(validNativeSourceBundle(body)); assert.equal(nativeIdentityDigest('42', body), body.intent.identity_digest); addScopes(body);
+   return json({ authorization_version: NATIVE_SESSION_VERSION, connection_mode: 'native_confirmed', identity_digest: body.intent.identity_digest, authorization: response(body) }); }
   if (path === 'status') { assert.deepEqual(body, { workflow_consent_id: initial!.intent.request_id }); return json(response(initial!)); }
   if (request.method === 'DELETE') {
    revoked = true; for (const d of disclosures) { d.receipt.state = 'revoked'; d.receipt.revoked_at = START; d.receipt.upload_scope_state = 'revoked'; }
@@ -95,14 +103,14 @@ suite('Explicit workflow consent integration', () => {
   throw new Error('Unexpected synthetic route');
  } };
  setup(async () => {
-  root = await mkdtemp(join(tmpdir(), 'workflow-')); queue = await openTestWorkerQueue({ scheme: 'file', fsPath: root }, []);
+  root = await realpath(await mkdtemp(join(tmpdir(), 'workflow-'))); queue = await openTestWorkerQueue({ scheme: 'file', fsPath: root }, []);
   secrets = new Map(); memory = new Map(); accepted = true; dialogs = 0; oldUploadDialogs = 0; requests = []; initial = undefined;
-  uploadId = randomUUID(); revoked = false; windowsClosed = false; disclosures = []; processing = new Map(); workspaceIds = [W]; mutation = undefined; fail = undefined;
+  uploadId = randomUUID(); revoked = false; windowsClosed = false; disclosures = []; processing = new Map(); workspaceIds = [W]; mutation = undefined; fail = undefined; nativeSupported = false; nativeSources = [];
   auth = { connection: { mode: 'rails', apiOrigin: origin, codingSessionId: '42', uploadEndpoint: origin + '/api/v2/coding_session/extension/events', credentialExpiresAt: END }, credential: 'adt_ext_' + 'a'.repeat(43) };
   status = { codingSessionId: '42', state: 'paired', serverTime: START, localRecordingSessionIds: [] };
   recording = new RecordingController({ text: '', tooltip: '', command: '', show() {}, dispose() {} }, current => workflow.confirmRecording(current));
   writer = new EventPersistence(queue, { write: async () => {}, flush: async () => {} });
-  writer.attachRecording(recording, () => ({ approvedWorkspaceIds: [W], confirmedCodexSessions: [], codexContentConsent: false }));
+  writer.attachRecording(recording, () => ({ approvedWorkspaceIds: [W], confirmedCodexSessions: nativeSources, codexContentConsent: nativeSources.length > 0 }));
   workflow = new AssessmentWorkflowConsent(recording, queue, { get: async key => secrets.get(key), store: async (key,value) => { secrets.set(key,value); } },
    new RailsWorkflowConsentClient(transport), () => workspaceIds, async notice => { dialogs++; assert.ok(notice.includes('Synthetic Processor')); return accepted; }, async () => {});
   const api: AssessmentApiClient = { mode: 'rails', pair: async () => ({ ...auth, status }), getStatus: async () => status,
@@ -178,6 +186,72 @@ suite('Explicit workflow consent integration', () => {
   assert.equal(requests.filter(p => p === 'sources').length, 1);
   const states = await queue.getDisclosureConsents(recording.sessionId!); assert.equal(states.length, 2);
   assert.ok(states.every(s => s.workflowConsentId === initial!.intent.request_id));
+ });
+ test('native capability does not reinterpret an old grant or issue authorization without exact confirmation', async () => {
+  await controller.start(); const identity = { sourceSessionId: randomUUID(), workspaceId: W, sourceFileReference: 'codex-file:' + 'c'.repeat(64), createdAt: START };
+  let confirmations = 0;
+  await assert.rejects(workflow.enrollNative(identity, async () => { confirmations++; return true; })); assert.equal(confirmations, 0);
+  nativeSupported = true; assert.equal(await workflow.enrollNative(identity, async () => { confirmations++; return false; }), undefined);
+  assert.equal(confirmations, 1); assert.equal(disclosures.length, 1); assert.equal(requests.includes('native_sources'), false);
+ });
+ test('a newly confirmed native source receives durable protocol-2 approvals without modifying the parent or prior events', async () => {
+  await controller.start(); const parent = structuredClone(initial); nativeSupported = true;
+  const sourceId = randomUUID(); const identity = { sourceSessionId: sourceId, workspaceId: W, sourceFileReference: 'codex-file:' + 'c'.repeat(64), createdAt: START };
+  const nativeAt = await workflow.enrollNative(identity, async notice => { assert.match(notice, /separately approves/); return true; }); assert.equal(nativeAt, START);
+  assert.deepEqual(initial, parent); assert.equal(disclosures.length, 2); assert.equal(processing.size, 2);
+  nativeSources = [{ sourceSessionId: sourceId, workspaceId: W }];
+  const event = createCodexEvent({ sessionId: recording.sessionId!, workspaceId: W, sourceSessionId: sourceId, eventType: 'ai.prompt.submitted', timestamp: new Date(START),
+   payload: { text: 'Synthetic native assessment prompt', sourceRecord: { sourceFileReference: identity.sourceFileReference, recordIndex: 1, generation: 0, byteOffset: 5000, byteLength: 128, recordType: 'event_msg' } } });
+  await writer.write(event);
+  const proof = await queue.getAssessmentUploadContext(event, { codingSessionId: '42', origin, consentReceiptId: uploadId, serverTime: START });
+  assert.equal(proof?.assessmentEventApproval?.approvalProtocolVersion, 2); assert.equal((await queue.getPending(10))[0].eventId, event.eventId);
+ });
+ test('native authorization retries preserve original explicit requests and never authorize a different identity', async () => {
+  await controller.start(); nativeSupported = true;
+  const identity = { sourceSessionId: randomUUID(), workspaceId: W, sourceFileReference: 'codex-file:' + 'c'.repeat(64), createdAt: START };
+  fail = 'native_sources'; await assert.rejects(workflow.enrollNative(identity, async () => true));
+  const entry = [...secrets.entries()].find(([key]) => key.includes('.native.codex.'))!; assert.ok(entry); assert.equal(disclosures.length, 1);
+  fail = undefined; await workflow.enrollNative(identity, async () => true); assert.equal(secrets.get(entry[0]), entry[1]);
+  await assert.rejects(workflow.enrollNative({ ...identity, sourceFileReference: 'codex-file:' + 'd'.repeat(64) }, async () => true));
+  assert.equal(disclosures.length, 2);
+ });
+ test('native reader sends only future sanitized events into encrypted storage with durable protocol-2 approval', async () => {
+  nativeSupported = true; await controller.start();
+  const workspace = join(root, 'workspace'); const sessions = join(root, 'provider-sessions'); await mkdir(workspace); await mkdir(sessions);
+  const id = randomUUID(); const file = join(sessions, id + '.jsonl'); const createdAt = new Date(Date.now() - 10000).toISOString();
+  const line = (text: string) => JSON.stringify({ type: 'event_msg', timestamp: START, payload: { type: 'user_message', message: text } }) + '\n';
+  await writeFile(file, JSON.stringify({ type: 'session_meta', payload: { id, cwd: workspace, timestamp: createdAt } }) + '\n' + line('PRIVATE old history'));
+  const native = new NativeCodexCapture(recording, writer, workflow, () => {});
+  try {
+   assert.equal(await native.connect(file, sessions, [{ path: workspace, workspaceId: W }], async () => true), true);
+   nativeSources = native.getApprovals(recording.sessionId!);
+   const secret = 'sk-' + 'x'.repeat(32); await appendFile(file, line('Synthetic new prompt token ' + secret));
+   const timeout = Date.now() + 5000;
+   while (await queue.getPendingCount() === 0 && Date.now() < timeout) { await new Promise(resolve => setTimeout(resolve, 20)); }
+   await native.flush(); await writer.flush();
+   const pending = await queue.getPending(10); assert.equal(pending.length, 1);
+   const event = pending[0]; assert.equal(event.eventType, 'ai.prompt.submitted');
+   assert.equal(JSON.stringify(event).includes(secret), false); assert.equal(JSON.stringify(event).includes('PRIVATE old history'), false);
+   const proof = await queue.getAssessmentUploadContext(event, { codingSessionId: '42', origin, consentReceiptId: uploadId, serverTime: START });
+   assert.equal(proof?.assessmentEventApproval?.approvalProtocolVersion, 2);
+   assert.equal(proof?.assessmentEventApproval?.eventId, event.eventId);
+   const states = await queue.getDisclosureConsents(recording.sessionId!);
+   recording.stop(); await native.dispose(); await writer.flush();
+   await queue.close(); queue = await openTestWorkerQueue({ scheme: 'file', fsPath: root }, []);
+   const restored = await queue.getPending(10); assert.deepEqual(restored, pending);
+   assert.equal(await queue.getAssessmentUploadContext(event, { codingSessionId: '42', origin, consentReceiptId: uploadId, serverTime: START }), undefined);
+   // Simulate a fresh validated server observation, never trust the persisted receipt alone.
+   for (const state of states) { await queue.confirmDisclosureConsent({ state, requestedAt: process.hrtime.bigint() }); }
+   assert.ok(await queue.getAssessmentUploadContext(event, { codingSessionId: '42', origin, consentReceiptId: uploadId, serverTime: START }));
+   assert.equal(native.getApprovals(event.sessionId).length, 0);
+  } finally { await native.dispose(); }
+ });
+ test('native-only capability permits preflight without a CLI but does not create a source grant', async () => {
+  nativeSupported = true;
+  const nativeOnly = new AssessmentWorkflowConsent(recording, queue, { get: async key => secrets.get(key), store: async (key,value) => { secrets.set(key,value); } },
+   new RailsWorkflowConsentClient(transport), () => [W], async () => true, async () => {}, () => {}, async () => []);
+  try { await nativeOnly.prepare(auth, AbortSignal.timeout(1000)); assert.equal(initial, undefined); assert.equal(disclosures.length, 0); }
+  finally { nativeOnly.dispose(); }
  });
  test('invalid receipts never activate local recording or fabricate approval', async () => {
   mutation = value => { if (value && typeof value === 'object' && 'workflow_consent_id' in value) { return { ...value, workflow_consent_id: randomUUID() }; } return value; };

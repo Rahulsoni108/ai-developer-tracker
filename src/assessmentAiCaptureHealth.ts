@@ -3,7 +3,7 @@ import type { TrackerEvent } from './eventSchema';
 
 export const AI_CAPTURE_STATUS_COMMAND = 'ai-developer-tracker.showAssessmentAiCaptureStatus';
 export const CONNECT_AI_CHAT_COMMAND = 'ai-developer-tracker.connectCurrentAiChat';
-export const NATIVE_CHAT_CONTRACT_BLOCKER = 'Native AI chat connection is unavailable under the current Rails assessment-workflow.v1 policy (extension_launched_only). Recording consent and a workspace match cannot authorize a native conversation. Rails must explicitly support verified native-session enrollment before it can be connected. The optional Launch Assessment AI Session command remains available; it does not connect your existing native chat.';
+export const NATIVE_CHAT_CONTRACT_BLOCKER = 'This Rails server has not advertised the supported assessment-ai-session.v1 native capability. Its assessment-workflow.v1 policy (extension_launched_only) remains restricted. Recording consent and a workspace match cannot authorize a native conversation. Rails must explicitly support verified native-session enrollment before it can be connected. The optional Launch Assessment AI Session command remains available; it does not connect your existing native chat.';
 export function stopAssessmentCaptureForWorkspaceChange(recording: RecordingController, isAssessment: (id: string) => boolean): boolean {
 	if (!recording.isRecording || !recording.sessionId || !isAssessment(recording.sessionId)) { return false; }
 	recording.stop(); return true;
@@ -42,6 +42,7 @@ export class AssessmentAiCaptureHealth {
 	}
 	private get active(): boolean { return !!this.recordingId && this.recording.isRecording && this.recording.sessionId === this.recordingId && this.isAssessment(this.recordingId); }
 	initializing(provider: Provider): void { if (this.active && !this.readers.has(provider)) { this.readers.set(provider, 'initializing'); this.changed(); } }
+	cancelInitializing(provider: Provider): void { if (this.readers.get(provider) === 'initializing') { this.readers.delete(provider); this.changed(); } }
 	/** Called only after the adapter has verified its source, authorization and actual reader initialization. */
 	readerReady(provider: Provider, sourceIds: readonly string[]): void {
 		if (!this.active || !sourceIds.length) { return; }
