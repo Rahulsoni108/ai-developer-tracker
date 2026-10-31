@@ -3,13 +3,14 @@ import * as assert from 'node:assert/strict';
 import * as vscode from 'vscode';
 import { ARCHIVE_ASSESSMENT_COMMAND, ASSESSMENT_STATUS_COMMAND, PAIR_ASSESSMENT_COMMAND, START_ASSESSMENT_COMMAND, SUBMIT_ASSESSMENT_COMMAND, formatAssessmentStatus } from '../assessmentCommands';
 import type { AssessmentView } from '../assessmentController';
+import { AI_CAPTURE_STATUS_COMMAND, CONNECT_AI_CHAT_COMMAND } from '../assessmentAiCaptureHealth';
 
 suite('Assessment VS Code commands', () => {
 	test('registers assessment and archive commands and defaults to an unpaired non-recording state without a backend', async function () {
 		this.timeout(15000); const view = await vscode.commands.executeCommand<AssessmentView>(ASSESSMENT_STATUS_COMMAND);
 		assert.equal(view!.state, 'unpaired'); assert.equal(view!.uploadConsent, false);
 		const commands = await vscode.commands.getCommands();
-		for (const command of [GRANT_DISCLOSURE_COMMAND, STATUS_DISCLOSURE_COMMAND, REVOKE_DISCLOSURE_COMMAND, ARCHIVE_ASSESSMENT_COMMAND, ASSESSMENT_STATUS_COMMAND, PAIR_ASSESSMENT_COMMAND, START_ASSESSMENT_COMMAND, SUBMIT_ASSESSMENT_COMMAND]) { assert.ok(commands.includes(command)); }
+		for (const command of [AI_CAPTURE_STATUS_COMMAND, CONNECT_AI_CHAT_COMMAND, GRANT_DISCLOSURE_COMMAND, STATUS_DISCLOSURE_COMMAND, REVOKE_DISCLOSURE_COMMAND, ARCHIVE_ASSESSMENT_COMMAND, ASSESSMENT_STATUS_COMMAND, PAIR_ASSESSMENT_COMMAND, START_ASSESSMENT_COMMAND, SUBMIT_ASSESSMENT_COMMAND]) { assert.ok(commands.includes(command)); }
 	});
 	test('recording palette commands explicitly distinguish manual recording and stopping without submission', () => {
 		const extension = vscode.extensions.all.find(candidate => candidate.packageJSON.name === 'ai-developer-tracker'); assert.ok(extension);

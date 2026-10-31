@@ -44,6 +44,10 @@ export class ManagedCodexCapture {
   const admitted = new Map<string, { timestamp: string; offset: number }>(); const requested = new Set<string>(); let capture!: Capture;
   const discovery = new CodexSessionDiscovery(this.recording, () => [{ workspaceId, path: root }], {
    sessionsDirectory: sessions, pollIntervalMs: 1000, maxRegistryEntries: 64, maxEntriesPerScan: 128,
+   onDiagnostic: () => {
+    admitted.clear(); capture?.admitted.clear();
+    if (!failureWarned) { failureWarned = true; this.notice('unavailable'); }
+   },
    onCandidatesChanged: candidates => {
     for (const candidate of candidates) {
      if (!candidate.sourceSessionId || candidate.workspaceId !== workspaceId || requested.has(candidate.sourceFileId) || generation !== this.generation) { continue; }
@@ -58,8 +62,8 @@ export class ManagedCodexCapture {
       let offset: number;
       try { offset = (await opened.handle.stat()).size; } finally { await opened.handle.close(); }
       if (generation !== this.generation || !this.workflow.permits(id, 'codex')) { return; }
-      admitted.set(candidate.sourceFileId, { timestamp: startsAt, offset }); capture.admitted.add(candidate.sourceFileId);
-      capture.parser.grantContentConsent(id); await capture.reader.readNow(); this.notice('ready');
+      admitted.set(candidate.sourceFileId, { timestamp: startsAt, offset });
+      capture.parser.grantContentConsent(id); await capture.reader.readNow();
      })().catch(() => { if (!failureWarned) { failureWarned = true; this.notice('unavailable'); } });
     }
    }
@@ -73,6 +77,16 @@ export class ManagedCodexCapture {
   });
   const reader = new CodexJsonlReader(this.recording, discovery, {
    canCaptureContent: registration => this.workflow.permits(id, 'codex') && admitted.has(registration.sourceFileId) && parser.canCapture(registration),
+   onRecord: metadata => {
+    if (metadata.eventType !== 'session_meta' || generation !== this.generation || !this.workflow.permits(id, 'codex')) { return; }
+    const entry = discovery.getRegistry().find(s => s.sourceSessionId === metadata.sourceSessionId && s.status === 'confirmed' && admitted.has(s.sourceFileId));
+    if (entry && !capture.admitted.has(entry.sourceFileId)) { capture.admitted.add(entry.sourceFileId); this.notice('ready'); }
+   },
+   onDiagnostic: diagnostic => {
+    const entries = discovery.getRegistry().filter(s => !diagnostic.sourceSessionId || s.sourceSessionId === diagnostic.sourceSessionId);
+    for (const entry of entries) { admitted.delete(entry.sourceFileId); capture.admitted.delete(entry.sourceFileId); }
+    if (!failureWarned) { failureWarned = true; this.notice('unavailable'); }
+   },
    onSourceRecord: (record, context) => {
     const startsAt = admitted.get(context.sourceFileId);
     const timestamp = record && typeof record === 'object' ? (record as { timestamp?: unknown }).timestamp : undefined;

@@ -23,6 +23,8 @@ The permissions remain independent. Each purpose has an explicit request and its
 8. **Stop & Submit Assessment** stops new capture, drains admitted checkpoints, completes/seals local sessions, closes server capture windows, uploads only approved evidence and finalizes through the unchanged reconciliation contract. Success still requires a verified Rails submission receipt.
 9. The recruiter can use the existing evaluation controls after submission. This feature grants eligible processing scope; it does not automatically call an LLM or fabricate a report. Rails evaluation/processor enablement and sufficient retained evidence are still required.
 
+For early confirmation, use **Show Assessment AI Capture Status**. The status bar distinguishes reader initialization from observed prompt/response persistence, and warns during recording if no messages have been observed. **Connect Current AI Chat** explains current native support: the server advertises launched-only scope, so native attachment remains unavailable rather than silently broadening consent. See [E5.1 investigation and prerequisites](native-ai-chat-assessments.md).
+
 ## Wire contract
 
 All new paths are under `/api/v2/coding_session/extension/workflow_consents`, require HTTPS and the existing paired Bearer credential, and use `{data: ...}` control responses:

@@ -1,6 +1,6 @@
 # AI-Assisted Developer Assessment — Session Handoff
 
-Last updated: 2026-10-30, Asia/Kolkata.
+Last updated: 2026-10-31, Asia/Kolkata.
 
 This is a consolidated engineering handoff of the long conversation, not a verbatim transcript. It includes historical user-reported milestones, current repository findings, decisions, validation and remaining work. Treat current source and exact API documentation as authoritative when they differ from older phase descriptions. No credentials, environment values, raw candidate conversations, source-code evidence or private keys are included.
 
@@ -12,7 +12,7 @@ The user approved implementation in separately validated increments. The impleme
 
 The current implementation adds a Rails `assessment-workflow.v1` contract and matching extension UX, including tracker-launched Codex/Claude sessions. It does not authorize arbitrary chats discovered merely by matching a workspace or timestamp. Native/unverified chats remain excluded.
 
-Most recent user request: create this context file so another AI model can continue with the full project context.
+Subsequent user request: E5.1 native Codex/Claude assessment capture. Its current delivery boundary and blocker are recorded at the end of this handoff.
 
 ## 2. Working preferences and constraints
 
@@ -439,3 +439,15 @@ Read this handoff, then inspect current Git status and the specific current user
 Before any security/contract change, read exact Rails and TypeScript validators/tests on both sides. Never infer missing fields from a phase name. Keep requests explicit and immutable, preserve original IDs and server timing, and prove fail-closed behavior with relevant synthetic tests.
 
 When reporting completion, distinguish automated validation from live manual verification, and user-reported historical outcomes from fresh inspection. Preserve all unrelated local changes, commit verified work locally, and do not push.
+
+## 17. Subsequent protocol fix and E5.1 boundary (2026-10-31)
+
+User reported `rails_start; code: protocol`. Extension commit `01d7438` fixes a reproduced contract bug: Rails serializes the same disclosure receipt independently in the primary result and confirmations, with slightly different `server_time` values. The client previously compared the entire receipts for equality. It now validates both timestamps separately and compares every other identity/scope/window/revocation field. Fixed-code validation-stage diagnostics contain no response content. Synthetic regression failed before the fix; relevant client/lifecycle tests (49) and scoped compilation/lint passed. This does not establish the exact outcome of the user's live retry.
+
+E5.1 asks for optional native chat connections, genuine capture readiness and early capture health. Investigation confirmed current Rails policy explicitly advertises `extension_launched_only`, and its parent notice authorizes launched sessions only. Independent legacy disclosure/processing grants supersede prior scopes and would block the workflow. **Do not reinterpret this capability, falsely label a native session as launched, or use a legacy grant as a workaround.** No Rails/frontend changes are authorized by this extension task.
+
+Compatible extension changes add `Connect Current AI Chat` (explains the current contract blocker, does not actually connect native chats), `Show Assessment AI Capture Status`, safe status/counts/early warnings, actual reader-initialization checks for managed Codex, failure reporting and assessment workspace-change boundaries. Native/global metadata discovery is disabled during these unsupported assessment profiles, while existing manual recording discovery and managed launches are preserved. This is a **partial E5.1 delivery**, not working native assessment capture. Do not claim otherwise.
+
+Current exact findings, backend prerequisites, provider limitations and manual QA are in `docs/native-ai-chat-assessments.md`. Future work needs an explicitly agreed native-mode capability/consent contract and prospective reader boundaries; no future wire fields have been invented. Claude currently has only per-launch authenticated hooks and a hook-bound transcript fallback, not a supported generic native discovery path.
+
+Health observations come from sanitized successful SQLite notifications. They are current-process/current-recording bounded counters, not historical/server totals or proof of full conversation coverage. Ready with zero messages explicitly means reader initialized but no prompt/response capture observed. Status never grants capture permission. Native provider E2E remains unverified and blocked by the current contract.

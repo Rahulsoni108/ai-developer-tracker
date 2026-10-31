@@ -11,6 +11,7 @@ suite('Managed assessment Codex isolation', function () {
  this.timeout(12000);
  let root: string; let workspace: string; let recording: RecordingController; let capture: ManagedCodexCapture;
  let events: TrackerEvent[]; let enrollments: string[]; let allowed: boolean; let enrollmentFails: boolean;
+ let notices: string[]; let beforeEnrollment: (() => Promise<void>) | undefined;
  const W = 'a'.repeat(64);
  async function until(check: () => boolean): Promise<void> {
   const end = Date.now() + 6500; while (!check()) { if (Date.now() > end) { assert.fail('Synthetic managed-source timeout'); } await new Promise(resolve => setTimeout(resolve, 25)); }
@@ -23,12 +24,12 @@ suite('Managed assessment Codex isolation', function () {
  }
  setup(async () => {
   root = await realpath(await mkdtemp(join(tmpdir(), 'managed-codex-'))); workspace = join(root, 'workspace'); await mkdir(workspace);
-  events = []; enrollments = []; allowed = true; enrollmentFails = false;
+  events = []; enrollments = []; allowed = true; enrollmentFails = false; notices = []; beforeEnrollment = undefined;
   recording = new RecordingController({ text: '', command: '', tooltip: '', show() {}, dispose() {} }, async () => true);
   capture = new ManagedCodexCapture(recording, { write: async event => { events.push(event); }, flush: async () => {} }, {
    permits: id => allowed && recording.isRecording && recording.sessionId === id,
-   enroll: async (_provider, id) => { if (enrollmentFails) { throw new Error('Synthetic unavailable'); } enrollments.push(id); return new Date().toISOString(); }
-  }, join(root, 'provider-state'), async path => { assert.ok(!path.startsWith(workspace)); }, () => {});
+   enroll: async (_provider, id) => { if (enrollmentFails) { throw new Error('Synthetic unavailable'); } enrollments.push(id); await beforeEnrollment?.(); return new Date().toISOString(); }
+  }, join(root, 'provider-state'), async path => { assert.ok(!path.startsWith(workspace)); }, reason => notices.push(reason));
   await recording.start();
  });
  teardown(async () => { recording.stop(); await capture.flush(); await capture.dispose(); recording.dispose(); await rm(root, { recursive: true, force: true }); });
@@ -54,4 +55,19 @@ suite('Managed assessment Codex isolation', function () {
   recording.stop(); await assert.rejects(capture.create(workspace, W)); assert.equal(events.length, 0);
  });
  test('explicit denial prevents even a managed launch', async () => { allowed = false; await assert.rejects(capture.create(workspace, W)); assert.equal(events.length, 0); });
+ test('capture-ready requires successful reader initialization, not launch or enrollment', async () => {
+  let release!: () => void; const pending = new Promise<void>(resolve => { release = resolve; });
+  beforeEnrollment = () => pending;
+  const launch = await capture.create(workspace, W); assert.deepEqual(notices, ['waiting']);
+  const source = await session(launch.home, workspace); await until(() => enrollments.length === 1);
+  assert.equal(notices.includes('ready'), false); assert.equal(capture.getApprovals(recording.sessionId!).length, 0);
+  await rm(source.file); release(); await new Promise(resolve => setTimeout(resolve, 200)); await capture.flush();
+  assert.equal(notices.includes('ready'), false); assert.equal(events.length, 0);
+ });
+ test('reader interruption removes active source approvals and reports failure before submission', async () => {
+  const launch = await capture.create(workspace, W); const source = await session(launch.home, workspace);
+  await until(() => notices.includes('ready')); await rm(source.file);
+  await until(() => notices.includes('unavailable')); assert.equal(capture.getApprovals(recording.sessionId!).length, 0);
+  assert.equal(events.length, 0); assert.equal(recording.isRecording, true);
+ });
 });

@@ -12,6 +12,8 @@ Candidates can currently use development recording commands in a local coding wo
 
 **One-action Rails assessment consent:** [Setup, exact candidate steps and security limits](docs/assessment-workflow-consent.md). **Start Assessment** verifies the workflow-capable Rails API and approved processor, then presents one **Agree & Start Assessment** notice covering separately persisted permissions. Use **Launch Assessment AI Session** for tracked Codex/Claude sessions; supported sessions enroll prospectively without repeated content-consent dialogs. Native/unverified chats and historical events remain excluded. Manual/development recording keeps its existing dialogs.
 
+**Native chat availability and early feedback:** [E5.1 findings, current contract blocker and manual QA](docs/native-ai-chat-assessments.md). **Connect Current AI Chat** explains native connection availability without granting access; the current Rails profile supports launched sessions only. **Show Assessment AI Capture Status** displays actual reader readiness and successfully queued prompt/response observations. A reader-ready state with zero messages does not claim captured conversation content.
+
 **AI processing consent:** [Trusted Rails processor discovery, candidate controls and manual verification](docs/assessment-ai-processing-consent.md). Configure, Show and Revoke remain independent of recording, upload and recruiter disclosure. Grants require an approved server policy and explicit prospective selection. The extension never calls an LLM; evaluation also requires separate server enablement and recruiter initiation. Historical events gain no permission.
 
 ## 2. Technology Stack
@@ -156,6 +158,8 @@ Command Palette titles and IDs match `package.json`.
 | AI Developer Tracker: Archive Assessment Connection | `ai-developer-tracker.archiveAssessmentConnection` | Stop/drain and archive locally; preserve old evidence and credentials, then allow fresh pairing. Does not submit. |
 | AI Developer Tracker: Pair Assessment | `ai-developer-tracker.pairAssessment` | Pair with configured trusted Rails HTTPS origin, or explicit local mock. |
 | AI Developer Tracker: Launch Assessment AI Session | `ai-developer-tracker.launchAssessmentAiSession` | Launch supported tracked Codex/Claude sessions under this recording’s explicit workflow scope. |
+| AI Developer Tracker: Connect Current AI Chat | `ai-developer-tracker.connectCurrentAiChat` | Inspect native-chat connection availability; current launched-only Rails contract blocks native attachment. No silent grant or import. |
+| AI Developer Tracker: Show Assessment AI Capture Status | `ai-developer-tracker.showAssessmentAiCaptureStatus` | Show safe reader readiness, readable-session count and current-process prompt/response observations. |
 | AI Developer Tracker: Revoke Assessment Workflow Consent | `ai-developer-tracker.revokeAssessmentWorkflowConsent` | Stop capture and withdraw workflow permissions; preserve evidence and report unconfirmed remote outcomes. |
 | AI Developer Tracker: Start Assessment | `ai-developer-tracker.startAssessment` | One explicit workflow notice; atomic Rails authorization/binding and independent purpose receipts before recording. |
 | AI Developer Tracker: Stop & Submit Assessment | `ai-developer-tracker.stopAndSubmitAssessment` | Stop/drain; keep submission pending until acknowledgments and server finalization. |

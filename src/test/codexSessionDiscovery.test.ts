@@ -58,6 +58,14 @@ suite('Codex session discovery', () => {
 		recording.stop(); discovery.dispose(); await discovery.flush(); recording.dispose();
 		await rm(temporary, { recursive: true, force: true });
 	});
+	test('an unavailable assessment native scope never scans the global session directory', async () => {
+		await session(); discovery.dispose();
+		discovery = new CodexSessionDiscovery(recording, () => [], { sessionsDirectory: root, pollIntervalMs: 0,
+			watch: () => { assert.fail('No watcher may be installed without an approved discovery scope'); } });
+		await start(); await discovery.scanNow();
+		assert.equal(discovery.getDiagnostics().inspectedFileCount, 0); assert.equal(discovery.getDiagnostics().directoryStatus, 'not_checked');
+		assert.deepEqual(discovery.getRegistry(), []);
+	});
 
 	test('computes default and configured paths without opening any real session directory', () => {
 		assert.strictEqual(codexSessionsDirectory(), join(homedir(), '.codex', 'sessions'));
