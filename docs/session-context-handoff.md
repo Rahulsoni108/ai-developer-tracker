@@ -1,6 +1,6 @@
 # AI-Assisted Developer Assessment — Session Handoff
 
-Last updated: 2026-10-31, Asia/Kolkata.
+Last updated: 2026-11-02, Asia/Kolkata.
 
 This is a consolidated engineering handoff of the long conversation, not a verbatim transcript. It includes historical user-reported milestones, current repository findings, decisions, validation and remaining work. Treat current source and exact API documentation as authoritative when they differ from older phase descriptions. No credentials, environment values, raw candidate conversations, source-code evidence or private keys are included.
 
@@ -47,9 +47,14 @@ Verified extension branch: `main`.
 Relevant local commits:
 
 - Rails `806dc73`: strict workflow consent request foundation, preceding current implementation.
-- Extension `62aa17c`: prospective workflow consent contract foundation, preceding current implementation.
-- Rails `ec97b8c`: `feat(assessments): add explicit workflow consent and scoped AI enrollment` — current implementation, committed locally.
-- Extension `2f9007d`: `feat(extension): add one-action assessment consent and managed AI capture` — matching current implementation, committed locally.
+- Rails `ec97b8c`: `feat(assessments): add explicit workflow consent and scoped AI enrollment`.
+- Rails `a62a8fd`: `feat(assessments): authorize explicitly confirmed native AI sessions` (E5.2 Rails backend).
+- Extension `62aa17c`: prospective workflow consent contract foundation.
+- Extension `2f9007d`: `feat(extension): add one-action assessment consent and managed AI capture`.
+- Extension `01d7438`: `fix(extension): accept independent workflow receipt observation times`.
+- Extension `387e3ad`: `feat(extension): add AI capture health and native connection diagnostics` (E5.1 partial).
+- Extension `1c95c3d`: `feat(extension): connect authorized native AI chats` (E5.2 extension client).
+- Extension `2b8078d`: `fix(extension): restore ready-to-pair after verified submission` (E5.3 lifecycle recovery fix).
 - Earlier Rails evaluation/workflow analysis commit referenced during current work: `c379a75`.
 - Earlier extension processor discovery commit: `204821d`.
 - Frontend latest observed HEAD: `0a2234e8`, `fix(assessments): hide results until assessment has ended`.
@@ -463,3 +468,78 @@ Candidate flow: start authorized assessment → open normal Codex chat → **Con
 Claude native remains disabled: per-launch authenticated hook attribution cannot be reused for an independently running conversation. Optional managed Codex/Claude paths remain supported. Native limit is eight connections/attempts per recording, also bounded by server source/processing caps. Restart/archive never resumes source authority; recovery of encrypted approvals needs fresh server confirmation for upload, while new capture needs fresh recording/source confirmation at a new EOF.
 
 Detailed contract/current limitations/manual QA: `docs/native-session-authorization.md` and Rails `docs/assessment-native-sessions.md`. Relevant verification: 154 Extension Development Host tests; 116 Rails consent/ingestion/finalization examples; native OpenAPI response checks, TypeScript, scoped ESLint and RuboCop. No real provider calls, live assessment mutations, migrations or TLS changes. Preserve Rails pre-existing `db/schema.rb` changes (4 additions/3 deletions) and untracked `,`; frontend package files also remain untouched.
+
+## 19. E5.3 — Fix Assessment Recovery After Successful Submission (2026-11-02)
+
+### Problem and User Experience
+After successfully submitting a coding assessment, the extension displays:
+`Assessment: submitted`
+
+However, upon closing and reopening the VS Code Extension Development Host, it unexpectedly displayed:
+`Assessment: recovery` or `Assessment: error (Status code: authentication)`
+
+This locked the candidate into recovery mode and blocked starting a new assessment, forcing manual archival of the completed session even though the submission had already succeeded on Rails.
+
+### Exact Root Cause
+1. **Unreleased Connection Slot After Submission**: When an assessment was finalized and submitted via `stopAndSubmit()`, the controller persisted `phase: 'submitted'` with the server receipt in `ASSESSMENT_METADATA_KEY` (`globalState`), but left `this.metadata` active in the slot without archiving or releasing it.
+2. **Unconditional Recovery on Host Restart**: On extension restart, `initialize()` loaded `this.metadata` from `this.store.load()`. Because `this.metadata` was truthy, it unconditionally entered `this.set('recovery')` and attempted live recovery by calling `this.workflow.recover(...)` followed by `this.refresh()`.
+3. **Server 401 Rejection & Offline Lockup**: Rails assessment status endpoints reject queries on already submitted sessions with HTTP 401 Unauthorized (`allow_submitted` defaults to `false`), or offline restarts fail on network. This locked the extension permanently into `Assessment: recovery` or `Assessment: error (Status code: authentication)`.
+4. **Pairing Lock**: Because `this.metadata` remained active in memory, `pair(code)` threw `AssessmentApiError('recovery_required')`, preventing the candidate from pairing a new assessment without manual archival.
+
+### Implementation Details in `AssessmentController` (`src/assessmentController.ts`)
+1. **`hasVerifiedFinalization(metadata)`**:
+   - Strictly verifies `metadata.phase === 'submitted'` and `metadata.serverStatus.state === 'submitted'`.
+   - Ensures local recording sessions exist with `pendingEvents === 0` and `missingSessions === 0`.
+   - In Rails mode: validates the receipt schema (`validSubmissionReceipt`), checks `request_id === submitRequestId`, verifies `recording_count` and `event_count` match local totals, and verifies using `queue.freezeFinalization(..., true)` that `receiptMatches(receipt, frozen)`.
+   - Never fabricates completion from UI state alone; if anything is incomplete, missing, or mismatched, returns `false`.
+2. **`archiveCompletedAssessment(metadata)`**:
+   - Creates an `AssessmentArchive` snapshot with `submissionConfirmed: true`, stores it via `store.archive` in encrypted SQLite, refreshes the archive index, and clears `this.metadata`, `this.auth`, `this.pendingEvents`, and `this.lastStart`.
+3. **`initialize()`**:
+   - If `hasVerifiedFinalization(this.metadata)` is true, automatically archives the completed assessment and restores state directly to `unpaired` (`Ready to Pair`) without making any network calls (supporting offline restart).
+   - If not verified finalized, safely falls back to the existing recovery flow.
+4. **`pair(code)`**:
+   - If `this.metadata` exists and is verified finalized, cleanly archives and releases it before pairing the new assessment. If unverified, rejects with `recovery_required`.
+5. **`showStatus()`**:
+   - If `this.phase === 'submitted'` or verified finalized, avoids making unnecessary server status requests.
+
+### Security and Isolation Guarantees
+- **Fail-Closed Fallback**: Incomplete, missing receipt, invalid receipt, interrupted, or expired submissions strictly remain in `recovery` or `submission_pending`.
+- **Offline Safe**: On restart, verified submissions do not require server network requests to transition to `unpaired`.
+- **Credential Isolation**: Archiving clears `this.auth` and active credentials so old tokens cannot be reused for new assessments.
+- **Evidence Preservation**: Local encrypted SQLite events and archives remain preserved and isolated. Archived sessions cannot be transmitted by new connections and reject development uploads.
+
+### Verification and Test Results
+- **TypeScript Compilation**: `npm run compile` passed with 0 errors.
+- **ESLint**: `npx eslint src/assessmentController.ts src/test/railsAssessment.e2e.test.ts` passed with 0 errors / 0 warnings.
+- **Mocha E2E Suite**: `railsAssessment.e2e.test.js` — All 64 passing (9s), including the updated line 645 restart assertion and 10 new regression tests:
+  1. `submit successfully -> restart -> ready to pair`
+  2. `successfully submitted assessment -> pair a new assessment`
+  3. `submission receipt missing -> recovery`
+  4. `submission receipt invalid -> recovery`
+  5. `interrupted submission -> recovery`
+  6. `expired assessment -> recovery`
+  7. `offline restart after verified submission`
+  8. `pending encrypted events remain preserved`
+  9. `archived assessment evidence remains isolated`
+  10. `existing recording, consent and pairing flows remain functional after verified finalization`
+- **Core Unit Suites**: Controller, archive, persistence, consent, and finalization tests all passing (144+ tests).
+- **VS Code Test Host**: All 18 tests passing.
+
+### Git State
+- **Extension commit**: `2b8078d`: `fix(extension): restore ready-to-pair after verified submission`. Committed locally on `main`; not pushed.
+- **Files changed**: `src/assessmentController.ts`, `src/test/railsAssessment.e2e.test.ts`. Working tree clean.
+- Preserved uncommitted files in Rails (`hiring-manager` `db/schema.rb`, untracked `,`) and frontend (`ReactAppHirrring` `package.json`, `package-lock.json`).
+
+### Manual QA Checklist
+1. Ensure Rails is running on `127.0.0.1:3000` (or configured API origin).
+2. Generate a pairing code from the candidate portal.
+3. Open VS Code Extension Development Host (`F5`).
+4. Run `Developer Assessment: Pair Assessment` and enter the code (`Assessment: paired`).
+5. Run `Developer Assessment: Start Assessment` (`Assessment: active`, `Recording`).
+6. Make edits and save to generate file activity.
+7. Run `Developer Assessment: Stop Assessment` and finalize/submit.
+8. Verify status displays `Assessment: submitted` and server receipt is verified.
+9. Close and reopen the Extension Development Host window.
+10. Verify status displays `Assessment: ready to pair` (internal state `unpaired`). Tooltip shows `Archived assessments retained locally: 1 (submission confirmed: 1)`.
+11. Generate a second pairing code and run `Developer Assessment: Pair Assessment`. Verify it pairs immediately without manual archival.
+12. Verify incomplete submissions: start an assessment, close VS Code without submitting, reopen: verify it enters `Assessment: recovery`.
