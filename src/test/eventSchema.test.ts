@@ -57,6 +57,19 @@ suite('Common event schema', () => {
 		assert.strictEqual(new Set(ids).size, ids.length);
 	});
 
+	test('isUuid validates RFC 9562 UUID versions 1 through 8 and rejects invalid formats', () => {
+		assert.ok(isUuid('00000000-0000-1000-8000-000000000000'));
+		assert.ok(isUuid('00000000-0000-4000-a000-000000000000'));
+		assert.ok(isUuid('01a19b6b-0e3f-7fa1-b45b-29e55728013b'));
+		assert.ok(isUuid('00000000-0000-8000-b000-000000000000'));
+		assert.strictEqual(isUuid('00000000-0000-0000-8000-000000000000'), false);
+		assert.strictEqual(isUuid('00000000-0000-9000-8000-000000000000'), false);
+		assert.strictEqual(isUuid('not-a-uuid'), false);
+		assert.strictEqual(isUuid(12345), false);
+		assert.strictEqual(isUuid(null), false);
+		assert.strictEqual(isUuid(undefined), false);
+	});
+
 	test('supports the reserved sources, file event types, and optional metadata', () => {
 		for (const source of ['vscode', 'codex', 'claude'] satisfies EventSource[]) {
 			for (const eventType of ['file.created', 'file.modified', 'file.saved', 'file.deleted'] satisfies FileEventType[]) {

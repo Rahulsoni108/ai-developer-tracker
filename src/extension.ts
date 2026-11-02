@@ -673,14 +673,25 @@ export async function activate(context: vscode.ExtensionContext) {
 			unavailable: 'Assessment permission refresh failed or consent changed. Capture stopped safely; evidence is preserved. Check Assessment Status before resuming.',
 			withdrawn: 'Assessment workflow consent withdrawn. Existing evidence is retained; withdrawal is not submission or deletion.' };
 		activeWorkflow = new AssessmentWorkflowConsent(recording, queue, context.secrets, new RailsWorkflowConsentClient(undefined,
-			check => output.appendLine(`Assessment workflow response validation failed: ${check}. No response content was logged.`)),
+			(check, details) => {
+				const parts = [`Assessment workflow validation check: ${check}`];
+				if (details?.operation) { parts.push(`operation: ${details.operation}`); }
+				if (details?.httpStatus) { parts.push(`HTTP status: ${details.httpStatus}`); }
+				if (details?.reason) { parts.push(`reason: ${details.reason}`); }
+				if (details?.mismatchedFields?.length) { parts.push(`mismatched fields: [${details.mismatchedFields.join(', ')}]`); }
+				output.appendLine(`${parts.join('. ')}. No response content was logged.`);
+			}),
 			() => (vscode.workspace.workspaceFolders ?? []).map(folder => createHash('sha256').update(folder.uri.toString()).digest('hex')),
 			async detail => await vscode.window.showWarningMessage('Agree to this assessment recording, upload, disclosure and AI-processing scope?', { modal: true,
 				detail: 'Workspace folders: ' + (vscode.workspace.workspaceFolders ?? []).map(folder => folder.name).join(', ') + '\n\n' + detail }, 'Agree & Start Assessment') === 'Agree & Start Assessment',
 			async (auth, state) => processingConsent.acceptWorkflowReceipt({ auth, localSessionIds: [state.request.local_recording_session_id],
 				currentRecording: state.request.local_recording_session_id,
 				current: () => assessment.isAssociatedSession(state.request.local_recording_session_id) && !assessment.view.archiving }, state),
-			code => { output.appendLine(messages[code]); if (code !== 'source_ready') { void vscode.window.showInformationMessage(messages[code]); } },
+			code => {
+				output.appendLine(`Assessment authorization state transition: ${code}.`);
+				output.appendLine(messages[code]);
+				if (code !== 'source_ready') { void vscode.window.showInformationMessage(messages[code]); }
+			},
 			async () => {
 				const available: ('codex' | 'claude')[] = [];
 				const results = await Promise.allSettled([
@@ -696,6 +707,7 @@ export async function activate(context: vscode.ExtensionContext) {
 			if (state === 'declined') { captureHealth.cancelInitializing('codex'); }
 			if (state === 'ready') { captureHealth.readerReady('codex', (activeNativeCodex?.getApprovals(recording.sessionId ?? '') ?? []).map(s => s.sourceSessionId)); }
 			if (state === 'interrupted' || state === 'unavailable') { captureHealth.interrupted('codex'); }
+			output.appendLine(`Native Codex capture state: ${state}.`);
 			const message = { initializing: 'Native Codex capture initializing; selected metadata only is being verified.', ready: 'AI capture ready — native Codex. Only new authorized messages will be captured. If you already sent a message before connecting, it was excluded; continue your conversation now.',
 				interrupted: 'Native Codex capture interrupted. Existing evidence is retained. Reconnect the verified source or restart an authorized recording; no history is replayed.',
 				unavailable: 'Native Codex capture unavailable. Verify the exact selected record, approved workspace, server capability and consent. No conversation history was imported.',

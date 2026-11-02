@@ -46,4 +46,39 @@ suite('Native assessment Rails interoperability', () => {
   bundle.intent.source_identity.source_file_reference = 'codex-file:' + 'e'.repeat(64);
   await assert.rejects(client.enrollNative(auth(value), bundle, AbortSignal.timeout(1000)));
  });
+ test('accepts UUIDv7 native Codex session identifiers', async () => {
+  const uuidV7 = '01a19b6b-0e3f-7fa1-b45b-29e55728013b';
+  const oldId = 'd1f2641c-2742-4c0d-ae92-55501aaed42b';
+  const raw = (await readFile(join(__dirname, '../../src/test/fixtures/rails-native-session.v1.json'), 'utf8')).replaceAll(oldId, uuidV7);
+  const value = JSON.parse(raw);
+  const bundle = value.data.authorization.request as NativeSourceBundle;
+  const digest = nativeIdentityDigest(auth(value).connection.codingSessionId, bundle);
+  bundle.intent.identity_digest = digest;
+  value.data.identity_digest = digest;
+  assert.equal(validNativeSourceBundle(bundle), true);
+
+  const client = new RailsWorkflowConsentClient({ send: async () => ({
+   status: 200, headers: {}, contentType: 'application/json', body: JSON.stringify(value)
+  }) });
+  const result = await client.enrollNative(auth(value), bundle, AbortSignal.timeout(1000));
+  assert.equal(result.state, 'active');
+  assert.equal(result.disclosure.request.approved_source_sessions[0].source_session_id, uuidV7);
+ });
+ test('reports structured failure details without leaking response content on protocol violation', async () => {
+  const value = await fixture();
+  const bundle = value.data.authorization.request as NativeSourceBundle;
+  const failures: { check: string; details?: unknown }[] = [];
+  const client = new RailsWorkflowConsentClient(
+   { send: async () => ({ status: 200, headers: {}, contentType: 'application/json', body: JSON.stringify({ invalid: 'shape' }) }) },
+   (check, details) => failures.push({ check, details })
+  );
+  await assert.rejects(client.enrollNative(auth(value), bundle, AbortSignal.timeout(1000)));
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0].check, 'response_envelope');
+  assert.deepEqual(failures[0].details, {
+   operation: 'enroll_native',
+   httpStatus: 200,
+   reason: 'missing_data_envelope'
+  });
+ });
 });
