@@ -162,6 +162,12 @@ export class CodexSessionDiscovery implements RecordingLifecycle, Disposable {
 		return this.getRegistry().filter(entry => entry.recordingSessionId === this.recording.sessionId
 			&& (['recent_workspace_match', 'multiple_matches', 'selected_workspace_match'].includes(entry.reason)));
 	}
+	resolveCandidatePath(sourceFileId: string): string | undefined {
+		const run = this.run;
+		if (!run?.root) { return undefined; }
+		const file = [...run.files.values()].find(candidate => this.fileId(run, candidate.relativePath) === sourceFileId);
+		return file ? join(run.root, file.relativePath) : undefined;
+	}
 	isConfirmed(sourceFileId: string, recordingSessionId: string, sourceSessionId: string): boolean {
 		const run = this.run;
 		const entry = this.registry.get(sourceFileId);
