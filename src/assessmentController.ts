@@ -2,7 +2,7 @@ import type { AssessmentWorkflowLifecycle } from './assessmentWorkflowConsent';
 import type { DisclosureContext } from './assessmentDisclosureConsent';
 import type { AssessmentStartDiagnostic, AssessmentStartStep } from './assessmentStartDiagnostics';
 import { assessmentArchiveKey, type AssessmentArchive, type AssessmentArchiveIndex } from './assessmentArchive';
-import { receiptMatches, type AssessmentFinalizationRequest, type FinalizationScope } from './assessmentFinalization';
+import { receiptMatches, validSubmissionReceipt, type AssessmentFinalizationRequest, type FinalizationScope } from './assessmentFinalization';
 import type { AssessmentDeliveryLifecycle } from './assessmentEventDelivery';
 import type { AssessmentConsentLifecycle } from './assessmentEvidenceConsent';
 import { randomUUID } from 'node:crypto';
@@ -118,6 +118,11 @@ export class AssessmentController {
 			await this.loadArchiveIndex();
 			this.metadata = await this.store.load(); this.initialized = true;
 			if (!this.metadata) { this.set('unpaired'); return; }
+			if (await this.hasVerifiedFinalization(this.metadata)) {
+				await this.archiveCompletedAssessment(this.metadata);
+				this.set('unpaired');
+				return;
+			}
 			this.set('recovery'); await this.authenticate();
 			if (this.workflow) { await this.call(signal => this.workflow!.recover(this.auth!, this.metadata!.localRecordingSessionIds, signal)); }
 			await this.refresh();
@@ -131,7 +136,13 @@ export class AssessmentController {
 		return this.run(async () => {
 			if (this.archiving || this.recording.isRecording || this.recording.isStarting) { throw new AssessmentApiError('recording_busy'); }
 			if (!this.initialized) { throw new AssessmentApiError('storage'); }
-			if (this.metadata) { throw new AssessmentApiError('recovery_required'); }
+			if (this.metadata) {
+				if (await this.hasVerifiedFinalization(this.metadata)) {
+					await this.archiveCompletedAssessment(this.metadata);
+				} else {
+					throw new AssessmentApiError('recovery_required');
+				}
+			}
 			if (!/^[A-Za-z0-9-]{4,128}$/.test(code)) { throw new AssessmentApiError('rejected'); }
 			const result = await this.call(signal => this.api.pair(code, signal));
 			if (this.archiveIndex.archives.some(item => item.assessmentKey === assessmentArchiveKey(result.connection)) || !validConnection(result.connection) || result.connection.mode !== this.api.mode || !validServerStatus(result.status, result.connection)
@@ -333,8 +344,20 @@ export class AssessmentController {
 	}
 	showStatus(): Promise<void> {
 		if (this.starting && this.lastStart?.status === 'running') { this.set(this.phase, this.reason); return Promise.resolve(); }
-		if (this.archiving) { return this.archiveWork ?? Promise.resolve(); } return this.run(async () => { if (this.metadata) { await this.authenticate(); await this.refresh();
-			if (this.metadata.connection.mode === 'rails') { this.pendingEvents = (await this.evidence.getStatus(this.metadata.localRecordingSessionIds)).pendingEvents; } } else { this.set('unpaired'); } }); }
+		if (this.archiving) { return this.archiveWork ?? Promise.resolve(); }
+		return this.run(async () => {
+			if (this.metadata) {
+				if (this.phase === 'submitted' || await this.hasVerifiedFinalization(this.metadata)) { return; }
+				await this.authenticate();
+				await this.refresh();
+				if (this.metadata.connection.mode === 'rails') {
+					this.pendingEvents = (await this.evidence.getStatus(this.metadata.localRecordingSessionIds)).pendingEvents;
+				}
+			} else if (this.phase !== 'submitted') {
+				this.set('unpaired');
+			}
+		});
+	}
 	/** Optional disclosure actions must never invoke run(), stop capture or replace assessment recovery state. */
 	async withDisclosureContext<T>(grant: boolean, operation: (context: DisclosureContext) => Promise<T>): Promise<T> {
 		const available = () => this.initialized && !this.disposed && !this.archiving && !this.starting && !this.submitting && !this.busy
@@ -416,6 +439,57 @@ export class AssessmentController {
 			origin: this.metadata.connection.apiOrigin, requestId: this.metadata.submitRequestId,
 			localRecordingSessionIds: [...this.metadata.localRecordingSessionIds] }, existingOnly); }
 		catch { throw new AssessmentApiError('recovery_required'); }
+	}
+	private async hasVerifiedFinalization(metadata: AssessmentMetadata): Promise<boolean> {
+		if (metadata.phase !== 'submitted' || metadata.serverStatus.state !== 'submitted') { return false; }
+		if (!Array.isArray(metadata.localRecordingSessionIds) || metadata.localRecordingSessionIds.length === 0) { return false; }
+		try {
+			const evidence = await this.evidence.getStatus(metadata.localRecordingSessionIds);
+			if (evidence.pendingEvents > 0 || evidence.missingSessions > 0) { return false; }
+			if (metadata.connection.mode === 'rails') {
+				const receipt = metadata.serverStatus.submission;
+				if (!validSubmissionReceipt(receipt)) { return false; }
+				if (receipt.request_id !== metadata.submitRequestId) { return false; }
+				if (receipt.recording_count !== metadata.localRecordingSessionIds.length) { return false; }
+				if (receipt.event_count !== evidence.totalEvents) { return false; }
+				if (!this.evidence.freezeFinalization) { return false; }
+				const frozen = await this.evidence.freezeFinalization({
+					codingSessionId: metadata.connection.codingSessionId,
+					origin: metadata.connection.apiOrigin,
+					requestId: metadata.submitRequestId,
+					localRecordingSessionIds: [...metadata.localRecordingSessionIds]
+				}, true);
+				if (!receiptMatches(receipt, frozen)) { return false; }
+			}
+			return true;
+		} catch {
+			return false;
+		}
+	}
+	private async archiveCompletedAssessment(metadata: AssessmentMetadata): Promise<void> {
+		if (this.store.archive) {
+			const snapshot: AssessmentArchive = {
+				version: 1,
+				archiveId: metadata.credentialId,
+				archivedAt: new Date().toISOString(),
+				metadata: structuredClone(metadata),
+				previousPhase: 'submitted',
+				submissionConfirmed: metadata.connection.mode === 'rails' && !!metadata.serverStatus.submission,
+				remoteDisposition: 'unverified'
+			};
+			try {
+				await this.store.archive(snapshot);
+				await this.loadArchiveIndex();
+			} catch (error) {
+				if (!(error instanceof AssessmentApiError && error.code === 'storage')) {
+					throw error;
+				}
+			}
+		}
+		this.metadata = undefined;
+		this.auth = undefined;
+		this.pendingEvents = undefined;
+		this.lastStart = undefined;
 	}
 	private async save(phase: AssessmentState): Promise<void> {
 		this.metadata!.phase = phase;

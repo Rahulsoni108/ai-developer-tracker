@@ -642,7 +642,7 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 		assert.equal(await queue.getPendingCount(), 1); assert.deepEqual(await queue.getPending(10), [oldEvent]);
 		assert.equal(await store.getCredential(oldMetadata.credentialId), oldToken);
 		assert.equal((await queue.getAssessmentArchiveIndex()).archives[0].archiveId, oldMetadata.credentialId);
-		await stopPipeline(); await makePipeline(); assert.equal(controller.view.state, 'submitted'); assert.equal(controller.view.archivedUnconfirmedCount, 1);
+		await stopPipeline(); await makePipeline(); assert.equal(controller.view.state, 'unpaired'); assert.equal(controller.view.archivedUnconfirmedCount, 1);
 		assert.equal(controller.allowsDevelopmentUpload(oldEvent.sessionId), false); assert.equal(await queue.prepareBatch(100, 100000, oldEvent.sessionId), null);
 	});
 
@@ -765,5 +765,278 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 		}, { send: async () => { transmitted = true; throw new Error('No transport expected'); } });
 		assert.equal(await uploader.enable(), true); await wait(250); assert.equal(await uploader.uploadOnce(), 'privacy');
 		assert.equal(transmitted, false); assert.equal(await queue.getPendingCount(), 1); await uploader.dispose();
+	});
+
+	suite('E5.3: Assessment recovery after successful submission', () => {
+		test('submit successfully -> restart -> ready to pair', async () => {
+			await pairStart();
+			const fresh = await captureFile();
+			await controller.stopAndSubmit();
+			if (controller.view.state !== 'submitted') {
+				await until(async () => (await queue.getSessionEvidenceStatus([fresh.sessionId])).pendingEvents === 0, 'ack');
+				await controller.stopAndSubmit();
+			}
+			assert.equal(controller.view.state, 'submitted');
+			assert.ok(metadata().serverStatus.submission);
+
+			await controller.dispose();
+			recording.dispose();
+			recording = new RecordingController({ text: '', command: '', tooltip: '', show() {}, dispose() {} }, async () => recordingConsent);
+			controller = new AssessmentController(api, store, recording, {
+				flushStopped: async id => { await persistence.flush(); await persistence.completeSession(id); },
+				freezeFinalization: (scope, existingOnly) => queue.freezeFinalization(scope, existingOnly),
+				getStatus: ids => queue.getSessionEvidenceStatus(ids), disableDevelopmentUploads: async () => {}
+			}, async () => true, () => {}, 1500, undefined, delivery);
+
+			await controller.initialize();
+			assert.equal(controller.view.state, 'unpaired');
+			assert.equal(controller.view.archivedCount, 1);
+			assert.equal(controller.view.archivedUnconfirmedCount, 0);
+		});
+
+		test('successfully submitted assessment -> pair a new assessment', async () => {
+			await pairStart();
+			const fresh = await captureFile();
+			await controller.stopAndSubmit();
+			if (controller.view.state !== 'submitted') {
+				await until(async () => (await queue.getSessionEvidenceStatus([fresh.sessionId])).pendingEvents === 0, 'ack');
+				await controller.stopAndSubmit();
+			}
+			assert.equal(controller.view.state, 'submitted');
+
+			currentPairCode = 'WXYZ-2345-6789-ABCD';
+			currentSessionId = '43';
+			currentToken = 'adt_ext_' + 'c'.repeat(43);
+			codeUsed = false;
+			submission = undefined;
+			startedAt = undefined;
+			deadline = undefined;
+			serverBindings = [];
+
+			await controller.pair(currentPairCode);
+			assert.equal(controller.view.state, 'paired');
+			assert.equal(controller.view.archivedCount, 1);
+		});
+
+		test('submission receipt missing -> recovery', async () => {
+			await pairStart();
+			const fresh = await captureFile();
+			await controller.stopAndSubmit();
+			if (controller.view.state !== 'submitted') {
+				await until(async () => (await queue.getSessionEvidenceStatus([fresh.sessionId])).pendingEvents === 0, 'ack');
+				await controller.stopAndSubmit();
+			}
+			assert.equal(controller.view.state, 'submitted');
+
+			submission = undefined;
+			const meta = metadata();
+			meta.serverStatus.submission = undefined;
+			meta.serverStatus.state = 'active';
+			state.set(ASSESSMENT_METADATA_KEY, structuredClone(meta));
+
+			await controller.dispose();
+			recording.dispose();
+			recording = new RecordingController({ text: '', command: '', tooltip: '', show() {}, dispose() {} }, async () => recordingConsent);
+			controller = new AssessmentController(api, store, recording, {
+				flushStopped: async id => { await persistence.flush(); await persistence.completeSession(id); },
+				freezeFinalization: (scope, existingOnly) => queue.freezeFinalization(scope, existingOnly),
+				getStatus: ids => queue.getSessionEvidenceStatus(ids), disableDevelopmentUploads: async () => {}
+			}, async () => true, () => {}, 1500, undefined, delivery);
+
+			await controller.initialize();
+			assert.equal(controller.view.state, 'recovery');
+		});
+
+		test('submission receipt invalid -> recovery', async () => {
+			await pairStart();
+			const fresh = await captureFile();
+			await controller.stopAndSubmit();
+			if (controller.view.state !== 'submitted') {
+				await until(async () => (await queue.getSessionEvidenceStatus([fresh.sessionId])).pendingEvents === 0, 'ack');
+				await controller.stopAndSubmit();
+			}
+			assert.equal(controller.view.state, 'submitted');
+
+			const meta = metadata();
+			meta.serverStatus.submission!.request_id = randomUUID();
+			state.set(ASSESSMENT_METADATA_KEY, structuredClone(meta));
+
+			await controller.dispose();
+			recording.dispose();
+			recording = new RecordingController({ text: '', command: '', tooltip: '', show() {}, dispose() {} }, async () => recordingConsent);
+			controller = new AssessmentController(api, store, recording, {
+				flushStopped: async id => { await persistence.flush(); await persistence.completeSession(id); },
+				freezeFinalization: (scope, existingOnly) => queue.freezeFinalization(scope, existingOnly),
+				getStatus: ids => queue.getSessionEvidenceStatus(ids), disableDevelopmentUploads: async () => {}
+			}, async () => true, () => {}, 1500, undefined, delivery);
+
+			await controller.initialize();
+			assert.equal(controller.view.state, 'recovery');
+		});
+
+		test('interrupted submission -> recovery', async () => {
+			await pairStart();
+			await captureFile();
+			const meta = metadata();
+			meta.phase = 'submission_pending';
+			state.set(ASSESSMENT_METADATA_KEY, structuredClone(meta));
+
+			await controller.dispose();
+			recording.dispose();
+			recording = new RecordingController({ text: '', command: '', tooltip: '', show() {}, dispose() {} }, async () => recordingConsent);
+			controller = new AssessmentController(api, store, recording, {
+				flushStopped: async id => { await persistence.flush(); await persistence.completeSession(id); },
+				freezeFinalization: (scope, existingOnly) => queue.freezeFinalization(scope, existingOnly),
+				getStatus: ids => queue.getSessionEvidenceStatus(ids), disableDevelopmentUploads: async () => {}
+			}, async () => true, () => {}, 1500, undefined, delivery);
+
+			await controller.initialize();
+			assert.equal(controller.view.state, 'submission_pending');
+		});
+
+		test('expired assessment -> recovery', async () => {
+			await pairStart();
+			await captureFile();
+			const meta = metadata();
+			meta.serverStatus.state = 'expired';
+			state.set(ASSESSMENT_METADATA_KEY, structuredClone(meta));
+
+			await controller.dispose();
+			recording.dispose();
+			recording = new RecordingController({ text: '', command: '', tooltip: '', show() {}, dispose() {} }, async () => recordingConsent);
+			controller = new AssessmentController(api, store, recording, {
+				flushStopped: async id => { await persistence.flush(); await persistence.completeSession(id); },
+				freezeFinalization: (scope, existingOnly) => queue.freezeFinalization(scope, existingOnly),
+				getStatus: ids => queue.getSessionEvidenceStatus(ids), disableDevelopmentUploads: async () => {}
+			}, async () => true, () => {}, 1500, undefined, delivery);
+
+			await controller.initialize();
+			assert.equal(controller.view.state, 'recovery');
+		});
+
+		test('offline restart after verified submission', async () => {
+			await pairStart();
+			const fresh = await captureFile();
+			await controller.stopAndSubmit();
+			if (controller.view.state !== 'submitted') {
+				await until(async () => (await queue.getSessionEvidenceStatus([fresh.sessionId])).pendingEvents === 0, 'ack');
+				await controller.stopAndSubmit();
+			}
+			assert.equal(controller.view.state, 'submitted');
+
+			const offlineApi = new RailsAssessmentApiClient('https://assessment.invalid', {
+				send: async () => { throw new Error('OFFLINE_NETWORK_CALL_UNEXPECTED'); }
+			});
+
+			await controller.dispose();
+			recording.dispose();
+			recording = new RecordingController({ text: '', command: '', tooltip: '', show() {}, dispose() {} }, async () => recordingConsent);
+			controller = new AssessmentController(offlineApi, store, recording, {
+				flushStopped: async id => { await persistence.flush(); await persistence.completeSession(id); },
+				freezeFinalization: (scope, existingOnly) => queue.freezeFinalization(scope, existingOnly),
+				getStatus: ids => queue.getSessionEvidenceStatus(ids), disableDevelopmentUploads: async () => {}
+			}, async () => true, () => {}, 1500, undefined, delivery);
+
+			await controller.initialize();
+			assert.equal(controller.view.state, 'unpaired');
+			assert.equal(controller.view.archivedCount, 1);
+			assert.equal(controller.view.archivedUnconfirmedCount, 0);
+		});
+
+		test('pending encrypted events remain preserved', async () => {
+			await pairStart();
+			const fresh = await captureFile();
+			await controller.stopAndSubmit();
+			if (controller.view.state !== 'submitted') {
+				await until(async () => (await queue.getSessionEvidenceStatus([fresh.sessionId])).pendingEvents === 0, 'ack');
+				await controller.stopAndSubmit();
+			}
+			assert.equal(controller.view.state, 'submitted');
+
+			await controller.dispose();
+			recording.dispose();
+			recording = new RecordingController({ text: '', command: '', tooltip: '', show() {}, dispose() {} }, async () => recordingConsent);
+			controller = new AssessmentController(api, store, recording, {
+				flushStopped: async id => { await persistence.flush(); await persistence.completeSession(id); },
+				freezeFinalization: (scope, existingOnly) => queue.freezeFinalization(scope, existingOnly),
+				getStatus: ids => queue.getSessionEvidenceStatus(ids), disableDevelopmentUploads: async () => {}
+			}, async () => true, () => {}, 1500, undefined, delivery);
+
+			await controller.initialize();
+			const status = await queue.getSessionEvidenceStatus([fresh.sessionId]);
+			assert.equal(status.totalEvents, 1);
+			assert.equal(status.pendingEvents, 0);
+			assert.equal(status.missingSessions, 0);
+		});
+
+		test('archived assessment evidence remains isolated', async () => {
+			await pairStart();
+			const fresh = await captureFile();
+			await controller.stopAndSubmit();
+			if (controller.view.state !== 'submitted') {
+				await until(async () => (await queue.getSessionEvidenceStatus([fresh.sessionId])).pendingEvents === 0, 'ack');
+				await controller.stopAndSubmit();
+			}
+			assert.equal(controller.view.state, 'submitted');
+
+			await controller.dispose();
+			recording.dispose();
+			recording = new RecordingController({ text: '', command: '', tooltip: '', show() {}, dispose() {} }, async () => recordingConsent);
+			controller = new AssessmentController(api, store, recording, {
+				flushStopped: async id => { await persistence.flush(); await persistence.completeSession(id); },
+				freezeFinalization: (scope, existingOnly) => queue.freezeFinalization(scope, existingOnly),
+				getStatus: ids => queue.getSessionEvidenceStatus(ids), disableDevelopmentUploads: async () => {}
+			}, async () => true, () => {}, 1500, undefined, delivery);
+
+			await controller.initialize();
+			assert.equal(controller.allowsDevelopmentUpload(fresh.sessionId), false);
+			currentPairCode = 'ABCD-EFGH-JKLM-NPQR';
+			codeUsed = false;
+			submission = undefined;
+			startedAt = undefined;
+			deadline = undefined;
+			serverBindings = [];
+			await controller.pair(currentPairCode);
+			assert.equal(controller.view.state, 'error');
+			assert.equal(controller.view.reason, 'protocol');
+		});
+
+		test('existing recording, consent and pairing flows remain functional after verified finalization', async () => {
+			await pairStart();
+			const fresh = await captureFile();
+			await controller.stopAndSubmit();
+			if (controller.view.state !== 'submitted') {
+				await until(async () => (await queue.getSessionEvidenceStatus([fresh.sessionId])).pendingEvents === 0, 'ack');
+				await controller.stopAndSubmit();
+			}
+			assert.equal(controller.view.state, 'submitted');
+
+			await controller.dispose();
+			recording.dispose();
+			recording = new RecordingController({ text: '', command: '', tooltip: '', show() {}, dispose() {} }, async () => recordingConsent);
+			controller = new AssessmentController(api, store, recording, {
+				flushStopped: async id => { await persistence.flush(); await persistence.completeSession(id); },
+				freezeFinalization: (scope, existingOnly) => queue.freezeFinalization(scope, existingOnly),
+				getStatus: ids => queue.getSessionEvidenceStatus(ids), disableDevelopmentUploads: async () => {}
+			}, async () => true, () => {}, 1500, undefined, delivery);
+
+			await controller.initialize();
+			assert.equal(controller.view.state, 'unpaired');
+
+			currentPairCode = 'WXYZ-2345-6789-ABCD';
+			currentSessionId = '99';
+			currentToken = 'adt_ext_' + 'd'.repeat(43);
+			codeUsed = false;
+			submission = undefined;
+			startedAt = undefined;
+			deadline = undefined;
+			serverBindings = [];
+
+			await controller.pair(currentPairCode);
+			assert.equal(controller.view.state, 'paired');
+			await controller.start();
+			assert.equal(controller.view.state, 'active');
+			assert.equal(recording.isRecording, true);
+		});
 	});
 });
