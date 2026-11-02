@@ -10,12 +10,28 @@ export interface NativeSessionPickItem {
 	resolvedPath: string; // absolute path — used only internally for connect(), never displayed
 }
 
+export type AssessmentNativeDiagnostic =
+	| 'prompt_shown'
+	| 'connect_selected'
+	| 'not_now_selected'
+	| 'quiet_selected'
+	| 'prompt_dismissed'
+	| 'native_unsupported'
+	| 'candidates_declined'
+	| 'not_recording'
+	| 'quieted'
+	| 'busy'
+	| 'no_items'
+	| 'prompt_failed'
+	| 'connect_ready';
+
 export interface AssessmentNativeDiscoveryOptions {
 	/** Maximum candidates to show at once in a multi-session picker */
 	maxPickerItems?: number;
 	/** Injected for testing */
 	notification?: (message: string, ...actions: string[]) => PromiseLike<string | undefined>;
 	picker?: (items: readonly NativeSessionPickItem[]) => PromiseLike<NativeSessionPickItem | undefined>;
+	onDiagnostic?: (diagnostic: AssessmentNativeDiagnostic) => void;
 }
 
 export interface AssessmentNativeDiscoveryConnector {
@@ -58,24 +74,42 @@ export class AssessmentNativeDiscovery {
 
 	/** Called by onCandidatesChanged when an assessment IS active. */
 	notify(candidates: readonly CodexSessionRegistration[]): void {
-		if (!this.recording.isRecording || this.connecting || this.prompting || !candidates.length) { return; }
+		if (!this.recording.isRecording) { this.options.onDiagnostic?.('not_recording'); return; }
+		if (this.connecting || this.prompting) { this.options.onDiagnostic?.('busy'); return; }
+		if (!candidates.length) { return; }
 		const recordingId = this.recording.sessionId;
 		if (!recordingId) { return; }
-		if (this.isQuieted(recordingId)) { return; }
+		if (this.isQuieted(recordingId)) { this.options.onDiagnostic?.('quieted'); return; }
 
 		const checkAndPrompt = async () => {
-			if (this.connector.supportsNative && !await this.connector.supportsNative()) { return; }
-			if (!this.recording.isRecording || this.recording.sessionId !== recordingId) { return; }
+			try {
+				if (this.connector.supportsNative && !await this.connector.supportsNative()) {
+					this.options.onDiagnostic?.('native_unsupported');
+					return;
+				}
+				if (!this.recording.isRecording || this.recording.sessionId !== recordingId) {
+					this.options.onDiagnostic?.('not_recording');
+					return;
+				}
 
-			const declined = this.declined.get(recordingId) ?? new Set<string>();
-			const unvisited = candidates.filter(c => !declined.has(c.sourceFileId) && (c.status === 'eligible' || c.status === 'ambiguous'));
-			if (!unvisited.length) { return; }
+				const declined = this.declined.get(recordingId) ?? new Set<string>();
+				const unvisited = candidates.filter(c => !declined.has(c.sourceFileId) && (c.status === 'eligible' || c.status === 'ambiguous'));
+				if (!unvisited.length) {
+					this.options.onDiagnostic?.('candidates_declined');
+					return;
+				}
 
-			const sessDir = this.connector.sessionsDirectory();
-			const items = this.buildPickItems(unvisited, sessDir);
-			if (!items.length) { return; }
+				const sessDir = this.connector.sessionsDirectory();
+				const items = this.buildPickItems(unvisited, sessDir);
+				if (!items.length) {
+					this.options.onDiagnostic?.('no_items');
+					return;
+				}
 
-			await this.showPrompt(recordingId, items);
+				await this.showPrompt(recordingId, items);
+			} catch {
+				this.options.onDiagnostic?.('prompt_failed');
+			}
 		};
 
 		void checkAndPrompt();
@@ -108,6 +142,7 @@ export class AssessmentNativeDiscovery {
 		try {
 			let chosenItem: NativeSessionPickItem | undefined;
 
+			this.options.onDiagnostic?.('prompt_shown');
 			if (items.length === 1) {
 				const item = items[0];
 				const declined = this.declined.get(recordingId);
@@ -122,12 +157,20 @@ export class AssessmentNativeDiscovery {
 				if (!this.recording.isRecording || this.recording.sessionId !== recordingId) { return; }
 
 				if (response === QUIET_ACTION) {
-					this.quieted.add(recordingId); return;
+					this.quieted.add(recordingId);
+					this.options.onDiagnostic?.('quiet_selected');
+					return;
 				}
 				if (response === NOT_NOW_ACTION) {
-					this.addDeclined(recordingId, item.sourceFileId); return;
+					this.addDeclined(recordingId, item.sourceFileId);
+					this.options.onDiagnostic?.('not_now_selected');
+					return;
 				}
-				if (response !== CONNECT_ACTION) { return; } // dismissed
+				if (response !== CONNECT_ACTION) {
+					this.options.onDiagnostic?.('prompt_dismissed');
+					return;
+				} // dismissed
+				this.options.onDiagnostic?.('connect_selected');
 				chosenItem = item;
 			} else {
 				const picker = this.options.picker ?? defaultPicker;
@@ -135,8 +178,10 @@ export class AssessmentNativeDiscovery {
 				if (!this.recording.isRecording || this.recording.sessionId !== recordingId) { return; }
 				if (!selected) {
 					for (const item of items) { this.addDeclined(recordingId, item.sourceFileId); }
+					this.options.onDiagnostic?.('prompt_dismissed');
 					return;
 				}
+				this.options.onDiagnostic?.('connect_selected');
 				chosenItem = selected;
 			}
 
@@ -147,12 +192,15 @@ export class AssessmentNativeDiscovery {
 			try {
 				const sessDir = this.connector.sessionsDirectory();
 				const workspaces = this.connector.workspaces();
-				await this.connector.connect(
+				const connected = await this.connector.connect(
 					chosenItem.resolvedPath,
 					sessDir,
 					workspaces,
 					async () => true
 				);
+				if (connected) {
+					this.options.onDiagnostic?.('connect_ready');
+				}
 			} finally {
 				this.connecting = false;
 			}
@@ -218,13 +266,18 @@ export function resolveSessionPath(
 	return pathJoin(sessionsDirectory, year, month, day, rolloutName);
 }
 
-async function defaultNotification(message: string, ...actions: string[]): Promise<string | undefined> {
-	const { default: vscode } = await import('vscode');
+async function getVscode(): Promise<typeof import('vscode')> {
+	const mod = await import('vscode');
+	return (mod as unknown as { default?: typeof import('vscode') }).default ?? mod;
+}
+
+export async function defaultNotification(message: string, ...actions: string[]): Promise<string | undefined> {
+	const vscode = await getVscode();
 	return vscode.window.showInformationMessage(message, ...actions);
 }
 
-async function defaultPicker(items: readonly NativeSessionPickItem[]): Promise<NativeSessionPickItem | undefined> {
-	const { default: vscode } = await import('vscode');
+export async function defaultPicker(items: readonly NativeSessionPickItem[]): Promise<NativeSessionPickItem | undefined> {
+	const vscode = await getVscode();
 	return vscode.window.showQuickPick([...items], {
 		title: 'Detected Codex sessions for this assessment',
 		placeHolder: 'Select a verified session to connect (prompts, responses and tool activity will be captured)'

@@ -352,12 +352,23 @@ export async function activate(context: vscode.ExtensionContext) {
 			path: folder.uri.fsPath, workspaceId: createHash('sha256').update(folder.uri.toString()).digest('hex')
 		})), {
 			sessionsDirectory: codexConfiguration.inspect<string>('sessionsDirectory')?.globalValue,
+			startToleranceMs: 30000,
 			watch: (root, created, changed) => {
 				const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(vscode.Uri.file(root), '**/*.jsonl'), false, false, true);
 				return vscode.Disposable.from(watcher, watcher.onDidCreate(uri => created(uri.fsPath)), watcher.onDidChange(uri => changed(uri.fsPath)));
 			},
 			onDiagnostic: diagnostic => output.appendLine(diagnostics[diagnostic]),
+			onCandidateEvaluated: (status, reason) => {
+				if (status === 'eligible') {
+					output.appendLine(`Codex session candidate discovered: ${reason} (eligible).`);
+				} else if (status === 'rejected') {
+					output.appendLine(`Codex session candidate rejected: ${reason}.`);
+				} else if (status === 'ambiguous') {
+					output.appendLine(`Codex session candidate evaluated: ${reason} (ambiguous).`);
+				}
+			},
 			onCandidatesChanged: candidates => {
+				output.appendLine(`Codex session candidates updated: ${candidates.length} candidate(s).`);
 				if (activeAssessment?.isAssociatedSession(recording.sessionId ?? '')) {
 					activeAssessmentDiscovery?.notify(candidates);
 				} else {
@@ -365,6 +376,19 @@ export async function activate(context: vscode.ExtensionContext) {
 				}
 			}
 		});
+		context.subscriptions.push(recording.addLifecycleListener({
+			prepare: async () => {},
+			started: () => {
+				const folderCount = tracker.getApprovedFolders().length;
+				output.appendLine(`Codex session discovery: enabled for recording. Approved workspaces: ${folderCount}.`);
+			},
+			stopped: () => {
+				output.appendLine('Codex session discovery: disabled (recording stopped).');
+			},
+			cancelled: () => {
+				output.appendLine('Codex session discovery: disabled (recording cancelled).');
+			}
+		}));
 		const parser = new CodexEventParser(recording, discovery, writer, {
 			isExcludedPath,
 			resolveToolPath: (path, source) => {
@@ -680,7 +704,13 @@ export async function activate(context: vscode.ExtensionContext) {
 		});
 		context.subscriptions.push({ dispose: () => { void activeNativeCodex?.dispose(); } });
 		activeAssessmentDiscovery = new AssessmentNativeDiscovery(recording, {
-			connect: (file, dir, ws, confirm) => activeNativeCodex!.connect(file, dir, ws, confirm),
+			connect: async (file, dir, ws, confirm) => {
+				const result = await activeNativeCodex!.connect(file, dir, ws, confirm);
+				if (result) {
+					output.appendLine('Native Codex connection ready: prospective capture active for verified session.');
+				}
+				return result;
+			},
 			sessionsDirectory: () => {
 				const configured = vscode.workspace.getConfiguration('ai-developer-tracker.codex').inspect<string>('sessionsDirectory')?.globalValue;
 				return codexSessionsDirectory(configured);
@@ -690,7 +720,32 @@ export async function activate(context: vscode.ExtensionContext) {
 				workspaceId: createHash('sha256').update(folder.uri.toString()).digest('hex')
 			})),
 			resolvePath: id => activeDiscovery?.resolveCandidatePath(id),
-			supportsNative: () => activeWorkflow?.supportsNative() ?? Promise.resolve(false)
+			supportsNative: async () => {
+				const supported = await activeWorkflow?.supportsNative() ?? false;
+				output.appendLine(`Rails native-session capability: ${supported ? 'available (assessment-ai-session.v1)' : 'unavailable'}.`);
+				return supported;
+			}
+		}, {
+			onDiagnostic: diag => {
+				const messages: Record<string, string> = {
+					prompt_shown: 'Native session notification shown to candidate.',
+					connect_selected: 'Native session notification: candidate selected Connect & Allow.',
+					not_now_selected: 'Native session notification: candidate selected Not Now.',
+					quiet_selected: 'Native session notification: candidate selected Don\'t Ask Again for this assessment.',
+					prompt_dismissed: 'Native session notification: candidate dismissed prompt.',
+					native_unsupported: 'Native session notification suppressed: Rails native-session capability unavailable.',
+					candidates_declined: 'Native session notification suppressed: all discovered candidates were previously declined.',
+					not_recording: 'Native session notification suppressed: recording is not active.',
+					quieted: 'Native session notification suppressed: discovery is quieted for this assessment.',
+					busy: 'Native session notification suppressed: connection or prompt in progress.',
+					no_items: 'Native session notification suppressed: no valid candidate items to display.',
+					prompt_failed: 'Native session notification: display failed.',
+					connect_ready: 'Native Codex connection ready: prospective capture active for verified session.'
+				};
+				if (messages[diag]) {
+					output.appendLine(messages[diag]);
+				}
+			}
 		});
 		context.subscriptions.push(activeAssessmentDiscovery);
 		activeManagedCodex = new ManagedCodexCapture(recording, writer, activeWorkflow, join(queueStorageUri.fsPath, 'provider-runtime', 'codex'),

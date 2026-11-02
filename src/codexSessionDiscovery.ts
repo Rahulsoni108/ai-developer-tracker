@@ -41,9 +41,11 @@ export interface DiscoveryOptions {
 	maxMetadataBytes?: number;
 	maxEntriesPerScan?: number;
 	maxRegistryEntries?: number;
+	startToleranceMs?: number;
 	now?: () => Date;
 	watch?: (root: string, created: (file: string) => void, changed: (file: string) => void) => Disposable;
 	onCandidatesChanged?: (candidates: readonly CodexSessionRegistration[]) => void;
+	onCandidateEvaluated?: (status: DiscoveryStatus, reason: DiscoveryReason) => void;
 	onDiagnostic?: (diagnostic: DiscoveryDiagnostic) => void;
 }
 /** Counts/fixed codes only. Never includes source IDs, paths, cwd, timestamps or content. */
@@ -380,6 +382,7 @@ export class CodexSessionDiscovery implements RecordingLifecycle, Disposable {
 		if (!this.registry.has(sourceFileId) && this.registry.size >= this.maxRegistry) { this.diagnostic(run, 'registry_limit'); return; }
 		this.registry.set(sourceFileId, { recordingSessionId: run.id, sourceFileId,
 			sourceFileReference: `codex-file:${sourceFileId}`, ...fields, status, reason });
+		this.options.onCandidateEvaluated?.(status, reason);
 	}
 
 	private async read(run: Run, part: string): Promise<MetadataResult> {
@@ -397,10 +400,18 @@ export class CodexSessionDiscovery implements RecordingLifecycle, Disposable {
 
 	private async workspace(run: Run, cwd: string): Promise<{ scope: WorkspaceScope; relativeCwd: string } | 'outside' | 'unverified'> {
 		const path = resolve(cwd);
-		const scopes = run.scopes.filter(scope => inside(scope.path, path) || inside(scope.canonical, path)).sort((a, b) => b.path.length - a.path.length);
+		let canonicalCwd = path;
+		try { canonicalCwd = await realpath(path); } catch { /* unreadable cwd */ }
+		const matchScope = (scope: WorkspaceScope) =>
+			inside(scope.path, path) || inside(scope.canonical, path)
+			|| inside(scope.canonical, canonicalCwd) || inside(scope.path, canonicalCwd)
+			|| samePath(scope.path, path) || samePath(scope.canonical, canonicalCwd);
+		const scopes = run.scopes.filter(matchScope).sort((a, b) => b.path.length - a.path.length);
 		if (!scopes.length) { return 'outside'; }
 		const scope = scopes[0];
-		const part = relative(inside(scope.path, path) ? scope.path : scope.canonical, path);
+		const basePath = (inside(scope.path, path) || samePath(scope.path, path)) ? scope.path : scope.canonical;
+		const targetPath = (inside(basePath, path) || samePath(basePath, path)) ? path : canonicalCwd;
+		const part = relative(basePath, targetPath);
 		let candidate = scope.canonical;
 		try {
 			for (const segment of part ? part.split(sep) : []) {
@@ -408,7 +419,8 @@ export class CodexSessionDiscovery implements RecordingLifecycle, Disposable {
 				const stat = await lstat(candidate);
 				if (stat.isSymbolicLink() || !stat.isDirectory()) { return 'unverified'; }
 			}
-			if (!inside(scope.canonical, await realpath(candidate))) { return 'unverified'; }
+			const candidateCanonical = await realpath(candidate);
+			if (!inside(scope.canonical, candidateCanonical) && !samePath(scope.canonical, candidateCanonical)) { return 'unverified'; }
 			return { scope, relativeCwd: part.split(sep).join('/') || '.' };
 		} catch { return 'unverified'; }
 	}
@@ -432,8 +444,9 @@ export class CodexSessionDiscovery implements RecordingLifecycle, Disposable {
 			if (run.files.size >= this.maxRegistry && !run.files.has(part)) { this.diagnostic(run, 'registry_limit'); return; }
 			const cache: FileCache = { relativePath: part, fingerprint: signature, complete: false };
 			run.files.set(part, cache);
+			const tolerance = this.options.startToleranceMs ?? 0;
 			// Old files (including old sessions appended during recording) are never opened.
-			if (!this.options.selectedSessionFile && stat.birthtimeMs > 0 && stat.birthtimeMs < run.startMs) {
+			if (!this.options.selectedSessionFile && stat.birthtimeMs > 0 && stat.birthtimeMs < run.startMs - tolerance) {
 				cache.complete = true; this.entry(run, part, 'rejected', 'historical'); return;
 			}
 			const result = await this.read(run, part);
@@ -444,7 +457,7 @@ export class CodexSessionDiscovery implements RecordingLifecycle, Disposable {
 			cache.complete = true;
 			const metadata = result.metadata;
 			const created = Date.parse(metadata.createdAt);
-			if (!this.options.selectedSessionFile && created < run.startMs) { this.entry(run, part, 'rejected', 'historical'); return; }
+			if (!this.options.selectedSessionFile && created < run.startMs - tolerance) { this.entry(run, part, 'rejected', 'historical'); return; }
 			if (created > this.now().getTime()) { this.entry(run, part, 'ambiguous', 'future_timestamp'); return; }
 			const match = await this.workspace(run, metadata.cwd);
 			if (match === 'outside') { this.entry(run, part, 'rejected', 'outside_workspace'); return; }

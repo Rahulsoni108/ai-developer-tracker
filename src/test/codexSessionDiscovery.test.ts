@@ -287,4 +287,57 @@ suite('Codex session discovery', () => {
 		assert.ok(!serialized.includes('private-account') && !serialized.includes('private source code') && !serialized.includes('private-user'));
 		assert.ok(!JSON.stringify(diagnostics).includes(temporary));
 	});
+
+	test('startToleranceMs allows eligible sessions created within start window while rejecting older sessions', async () => {
+		// Session created 500ms before startMs (e.g. during launch/preparation sequence)
+		const preStartMetadata = meta({ timestamp: new Date(startMs - 500).toISOString() });
+		await session(preStartMetadata, 'pre-start.jsonl');
+		// Session created 60s before startMs (clearly historical)
+		const oldMetadata = meta({ timestamp: new Date(startMs - 60000).toISOString() });
+		await session(oldMetadata, 'old-session.jsonl');
+
+		// Configure with 5000ms tolerance
+		configure({ startToleranceMs: 5000 });
+		await start();
+
+		const registry = discovery.getRegistry();
+		const preStartEntry = registry.find(e => e.sourceSessionId === preStartMetadata.id);
+		const oldEntry = registry.find(e => e.reason === 'historical');
+
+		assert.ok(preStartEntry, 'Pre-start session should be in registry');
+		assert.strictEqual(preStartEntry.status, 'eligible');
+		assert.strictEqual(preStartEntry.reason, 'recent_workspace_match');
+
+		assert.ok(oldEntry, 'Old session should be in registry');
+		assert.strictEqual(oldEntry.status, 'rejected');
+		assert.strictEqual(oldEntry.reason, 'historical');
+	});
+
+	test('onCandidateEvaluated callback receives status and reason for each evaluated session', async () => {
+		const evaluated: { status: string; reason: string }[] = [];
+		configure({
+			onCandidateEvaluated: (status, reason) => {
+				evaluated.push({ status, reason });
+			}
+		});
+
+		await session();
+		await start();
+
+		assert.ok(evaluated.length >= 1, 'Should have evaluated at least 1 candidate');
+		assert.strictEqual(evaluated[0].status, 'eligible');
+		assert.strictEqual(evaluated[0].reason, 'recent_workspace_match');
+	});
+
+	test('workspace matching correctly handles canonical paths and subdirectories', async () => {
+		const subDir = join(workspace, 'packages', 'app');
+		await mkdir(subDir, { recursive: true });
+		await session(meta({ cwd: subDir }));
+		await start();
+
+		const entries = discovery.getRegistry();
+		assert.strictEqual(entries.length, 1);
+		assert.strictEqual(entries[0].status, 'eligible');
+		assert.strictEqual(entries[0].workspaceRelativeCwd, join('packages', 'app'));
+	});
 });

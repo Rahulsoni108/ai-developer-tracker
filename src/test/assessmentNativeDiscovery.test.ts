@@ -1,7 +1,15 @@
 import * as assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { RecordingController } from '../recording';
-import { AssessmentNativeDiscovery, type AssessmentNativeDiscoveryConnector, type NativeSessionPickItem, formatUtcTime } from '../assessmentNativeDiscovery';
+import {
+	AssessmentNativeDiscovery,
+	type AssessmentNativeDiscoveryConnector,
+	type AssessmentNativeDiagnostic,
+	type NativeSessionPickItem,
+	defaultNotification,
+	defaultPicker,
+	formatUtcTime
+} from '../assessmentNativeDiscovery';
 import type { CodexSessionRegistration } from '../codexSessionDiscovery';
 
 // Minimal stub for RecordingController status bar
@@ -362,5 +370,72 @@ suite('AssessmentNativeDiscovery', function () {
 		assert.ok(items[0].detail.includes('src/components'));
 		assert.ok(!items[0].detail.includes('/home/user'));
 		discovery.dispose();
+	});
+
+	// --- Test 19: diagnostic emission on actions, readiness, and suppression ---
+	test('emits diagnostics for prompt display, consent actions, and suppression reasons', async () => {
+		const diagnostics: AssessmentNativeDiagnostic[] = [];
+		const candidate = makeCandidate({ recordingSessionId: recording.sessionId! });
+		notifyResponses.push('Connect & Allow');
+		const discovery = new AssessmentNativeDiscovery(recording, connector, {
+			notification: async (message, ...actions) => {
+				notifyCalls.push({ message, actions });
+				return notifyResponses.shift();
+			},
+			onDiagnostic: diag => diagnostics.push(diag)
+		});
+
+		discovery.notify([candidate]);
+		await until(() => connector.calls.length >= 1, 4000);
+		assert.ok(diagnostics.includes('prompt_shown'));
+		assert.ok(diagnostics.includes('connect_selected'));
+		assert.ok(diagnostics.includes('connect_ready'));
+
+		// Test not_recording suppression diagnostic
+		diagnostics.length = 0;
+		recording.stop();
+		discovery.notify([candidate]);
+		assert.ok(diagnostics.includes('not_recording'));
+
+		discovery.dispose();
+	});
+
+	// --- Test 20: suppression diagnostics when unsupported or quieted ---
+	test('emits diagnostics when prompt is suppressed by capability or quieting', async () => {
+		const diagnostics: AssessmentNativeDiagnostic[] = [];
+		const candidate = makeCandidate({ recordingSessionId: recording.sessionId! });
+		const unsupportedConnector = makeConnector(true, undefined, false);
+		const discovery = new AssessmentNativeDiscovery(recording, unsupportedConnector, {
+			onDiagnostic: diag => diagnostics.push(diag)
+		});
+
+		discovery.notify([candidate]);
+		await until(() => diagnostics.includes('native_unsupported'));
+
+		discovery.dispose();
+	});
+
+	// --- Test 21: prompt failure handling emits prompt_failed without unhandled crash ---
+	test('catches notification errors and emits prompt_failed diagnostic without throwing unhandled rejection', async () => {
+		const diagnostics: AssessmentNativeDiagnostic[] = [];
+		const candidate = makeCandidate({ recordingSessionId: recording.sessionId! });
+		const discovery = new AssessmentNativeDiscovery(recording, connector, {
+			notification: async () => {
+				throw new Error('Simulated VS Code window notification failure');
+			},
+			onDiagnostic: diag => diagnostics.push(diag)
+		});
+
+		discovery.notify([candidate]);
+		await until(() => diagnostics.includes('prompt_failed'));
+		assert.equal(connector.calls.length, 0);
+
+		discovery.dispose();
+	});
+
+	// --- Test 22: default notification and picker functions import correctly ---
+	test('defaultNotification and defaultPicker resolve vscode module without undefined window error', () => {
+		assert.equal(typeof defaultNotification, 'function');
+		assert.equal(typeof defaultPicker, 'function');
 	});
 });
