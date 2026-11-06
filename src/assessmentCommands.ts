@@ -23,6 +23,7 @@ export function formatAssessmentStatus(view: AssessmentView): string {
 		if (view.state === 'unpaired' && !view.archiving) { lines.push('Ready to pair a new assessment. Archived evidence remains isolated.'); }
 	}
 	if (view.lastStart) { lines.push('Last start attempt: ' + describeAssessmentStart(view.lastStart)); }
+	if (view.lastSubmission) { lines.push(`Last submission attempt: ${view.lastSubmission.status}; step: ${view.lastSubmission.step}${view.lastSubmission.reason ? '; code: ' + view.lastSubmission.reason : ''}.`); }
 	if (view.uploadStatus) { lines.push(`Assessment delivery: ${view.uploadStatus}`); }
 	if (view.reason) { lines.push(`Status code: ${view.reason}`); }
 	if (view.deadline) { lines.push(`Server deadline: ${view.deadline}`, `Last server time: ${view.serverTime}`, 'Timing is the last server snapshot; offline time is unverified.'); }
@@ -61,7 +62,11 @@ export function registerAssessmentCommands(controller: AssessmentController, moc
 			await controller.start(); const diagnostic = controller.view.lastStart;
 			if (diagnostic?.status === 'failed') { void vscode.window.showWarningMessage(describeAssessmentStart(diagnostic) + ' See Output → AI Developer Tracker for the prerequisite sequence.'); }
 		}),
-		vscode.commands.registerCommand(SUBMIT_ASSESSMENT_COMMAND, async () => { await beforeSubmit(); return controller.stopAndSubmit(); }),
+		vscode.commands.registerCommand(SUBMIT_ASSESSMENT_COMMAND, async () => {
+			await beforeSubmit(); await controller.stopAndSubmit();
+			const view = controller.view;
+			if (view.state === 'submission_pending') { void vscode.window.showWarningMessage(formatAssessmentStatus(view)); }
+		}),
 		vscode.commands.registerCommand(ASSESSMENT_STATUS_COMMAND, async () => {
 			await controller.showStatus(); const view = controller.view;
 			void vscode.window.showInformationMessage(formatAssessmentStatus(view)); return view;

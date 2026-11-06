@@ -133,6 +133,40 @@ suite('Assessment lifecycle foundation', () => {
 		await controller.start(); assert.equal(recording.isRecording, false); assert.equal(starts, 1);
 		mock.getStatus = async () => { throw new Error('offline'); }; await controller.showStatus(); assert.equal(controller.view.state, 'submission_pending');
 	});
+	test('status refresh preserves the failed submission step and reason instead of claiming progress', async () => {
+		await paired(); await controller.start(); const requestId = metadata().submitRequestId;
+		failFlush = true; await controller.stopAndSubmit();
+		assert.deepEqual(controller.view.lastSubmission, { step: 'flush_capture', status: 'failed', reason: 'storage' });
+		await controller.showStatus(); await controller.showStatus();
+		assert.equal(controller.view.state, 'submission_pending'); assert.equal(controller.view.reason, 'storage');
+		assert.equal(controller.view.lastSubmission?.step, 'flush_capture'); assert.equal(submits, 0);
+		assert.equal(metadata().submitRequestId, requestId); assert.equal(recording.isRecording, false);
+		failFlush = false; await controller.stopAndSubmit();
+		assert.equal(controller.view.state, 'submitted'); assert.equal(controller.view.lastSubmission?.status, 'submitted');
+		assert.equal(metadata().submitRequestId, requestId);
+	});
+	test('provider failures expose only a safe finalization stage and code, never exception content', async () => {
+		await paired(); await controller.start();
+		mock.submit = async () => { throw new Error('DUMMY_PRIVATE_TOKEN_AND_CONTENT'); };
+		await controller.stopAndSubmit();
+		assert.deepEqual(controller.view.lastSubmission, { step: 'finalize', status: 'failed', reason: 'unavailable' });
+		await controller.showStatus(); assert.equal(controller.view.reason, 'unavailable');
+		assert.equal(JSON.stringify(controller.view).includes('DUMMY_PRIVATE_TOKEN_AND_CONTENT'), false);
+	});
+	test('an idle pending submission after restart requires recovery rather than claiming an active operation', async () => {
+		await paired(); await controller.start(); pending = 1; total = 1; await controller.stopAndSubmit();
+		await controller.dispose(); recording.dispose(); newRecording(); newController(); await controller.initialize();
+		await controller.showStatus(); assert.equal(controller.view.state, 'submission_pending');
+		assert.equal(controller.view.reason, 'recovery_required'); assert.equal(recording.isRecording, false);
+	});
+	test('throwing diagnostic observers cannot block submission or expose sensitive exception text', async () => {
+		await controller.dispose();
+		controller = new AssessmentController(mock, store, recording, evidence, async () => true, () => {}, 100,
+			undefined, undefined, undefined, undefined, () => { throw new Error('PRIVATE_DIAGNOSTIC'); });
+		await controller.initialize(); await paired(); await controller.start(); await controller.stopAndSubmit();
+		assert.equal(controller.view.state, 'submitted'); assert.equal(controller.view.lastSubmission?.status, 'submitted');
+		assert.equal(JSON.stringify(controller.view).includes('PRIVATE_DIAGNOSTIC'), false);
+	});
 	test('server deadline changes or mismatched IDs are rejected; the local clock never extends the deadline', async () => {
 		await paired(); await controller.start(); const deadline = controller.view.deadline; const original = mock.getStatus.bind(mock);
 		mock.getStatus = async (...args) => ({ ...await original(...args), deadline: '2030-01-01T02:00:00.000Z' });

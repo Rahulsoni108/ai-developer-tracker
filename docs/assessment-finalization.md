@@ -40,6 +40,18 @@ assessment has **not** been verified by the automated HTTPS fixtures.
 
 ## Exact R4.3 request and response
 
+### Safe submission diagnostics
+
+Output → AI Developer Tracker reports each submission step using fixed stage/status/error
+codes only, for example `Assessment submission: failed; step: freeze_manifest; code: recovery_required.`
+It never includes event content, identifiers, credentials, paths or exception messages.
+Show Assessment Status preserves a failed attempt's reason; an idle pending submission
+is marked as requiring recovery, rather than claiming an operation is still running.
+Stop & Submit also reports a pending result directly. Retry uses the same durable request
+ID and manifests. After reloading, approve upload consent again if asked. Do not archive,
+erase local storage or change evidence to clear a submission error. These diagnostics do
+not authorize uploads, change reconciliation or establish that finalization succeeded.
+
 `POST /api/v2/coding_session/extension/finalize`, HTTPS, JSON, no query string,
 existing session-scoped SecretStorage Bearer credential:
 

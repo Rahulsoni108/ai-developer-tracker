@@ -11,6 +11,12 @@ import { AssessmentApiError, type AssessmentApiClient, type AssessmentAuthentica
 import { validConnection, validServerStatus, type AssessmentMetadata, type AssessmentState, type AssessmentStore } from './assessmentStorage';
 
 export interface AssessmentEvidenceStatus { totalEvents: number; pendingEvents: number; missingSessions: number }
+export interface AssessmentSubmissionDiagnostic {
+	step: 'stop_capture' | 'save_intent' | 'disable_delivery' | 'flush_capture' | 'authentication' | 'server_status' | 'close_windows' | 'freeze_manifest'
+		| 'upload_consent' | 'enable_delivery' | 'drain_uploads' | 'reconcile_evidence' | 'finalize' | 'validate_receipt' | 'save_receipt';
+	status: 'running' | 'failed' | 'pending' | 'submitted';
+	reason?: AssessmentFailure;
+}
 export interface AssessmentEvidence {
 	/** Stop has already happened. Drain all collectors/correlations before completing this local session. */
 	flushStopped(localSessionId: string): Promise<void>;
@@ -24,6 +30,7 @@ export interface AssessmentView {
 	remainingMsAtLastCheck?: number; pendingEvents?: number;
 	uploadConsent: boolean; uploadStatus?: string;
 	lastStart?: AssessmentStartDiagnostic; archiving?: boolean; archivedCount?: number; archivedUnconfirmedCount?: number;
+	lastSubmission?: AssessmentSubmissionDiagnostic;
 }
 
 /** Assessment workflow only. RecordingController remains the sole recording-state owner. */
@@ -33,6 +40,7 @@ export class AssessmentController {
 	private reason?: AssessmentFailure;
 	private pendingEvents?: number;
 	private lastStart?: AssessmentStartDiagnostic;
+	private lastSubmission?: AssessmentSubmissionDiagnostic;
 	private consent = false;
 	private initialized = false;
 	private disposed = false;
@@ -53,7 +61,8 @@ export class AssessmentController {
 		private readonly confirmUpload: (hostname: string) => Promise<boolean>,
 		private readonly onChange: (view: AssessmentView) => void = () => {}, private readonly requestTimeoutMs = 10000,
 		private readonly evidenceConsents?: AssessmentConsentLifecycle, private readonly delivery?: AssessmentDeliveryLifecycle,
-		private readonly onStartDiagnostic: (value: AssessmentStartDiagnostic) => void = () => {}, private readonly workflow?: AssessmentWorkflowLifecycle) {
+		private readonly onStartDiagnostic: (value: AssessmentStartDiagnostic) => void = () => {}, private readonly workflow?: AssessmentWorkflowLifecycle,
+		private readonly onSubmissionDiagnostic: (value: AssessmentSubmissionDiagnostic) => void = () => {}) {
 		this.lifecycle = recording.addLifecycleListener({
 			preparation: 'assessment_authorization',
 			prepare: async (id, current) => {
@@ -93,6 +102,7 @@ export class AssessmentController {
 		const status = this.metadata?.serverStatus;
 		const mode = this.metadata?.connection.mode ?? (this.api.mode === 'unavailable' ? undefined : this.api.mode);
 		return { state: this.phase, ...(this.lastStart ? { lastStart: { ...this.lastStart } } : {}), ...(this.archiving ? { archiving: true } : {}),
+			...(this.lastSubmission ? { lastSubmission: { ...this.lastSubmission } } : {}),
 			...(this.archiveIndex.archives.length ? { archivedCount: this.archiveIndex.archives.length, archivedUnconfirmedCount: this.archiveIndex.archives.filter(item => !item.submissionConfirmed).length } : {}), ...(mode ? { mode } : {}), ...(this.reason ? { reason: this.reason } : {}),
 			...(status ? { serverTime: status.serverTime, ...(status.deadline ? { deadline: status.deadline,
 				remainingMsAtLastCheck: Math.max(0, Date.parse(status.deadline) - Date.parse(status.serverTime)) } : {}) } : {}),
@@ -211,43 +221,61 @@ export class AssessmentController {
 			}
 			this.submitting = true; const generation = this.generation;
 			try {
+				this.submissionStep('stop_capture');
 				const local = this.recording.sessionId;
 				this.set('stopping'); if (local) { this.recording.stop(); }
+				this.submissionStep('save_intent');
 				await this.save('submission_pending'); // Durable intent prevents recording restart even if closure fails.
+				this.submissionStep('disable_delivery');
 				await this.delivery?.disable();
+				this.submissionStep('flush_capture');
 				for (const id of this.metadata.localRecordingSessionIds) { await this.evidence.flushStopped(id); }
-				await this.authenticate(); await this.refresh();
-				if (this.metadata.serverStatus.state === 'submitted') { return; } // Verified recovery receipt, no consent mutations/uploads.
+				this.submissionStep('authentication'); await this.authenticate();
+				this.submissionStep('server_status'); await this.refresh();
+				if (this.metadata.serverStatus.state === 'submitted') {
+					this.submissionStep('validate_receipt', 'submitted'); return; // Verified recovery receipt, no consent mutations/uploads.
+				}
 				if (this.metadata.serverStatus.state !== 'active') { throw new AssessmentApiError('session_ended'); }
+				this.submissionStep('close_windows');
 				for (const id of this.metadata.localRecordingSessionIds) {
 					if (this.evidenceConsents) { await this.closeStoppedConsent(id); }
 				}
 				let frozen: AssessmentFinalizationRequest | undefined;
+				this.submissionStep('freeze_manifest');
 				if (this.metadata.connection.mode === 'rails') { frozen = await this.freeze(); }
 				if (!this.consent) {
+					this.submissionStep('upload_consent');
 					const generation = this.generation;
 					const accepted = await this.confirmUpload(new URL(this.metadata.connection.uploadEndpoint).hostname);
 					if (!accepted || this.disposed || generation !== this.generation) { throw new AssessmentApiError('consent_required'); }
 					this.consent = true;
 				}
-				await this.enableDelivery();
+				this.submissionStep('enable_delivery'); await this.enableDelivery();
+				this.submissionStep('drain_uploads');
 				if (this.delivery?.drain) { await this.call(signal => this.delivery!.drain!(this.metadata!.localRecordingSessionIds, signal)); }
+				this.submissionStep('reconcile_evidence');
 				const evidence = await this.evidence.getStatus(this.metadata.localRecordingSessionIds); this.pendingEvents = evidence.pendingEvents;
 				if (evidence.pendingEvents || evidence.missingSessions || !this.metadata.localRecordingSessionIds.length) {
-					this.set('submission_pending', 'evidence_pending'); return;
+					this.submissionStep('reconcile_evidence', 'pending', 'evidence_pending'); this.set('submission_pending', 'evidence_pending'); return;
 				}
 				// Stop the only delivery driver before reconciliation; no batches may race successful finalization.
-				await this.delivery?.disable();
+				this.submissionStep('disable_delivery'); await this.delivery?.disable();
+				this.submissionStep('reconcile_evidence');
 				if (frozen && (await this.freeze()).recordings.reduce((sum, row) => sum + row.event_count, 0) !== evidence.totalEvents) {
 					throw new AssessmentApiError('recovery_required');
 				}
 				if (!this.consent || generation !== this.generation || this.disposed) { throw new AssessmentApiError('consent_required'); }
+				this.submissionStep('finalize');
 				const status = await this.call(signal => this.api.submit(this.auth!, { requestId: this.metadata!.submitRequestId,
 					localRecordingSessionIds: [...this.metadata!.localRecordingSessionIds], retainedEventCount: evidence.totalEvents,
 					...(frozen ? { finalization: frozen } : {}) }, signal));
-				this.accept(status);
+				this.submissionStep('validate_receipt'); this.accept(status);
 				if (status.state !== 'submitted' || frozen && !receiptMatches(status.submission, frozen)) { throw new AssessmentApiError('protocol'); }
-				this.consent = false; await this.save('submitted'); this.set('submitted');
+				this.submissionStep('save_receipt'); this.consent = false; await this.save('submitted');
+				this.submissionStep('save_receipt', 'submitted'); this.set('submitted');
+			} catch (error) {
+				this.submissionStep(this.lastSubmission!.step, 'failed', error instanceof AssessmentApiError ? error.code : 'unavailable');
+				throw error;
 			} finally { this.submitting = false; }
 
 		}));
@@ -339,6 +367,10 @@ export class AssessmentController {
 		this.lastStart = { step, status, ...(reason ? { reason } : {}) };
 		try { this.onStartDiagnostic({ ...this.lastStart }); } catch { /* Fixed diagnostic observers cannot change authorization. */ }
 	}
+	private submissionStep(step: AssessmentSubmissionDiagnostic['step'], status: AssessmentSubmissionDiagnostic['status'] = 'running', reason?: AssessmentFailure): void {
+		this.lastSubmission = { step, status, ...(reason ? { reason } : {}) };
+		try { this.onSubmissionDiagnostic({ ...this.lastSubmission }); } catch { /* Safe diagnostics cannot change submission. */ }
+	}
 	private async enableDelivery(): Promise<void> {
 		if (this.archiving || this.disposed || !this.delivery || !this.metadata || !this.consent || this.metadata.serverStatus.state !== 'active' || this.metadata.connection.mode !== 'rails') { return; }
 		try { await this.delivery.enable(this.metadata, () => this.consent && !this.disposed); }
@@ -423,7 +455,9 @@ export class AssessmentController {
 		if (status.state === 'active' && Date.parse(status.deadline!) <= Date.parse(status.serverTime)) { throw new AssessmentApiError('session_ended'); }
 		const phase = status.state === 'submitted' ? 'submitted' : ['stopping', 'submission_pending'].includes(this.metadata!.phase)
 			? 'submission_pending' : status.state === 'paired' ? 'paired' : this.recording.isRecording && this.isAssociatedSession(this.recording.sessionId!) ? 'active' : 'recovery';
-		await this.save(phase); this.set(phase, ['expired', 'revoked'].includes(status.state) ? 'session_ended' : undefined);
+		const reason = ['expired', 'revoked'].includes(status.state) ? 'session_ended'
+			: phase === 'submission_pending' && !this.submitting ? this.reason ?? 'recovery_required' : undefined;
+		await this.save(phase); this.set(phase, reason);
 	}
 	private accept(status: AssessmentServerStatus): void {
 		const metadata = this.metadata!;
@@ -492,6 +526,7 @@ export class AssessmentController {
 		this.auth = undefined;
 		this.pendingEvents = undefined;
 		this.lastStart = undefined;
+		this.lastSubmission = undefined;
 	}
 	private async save(phase: AssessmentState): Promise<void> {
 		this.metadata!.phase = phase;

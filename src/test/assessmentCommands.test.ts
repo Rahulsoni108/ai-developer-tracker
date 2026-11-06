@@ -32,6 +32,12 @@ suite('Assessment VS Code commands', () => {
 		assert.ok(formatAssessmentStatus({ state: 'unpaired', uploadConsent: false }).includes('Configure assessment.apiOrigin'));
 		assert.ok(formatAssessmentStatus({ state: 'unpaired', mode: 'mock', uploadConsent: false }).includes('LOCAL MOCK ONLY'));
 	});
+	test('pending submission displays the safe failed stage and an explicit recovery action', () => {
+		const text = formatAssessmentStatus({ state: 'submission_pending', mode: 'rails', uploadConsent: false, reason: 'recovery_required',
+			lastSubmission: { step: 'freeze_manifest', status: 'failed', reason: 'recovery_required' } });
+		assert.ok(text.includes('Last submission attempt: failed; step: freeze_manifest; code: recovery_required.'));
+		assert.ok(text.includes('Use Stop & Submit again')); assert.equal(text.includes('submission is in progress'), false);
+	});
 	test('archive status distinguishes retained unconfirmed evidence from active/submitted state without stale timing', () => {
 		const text = formatAssessmentStatus({ state: 'unpaired', mode: 'rails', uploadConsent: false, archivedCount: 1, archivedUnconfirmedCount: 1 });
 		assert.ok(text.includes('Ready to pair a new assessment')); assert.ok(text.includes('submission unconfirmed'));
