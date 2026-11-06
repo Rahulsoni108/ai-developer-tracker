@@ -51,6 +51,8 @@ suite('Explicit workflow consent integration', () => {
  let nativeSupported: boolean; let nativeSources: { sourceSessionId: string; workspaceId: string }[];
  let refreshFailures: WorkflowRefreshFailure[]; let refreshHttpStatus: number | undefined; let diagnosticThrows: boolean;
  let processingLedger: AssessmentProcessingConsent;
+ let refreshClock: (() => bigint) | undefined;
+ let onRefreshRequest: (() => void) | undefined;
  const json = (data: unknown) => ({ status: 200, headers: {}, contentType: 'application/json', body: JSON.stringify({ data: mutation ? mutation(data) : data }) });
  function response(bundle: WorkflowStartBundle | WorkflowSourceBundle) {
   const localId = 'upload' in bundle ? bundle.intent.local_recording_session_id : bundle.disclosure.local_recording_session_id;
@@ -85,6 +87,7 @@ suite('Explicit workflow consent integration', () => {
  const transport: UploadTransport = { send: async request => {
   assert.equal(request.endpoint.origin, origin); assert.equal(request.token, auth.credential);
   const path = request.endpoint.pathname.split('/').at(-1)!; requests.push(path);
+  if (path === 'status') { onRefreshRequest?.(); }
   if (path === 'status' && refreshHttpStatus) { return { status: refreshHttpStatus, headers: {}, contentType: 'application/json', body: '{"error":"Synthetic denial"}' }; }
   if (path === fail) { throw new Error('Synthetic network failure'); }
   const body = request.body ? JSON.parse(request.body) : {};
@@ -111,6 +114,7 @@ suite('Explicit workflow consent integration', () => {
   secrets = new Map(); memory = new Map(); accepted = true; dialogs = 0; oldUploadDialogs = 0; requests = []; initial = undefined;
   uploadId = randomUUID(); revoked = false; windowsClosed = false; disclosures = []; processing = new Map(); workspaceIds = [W]; mutation = undefined; fail = undefined; nativeSupported = false; nativeSources = [];
   refreshFailures = []; refreshHttpStatus = undefined; diagnosticThrows = false;
+  refreshClock = undefined; onRefreshRequest = undefined;
   auth = { connection: { mode: 'rails', apiOrigin: origin, codingSessionId: '42', uploadEndpoint: origin + '/api/v2/coding_session/extension/events', credentialExpiresAt: END }, credential: 'adt_ext_' + 'a'.repeat(43) };
   status = { codingSessionId: '42', state: 'paired', serverTime: START, localRecordingSessionIds: [] };
   recording = new RecordingController({ text: '', tooltip: '', command: '', show() {}, dispose() {} }, current => workflow.confirmRecording(current));
@@ -122,7 +126,8 @@ suite('Explicit workflow consent integration', () => {
    new RailsWorkflowConsentClient(transport), () => workspaceIds, async notice => { dialogs++; assert.ok(notice.includes('Synthetic Processor')); return accepted; },
    (identity, state) => processingLedger.acceptWorkflowReceipt({ auth: identity, localSessionIds: controller.associatedRecordingSessionIds,
     currentRecording: state.request.local_recording_session_id, current: () => controller.isAssociatedSession(state.request.local_recording_session_id) && !controller.view.archiving }, state),
-   undefined, undefined, diagnostic => { refreshFailures.push(diagnostic); if (diagnosticThrows) { throw new Error('Synthetic diagnostic failure'); } });
+   undefined, undefined, diagnostic => { refreshFailures.push(diagnostic); if (diagnosticThrows) { throw new Error('Synthetic diagnostic failure'); } },
+   () => refreshClock ? refreshClock() : process.hrtime.bigint());
   const api: AssessmentApiClient = { mode: 'rails', pair: async () => ({ ...auth, status }), getStatus: async () => status,
    startOrResume: async () => { throw new Error('Legacy start must not be called'); }, submit: async () => { throw new Error('Not a finalization test'); } };
   const store = new AssessmentConnectionStore({ get: <T>(key: string, fallback?: T) => (memory.get(key) ?? fallback) as T,
@@ -195,6 +200,7 @@ suite('Explicit workflow consent integration', () => {
   assert.equal(controller.isAssociatedSession(id), true);
   assert.deepEqual(await queue.getSessionEvidenceStatus([id]), before);
   assert.equal(refreshFailures[0].stage, 'request'); assert.equal(refreshFailures[0].reason, 'authentication');
+  assert.equal(requests.filter(path => path === 'status').length, 1);
   assert.equal(JSON.stringify(refreshFailures).includes(auth.credential), false);
  });
  test('refresh timeout remains fail closed and reports timeout rather than authentication', async () => {
@@ -205,6 +211,64 @@ suite('Explicit workflow consent integration', () => {
   } finally { AbortSignal.timeout = original; }
   assert.equal(recording.isRecording, false);
   assert.equal(refreshFailures[0].reason, 'timeout'); assert.equal(refreshFailures[0].stage, 'request');
+ });
+ async function timedRefresh(work: (advance: (ms: number) => void, budgets: number[]) => void) {
+  await controller.start();
+  const live = (workflow as unknown as { live: { confirmedAt: bigint } }).live;
+  let now = live.confirmedAt + 1000000000n; refreshClock = () => now;
+  const originalTimeout = AbortSignal.timeout; const originalConfirm = queue.confirmDisclosureConsent; const budgets: number[] = [];
+  // Test timing separately from worker monotonic clocks. The response still goes
+  // through the real Rails receipt validator; storage admission has its own tests.
+  queue.confirmDisclosureConsent = async () => {};
+  AbortSignal.timeout = ms => {
+   if (ms <= 2500) { budgets.push(ms); if (budgets.length === 1) { return AbortSignal.abort(new DOMException('Synthetic transient timeout', 'TimeoutError')); } }
+   return new AbortController().signal;
+  };
+  try {
+   work(ms => { now += BigInt(ms) * 1000000n; }, budgets);
+   await (workflow as unknown as { refresh(): Promise<void> }).refresh();
+   return budgets;
+  } finally { AbortSignal.timeout = originalTimeout; queue.confirmDisclosureConsent = originalConfirm; }
+ }
+ test('a transient timeout retries within unchanged five-second authorization and keeps recording active', async () => {
+  let attempts = 0;
+  const budgets = await timedRefresh(advance => { onRefreshRequest = () => { attempts++; advance(attempts === 1 ? 2500 : 100); }; });
+  assert.equal(attempts, 2); assert.deepEqual(budgets, [2500, 1500]);
+  assert.equal(recording.isRecording, true); assert.equal(workflow.permits(recording.sessionId, 'codex'), true);
+  assert.deepEqual(refreshFailures, []);
+ });
+ test('a successful but late retry cannot revive expired authorization', async () => {
+  let attempts = 0;
+  await timedRefresh(advance => { onRefreshRequest = () => { attempts++; advance(attempts === 1 ? 2500 : 1500); }; });
+  assert.equal(attempts, 2); assert.equal(recording.isRecording, false);
+  assert.equal(refreshFailures[0].reason, 'timeout'); assert.equal(workflow.scopedRecordingId, undefined);
+ });
+ test('an exhausted original window sends no retry and never advances the confirmation time', async () => {
+  let attempts = 0;
+  await timedRefresh(advance => { onRefreshRequest = () => { attempts++; advance(4000); }; });
+  assert.equal(attempts, 1); assert.equal(recording.isRecording, false); assert.equal(refreshFailures[0].reason, 'timeout');
+ });
+ test('already expired confirmation cannot send a request or restore recording', async () => {
+  let attempts = 0;
+  await timedRefresh(advance => { advance(4000); onRefreshRequest = () => { attempts++; }; });
+  assert.equal(attempts, 0); assert.equal(recording.isRecording, false); assert.equal(refreshFailures[0].reason, 'timeout');
+ });
+ test('revocation returned by a timeout retry stops capture immediately', async () => {
+  let attempts = 0;
+  await timedRefresh(advance => { onRefreshRequest = () => { attempts++; advance(attempts === 1 ? 2500 : 100); if (attempts === 2) { revoked = true; } }; });
+  assert.equal(attempts, 2); assert.equal(recording.isRecording, false);
+  assert.equal(refreshFailures[0].reason, 'consent_required');
+ });
+ test('stop during a timed-out request prevents another request or late recording activation', async () => {
+  let attempts = 0;
+  await timedRefresh(advance => { onRefreshRequest = () => { attempts++; advance(2500); recording.stop(); }; });
+  assert.equal(attempts, 1); assert.equal(recording.isRecording, false); assert.equal(workflow.scopedRecordingId, undefined);
+ });
+ test('a protocol-invalid timeout retry never restores capture or retries again', async () => {
+  let attempts = 0;
+  await timedRefresh(advance => { onRefreshRequest = () => { attempts++; advance(attempts === 1 ? 2500 : 100); if (attempts === 2) { mutation = () => ({ private: 'synthetic-private-body' }); } }; });
+  assert.equal(attempts, 2); assert.equal(recording.isRecording, false); assert.equal(refreshFailures[0].reason, 'protocol');
+  assert.equal(JSON.stringify(refreshFailures).includes('synthetic-private-body'), false);
  });
  test('blocked consent and malformed refresh responses retain distinct safe reasons', async () => {
   await controller.start(); revoked = true;

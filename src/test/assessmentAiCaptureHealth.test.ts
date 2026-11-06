@@ -1,6 +1,6 @@
 import * as assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { AssessmentAiCaptureHealth, NATIVE_CHAT_CONTRACT_BLOCKER, describeAiCaptureHealth, stopAssessmentCaptureForWorkspaceChange } from '../assessmentAiCaptureHealth';
+import { AssessmentAiCaptureHealth, NATIVE_CHAT_CONTRACT_BLOCKER, describeNativeChatBlocker, describeAiCaptureHealth, stopAssessmentCaptureForWorkspaceChange } from '../assessmentAiCaptureHealth';
 import { RecordingController } from '../recording';
 import { createCodexEvent, createClaudeEvent, type TrackerEvent } from '../eventSchema';
 
@@ -94,5 +94,10 @@ suite('Assessment AI capture observations', () => {
 		assert.match(NATIVE_CHAT_CONTRACT_BLOCKER, /extension_launched_only/);
 		assert.match(NATIVE_CHAT_CONTRACT_BLOCKER, /cannot authorize/); assert.match(NATIVE_CHAT_CONTRACT_BLOCKER, /optional/);
 		assert.doesNotMatch(NATIVE_CHAT_CONTRACT_BLOCKER, /capture ready/i);
+	});
+	test('expired local authorization is not represented as a missing Rails capability', () => {
+		assert.match(describeNativeChatBlocker(false), /authorization is unavailable or expired/);
+		assert.doesNotMatch(describeNativeChatBlocker(false), /has not advertised/);
+		assert.equal(describeNativeChatBlocker(true), NATIVE_CHAT_CONTRACT_BLOCKER);
 	});
 });

@@ -3,7 +3,11 @@ import type { TrackerEvent } from './eventSchema';
 
 export const AI_CAPTURE_STATUS_COMMAND = 'ai-developer-tracker.showAssessmentAiCaptureStatus';
 export const CONNECT_AI_CHAT_COMMAND = 'ai-developer-tracker.connectCurrentAiChat';
+export const NATIVE_CHAT_PERMISSION_UNAVAILABLE = 'Current assessment capture authorization is unavailable or expired. Check Show Assessment Status and Output permission-refresh diagnostics before reconnecting. This does not establish that Rails lacks native-session support. Existing evidence is preserved.';
 export const NATIVE_CHAT_CONTRACT_BLOCKER = 'This Rails server has not advertised the supported assessment-ai-session.v1 native capability. Its assessment-workflow.v1 policy (extension_launched_only) remains restricted. Recording consent and a workspace match cannot authorize a native conversation. Rails must explicitly support verified native-session enrollment before it can be connected. The optional Launch Assessment AI Session command remains available; it does not connect your existing native chat.';
+export function describeNativeChatBlocker(currentAuthorization: boolean): string {
+	return currentAuthorization ? NATIVE_CHAT_CONTRACT_BLOCKER : NATIVE_CHAT_PERMISSION_UNAVAILABLE;
+}
 export function stopAssessmentCaptureForWorkspaceChange(recording: RecordingController, isAssessment: (id: string) => boolean): boolean {
 	if (!recording.isRecording || !recording.sessionId || !isAssessment(recording.sessionId)) { return false; }
 	recording.stop(); return true;

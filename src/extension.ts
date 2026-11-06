@@ -5,7 +5,7 @@ import { NativeCodexCapture } from './nativeCodexCapture';
 import { AssessmentNativeDiscovery } from './assessmentNativeDiscovery';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { AssessmentAiCaptureHealth, AI_CAPTURE_STATUS_COMMAND, CONNECT_AI_CHAT_COMMAND, NATIVE_CHAT_CONTRACT_BLOCKER, describeAiCaptureHealth, stopAssessmentCaptureForWorkspaceChange } from './assessmentAiCaptureHealth';
+import { AssessmentAiCaptureHealth, AI_CAPTURE_STATUS_COMMAND, CONNECT_AI_CHAT_COMMAND, describeNativeChatBlocker, describeAiCaptureHealth, stopAssessmentCaptureForWorkspaceChange } from './assessmentAiCaptureHealth';
 import { RailsProcessorPolicyClient } from './processorPolicy';
 import { startRecordingCommand, stopRecordingCommand, type RecordingStartChoice } from './recordingCommands';
 import { DisclosureCaptureMonitor } from './disclosureCaptureMonitor';
@@ -212,7 +212,9 @@ export async function activate(context: vscode.ExtensionContext) {
 				const provider = await vscode.window.showQuickPick(['Codex', 'Claude Code'], { title: 'Connect an existing assessment AI chat' });
 				if (!provider) { return; }
 				if (provider === 'Claude Code') { void vscode.window.showInformationMessage('Native Claude Code connection is unavailable: this adapter verifies only its per-launch authenticated hooks. Existing chats are not scanned or imported. The optional tracked Claude launch remains available.'); return; }
-				if (!activeNativeCodex || !await activeWorkflow?.supportsNative()) { void vscode.window.showWarningMessage(NATIVE_CHAT_CONTRACT_BLOCKER); return; }
+				if (!activeNativeCodex || !await activeWorkflow?.supportsNative()) {
+					void vscode.window.showWarningMessage(describeNativeChatBlocker(activeWorkflow?.permits(id, 'codex') ?? false)); return;
+				}
 				const configured = vscode.workspace.getConfiguration('ai-developer-tracker.codex').inspect<string>('sessionsDirectory')?.globalValue;
 				const directory = codexSessionsDirectory(configured);
 				const candidates = activeDiscovery?.getConfirmationCandidates() ?? [];
