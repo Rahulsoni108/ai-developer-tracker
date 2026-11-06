@@ -684,7 +684,7 @@ export async function activate(context: vscode.ExtensionContext) {
 			() => (vscode.workspace.workspaceFolders ?? []).map(folder => createHash('sha256').update(folder.uri.toString()).digest('hex')),
 			async detail => await vscode.window.showWarningMessage('Agree to this assessment recording, upload, disclosure and AI-processing scope?', { modal: true,
 				detail: 'Workspace folders: ' + (vscode.workspace.workspaceFolders ?? []).map(folder => folder.name).join(', ') + '\n\n' + detail }, 'Agree & Start Assessment') === 'Agree & Start Assessment',
-			async (auth, state) => processingConsent.acceptWorkflowReceipt({ auth, localSessionIds: [state.request.local_recording_session_id],
+			async (auth, state) => processingConsent.acceptWorkflowReceipt({ auth, localSessionIds: assessment.associatedRecordingSessionIds,
 				currentRecording: state.request.local_recording_session_id,
 				current: () => assessment.isAssociatedSession(state.request.local_recording_session_id) && !assessment.view.archiving }, state),
 			code => {

@@ -19,6 +19,7 @@ import { openTestWorkerQueue } from './queueTestKeys';
 import type { AsyncLocalEventQueue } from '../asyncLocalEventQueue';
 import type { AssessmentApiClient, AssessmentAuthentication, AssessmentServerStatus } from '../assessmentApiClient';
 import { AssessmentApiError } from '../assessmentApiClient';
+import { AssessmentProcessingConsent } from '../assessmentProcessingConsent';
 import type { UploadTransport } from '../httpsEventTransport';
 import type { DisclosureRequest } from '../assessmentDisclosure';
 import type { ProcessingRequest } from '../processingConsent';
@@ -49,6 +50,7 @@ suite('Explicit workflow consent integration', () => {
  let workspaceIds: string[]; let mutation: ((value: unknown) => unknown) | undefined;
  let nativeSupported: boolean; let nativeSources: { sourceSessionId: string; workspaceId: string }[];
  let refreshFailures: WorkflowRefreshFailure[]; let refreshHttpStatus: number | undefined; let diagnosticThrows: boolean;
+ let processingLedger: AssessmentProcessingConsent;
  const json = (data: unknown) => ({ status: 200, headers: {}, contentType: 'application/json', body: JSON.stringify({ data: mutation ? mutation(data) : data }) });
  function response(bundle: WorkflowStartBundle | WorkflowSourceBundle) {
   const localId = 'upload' in bundle ? bundle.intent.local_recording_session_id : bundle.disclosure.local_recording_session_id;
@@ -114,8 +116,12 @@ suite('Explicit workflow consent integration', () => {
   recording = new RecordingController({ text: '', tooltip: '', command: '', show() {}, dispose() {} }, current => workflow.confirmRecording(current));
   writer = new EventPersistence(queue, { write: async () => {}, flush: async () => {} });
   writer.attachRecording(recording, () => ({ approvedWorkspaceIds: [W], confirmedCodexSessions: nativeSources, codexContentConsent: nativeSources.length > 0 }));
+  processingLedger = new AssessmentProcessingConsent({ get: async key => secrets.get(key), store: async (key,value) => { secrets.set(key,value); } }, queue,
+   { send: async () => { throw new Error('Workflow receipts must not issue independent consent requests'); } }, () => []);
   workflow = new AssessmentWorkflowConsent(recording, queue, { get: async key => secrets.get(key), store: async (key,value) => { secrets.set(key,value); } },
-   new RailsWorkflowConsentClient(transport), () => workspaceIds, async notice => { dialogs++; assert.ok(notice.includes('Synthetic Processor')); return accepted; }, async () => {},
+   new RailsWorkflowConsentClient(transport), () => workspaceIds, async notice => { dialogs++; assert.ok(notice.includes('Synthetic Processor')); return accepted; },
+   (identity, state) => processingLedger.acceptWorkflowReceipt({ auth: identity, localSessionIds: controller.associatedRecordingSessionIds,
+    currentRecording: state.request.local_recording_session_id, current: () => controller.isAssociatedSession(state.request.local_recording_session_id) && !controller.view.archiving }, state),
    undefined, undefined, diagnostic => { refreshFailures.push(diagnostic); if (diagnosticThrows) { throw new Error('Synthetic diagnostic failure'); } });
   const api: AssessmentApiClient = { mode: 'rails', pair: async () => ({ ...auth, status }), getStatus: async () => status,
    startOrResume: async () => { throw new Error('Legacy start must not be called'); }, submit: async () => { throw new Error('Not a finalization test'); } };
@@ -318,6 +324,26 @@ suite('Explicit workflow consent integration', () => {
   mutation = undefined; await controller.start(); assert.equal(controller.view.state, 'active', JSON.stringify(controller.view));
   assert.deepEqual(requests, ['policy', 'start', 'status', 'policy', 'start']);
   assert.notEqual(recording.sessionId, previous); assert.equal(controller.view.deadline, END);
+ });
+ test('resuming with real processing receipts retains both recording scopes and the original deadline', async () => {
+  await controller.start(); const first = recording.sessionId!;
+  const context = () => ({ auth, localSessionIds: controller.associatedRecordingSessionIds, current: () => true });
+  const oldReceipts = await processingLedger.list(context()); assert.equal(oldReceipts.length, 1);
+  recording.stop(); await controller.showStatus();
+  await controller.start(); const second = recording.sessionId!;
+  assert.equal(controller.view.state, 'active', JSON.stringify(controller.view)); assert.notEqual(first, second);
+  assert.equal(controller.view.deadline, END);
+  assert.deepEqual(controller.associatedRecordingSessionIds, [first, second]);
+  const states = await processingLedger.list(context()); assert.equal(states.length, 2);
+  assert.deepEqual(states.find(state => state.request.request_id === oldReceipts[0].request.request_id), oldReceipts[0]);
+  // Reproduce the original singleton callback's failure; the owner guard stays strict.
+  await assert.rejects(processingLedger.list({ ...context(), localSessionIds: [second] }),
+   (error: unknown) => error instanceof AssessmentApiError && error.code === 'authentication');
+  await assert.rejects(processingLedger.acceptWorkflowReceipt({ ...context(), auth: { ...auth, connection: { ...auth.connection, codingSessionId: '99' } } }, states[0]),
+   (error: unknown) => error instanceof AssessmentApiError && error.code === 'authentication');
+  assert.deepEqual(await processingLedger.list(context()), states);
+  (controller.associatedRecordingSessionIds as string[]).push(randomUUID());
+  assert.deepEqual(controller.associatedRecordingSessionIds, [first, second]);
  });
  test('workspace changes after consent prevent start and cross-assessment enrollment', async () => {
   await workflow.prepare(auth, AbortSignal.timeout(1000)); await workflow.confirmRecording(() => true); workspaceIds = ['d'.repeat(64)];

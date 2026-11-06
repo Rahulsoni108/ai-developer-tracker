@@ -99,6 +99,8 @@ export class AssessmentController {
 			...(this.pendingEvents !== undefined ? { pendingEvents: this.pendingEvents } : {}), uploadConsent: this.consent, ...(this.delivery?.status ? { uploadStatus: this.delivery.status } : {}) };
 	}
 	isAssociatedSession(id: string): boolean { return this.metadata?.localRecordingSessionIds.includes(id) ?? false; }
+	/** Snapshot of this connection's recordings, including authorized recovery windows. */
+	get associatedRecordingSessionIds(): readonly string[] { return [...(this.metadata?.localRecordingSessionIds ?? [])]; }
 	/** General-purpose development uploader must never send assessment evidence to arbitrary credentials/endpoints. */
 	allowsDevelopmentUpload(id: string): boolean { return this.initialized && this.phase !== 'error' && !this.archiving && !this.archivedRecordings.has(id) && !this.isAssociatedSession(id); }
 	revokeUploadConsent(): Promise<void> {
