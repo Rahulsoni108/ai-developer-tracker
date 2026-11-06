@@ -979,7 +979,12 @@ export class LocalEventQueue {
 					if (!existingOnly && this.isArchivedRecording(id)) { throw new LocalEventQueueError('Archived assessment cannot finalize.'); }
 					const session = this.database.prepare('SELECT status FROM recording_sessions WHERE session_id = ?').get(id);
 					const consent = this.readEvidenceConsent(id);
-					if (!session || !['completed', 'interrupted', 'incomplete'].includes(String(session.status))
+					// Rails may have bound/authorized a start before local activation was cancelled.
+					// Its empty closed window still belongs in exact binding reconciliation. Never
+					// drop a binding, relabel its history, or accept cancelled capture with evidence.
+					const emptyCancelled = session?.status === 'cancelled'
+						&& !this.database.prepare('SELECT 1 FROM queued_events WHERE session_id = ? LIMIT 1').get(id);
+					if (!session || !['completed', 'interrupted', 'incomplete'].includes(String(session.status)) && !emptyCancelled
 						|| !consent || consent.codingSessionId !== selection.codingSessionId || consent.origin !== selection.origin
 						|| !consent.captureClosed || consent.locallyRevoked || consent.pendingAction || consent.receipt?.state !== 'stopped'
 						|| this.isApprovalRevoked(id)) { throw new LocalEventQueueError('Recording cannot be reconciled.'); }

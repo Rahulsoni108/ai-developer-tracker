@@ -510,6 +510,27 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 			assert.equal(finalized!.recordings[0].event_ids_sha256, canonicalSha256([captured.eventId, checkpoint.eventId].sort()));
 		} finally { listener.dispose(); }
 	});
+	test('a server-bound start cancelled before capture remains an empty manifest alongside recovered evidence', async () => {
+		await controller.pair(PAIR_CODE);
+		const failure = recording.addLifecycleListener({ prepare: async () => { throw new AssessmentApiError('unavailable'); },
+			started: () => {}, cancelled: () => {}, stopped: () => {} });
+		await controller.start(); failure.dispose();
+		assert.equal(recording.isRecording, false); assert.equal(serverBindings.length, 1);
+		const cancelled = serverBindings[0]; const originalDeadline = deadline; const requestId = metadata().submitRequestId;
+		await until(async () => (await queue.getRecordingSessions(10)).some(row => row.sessionId === cancelled && row.status === 'cancelled'), 'cancelled local start');
+		assert.equal((await queue.getSessionEvidenceStatus([cancelled])).totalEvents, 0);
+		await controller.start(); const recovered = controller.view; assert.equal(recovered.state, 'active'); assert.equal(serverBindings.length, 2);
+		const captured = await captureFile(); await controller.stopAndSubmit();
+		if (controller.view.state !== 'submitted') { await until(async () => await queue.getPendingCount() === 0, 'recovered evidence acknowledgments'); await controller.stopAndSubmit(); }
+		assert.equal(controller.view.state, 'submitted', JSON.stringify(controller.view.lastSubmission));
+		assert.equal(deadline, originalDeadline); assert.equal(finalized!.request_id, requestId);
+		assert.equal(finalized!.recordings.length, 2);
+		assert.deepEqual(finalized!.recordings.find(row => row.local_recording_session_id === cancelled),
+			{ local_recording_session_id: cancelled, event_count: 0, event_ids_sha256: canonicalSha256([]) });
+		assert.equal(finalized!.recordings.reduce((count, row) => count + row.event_count, 0), 1);
+		assert.equal(accepted.has(captured.eventId), true);
+		assert.equal((await queue.getRecordingSessions(10)).find(row => row.sessionId === cancelled)?.status, 'cancelled');
+	});
 
 	test('server reconciliation failure preserves the identical manifest rather than shrinking it to accepted evidence', async () => {
 		await pairStart(); const captured = await captureFile(); await until(async () => accepted.has(captured.eventId) && await queue.getPendingCount() === 0, 'accepted event'); accepted.delete(captured.eventId);

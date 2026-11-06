@@ -73,6 +73,43 @@ suite('Assessment frozen finalization manifests', function () {
 		const db = new DatabaseSync(join(storage().fsPath, LOCAL_QUEUE_FILENAME));
 		try { assert.equal(db.prepare('SELECT COUNT(*) AS count FROM assessment_finalizations').get()!.count, 1); } finally { db.close(); }
 	});
+	test('an empty cancelled bound recording freezes only after matching consent is closed, without changing its history', async () => {
+		await queue.finishSession(sessionId, 'cancelled');
+		await assert.rejects(queue.freezeFinalization(scope));
+		await closed();
+		await assert.rejects(queue.freezeFinalization({ ...scope, codingSessionId: '99' }));
+		await assert.rejects(queue.freezeFinalization({ ...scope, origin: 'https://other.invalid' }));
+		const frozen = await queue.freezeFinalization(scope);
+		assert.deepEqual(frozen.recordings, [{ local_recording_session_id: sessionId, event_count: 0, event_ids_sha256: canonicalSha256([]) }]);
+		assert.equal((await queue.getRecordingSessions(10)).find(row => row.sessionId === sessionId)?.status, 'cancelled');
+		await queue.close(); queue = await openTestWorkerQueue(storage(), []);
+		assert.deepEqual(await queue.freezeFinalization(scope, true), frozen);
+		await queue.revokeEvidenceApprovals(sessionId); await assert.rejects(queue.freezeFinalization(scope));
+	});
+	test('cancelled recordings containing pending or acknowledged evidence remain blocked and unchanged', async () => {
+		const captured = event(); await queue.enqueueApproved(captured, context());
+		await queue.finishSession(sessionId, 'cancelled'); await closed();
+		await assert.rejects(queue.freezeFinalization(scope)); assert.equal(await queue.getPendingCount(), 1);
+		await queue.markAcknowledged([captured.eventId]); await assert.rejects(queue.freezeFinalization(scope));
+		assert.equal((await queue.getSessionEvidenceStatus([sessionId])).totalEvents, 1);
+	});
+	test('missing consent cannot authorize an empty cancelled recording', async () => {
+		const unapproved = randomUUID(); await queue.beginSession(unapproved); await queue.finishSession(unapproved, 'cancelled');
+		await assert.rejects(queue.freezeFinalization({ ...scope, localRecordingSessionIds: [unapproved] }));
+	});
+	test('recovery manifests retain both completed evidence and an empty cancelled binding', async () => {
+		const captured = event(); await queue.enqueueApproved(captured, context()); await queue.markAcknowledged([captured.eventId]); await closed();
+		const cancelled = randomUUID(); await queue.beginSession(cancelled);
+		await queue.setEvidenceConsent({ ...consent, request: { ...consent.request, request_id: randomUUID(), local_recording_session_id: cancelled },
+			receipt: { ...consent.receipt!, consent_id: randomUUID(), local_recording_session_id: cancelled } });
+		await queue.finishSession(cancelled, 'cancelled');
+		const mixed = { ...scope, localRecordingSessionIds: [sessionId, cancelled] };
+		const [first, retry] = await Promise.all([queue.freezeFinalization(mixed), queue.freezeFinalization(mixed)]);
+		assert.deepEqual(first, retry); assert.equal(first.recordings.length, 2);
+		assert.equal(first.recordings.find(row => row.local_recording_session_id === sessionId)?.event_count, 1);
+		assert.equal(first.recordings.find(row => row.local_recording_session_id === cancelled)?.event_ids_sha256, canonicalSha256([]));
+		assert.equal((await queue.getSessionEvidenceStatus(mixed.localRecordingSessionIds)).totalEvents, 1);
+	});
 	test('active or unclosed capture cannot freeze, and failed freezing leaves no manifest', async () => {
 		await assert.rejects(queue.freezeFinalization(scope)); await queue.finishSession(sessionId); await assert.rejects(queue.freezeFinalization(scope));
 		await closed(); await assert.rejects(queue.freezeFinalization(scope, true)); await queue.freezeFinalization(scope);

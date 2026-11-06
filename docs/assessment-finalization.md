@@ -18,7 +18,11 @@ assessment has **not** been verified by the automated HTTPS fixtures.
    close is retried; a receipt is never invented or renewed.
 4. Freeze one encrypted SQLite snapshot for **all** bound recordings, with their
    original event counts and ID digests. Include acknowledged tombstones and empty
-   approved recordings. The worker verifies capture-time approval associations and
+   approved recordings. A server-authorized start cancelled before local capture can
+   leave an empty cancelled recording binding: include its zero-event manifest only
+   with matching, unrevoked consent and a confirmed closed capture window. Preserve
+   its cancelled status; cancelled recordings containing any evidence remain blocked.
+   The worker verifies capture-time approval associations and
    closed scopes. Historical/unapproved, missing or retained-away evidence blocks
    finalization. The snapshot is AES-256-GCM protected with a separate AAD domain,
    existing SecretStorage keys and the original request UUID. No extra plaintext
