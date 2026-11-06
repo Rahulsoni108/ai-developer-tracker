@@ -15,6 +15,11 @@ import { validWorkflowStartBundle, validWorkflowPolicy, workflowConsentNotice, W
 type Queue = Pick<LocalEventQueue, 'getEvidenceConsent' | 'setEvidenceConsent' | 'setDisclosureConsent' | 'confirmDisclosureConsent' | 'suspendDisclosureCapture'>;
 interface Ledger { credentialDigest: string; bundle: WorkflowStartBundle; policy: WorkflowPolicy; locallyRevoked: boolean }
 interface Live { auth: AssessmentAuthentication; recordingId: string; ledger: Ledger; confirmedAt: bigint }
+export interface WorkflowRefreshFailure {
+ stage: 'request' | 'authorization' | 'local_confirmation' | 'local_suspension';
+ reason: 'timeout' | 'authentication' | 'protocol' | 'rejected' | 'cancelled' | 'unavailable' | 'storage' | 'consent_required';
+ elapsedMs: number;
+}
 export interface AssessmentWorkflowLifecycle {
  prepare(auth: AssessmentAuthentication, signal: AbortSignal): Promise<void>;
  start(auth: AssessmentAuthentication, id: string, signal: AbortSignal): Promise<AssessmentServerStatus>;
@@ -46,7 +51,8 @@ export class AssessmentWorkflowConsent implements AssessmentWorkflowLifecycle {
   private readonly workspaceIds: () => string[], private readonly confirm: (notice: string) => Promise<boolean>,
   private readonly recordProcessing: (auth: AssessmentAuthentication, state: ProcessingState) => Promise<void>,
   private readonly notice: (code: 'ready' | 'unavailable' | 'source_ready' | 'source_blocked' | 'withdrawn') => void = () => {},
-  private readonly availableProviders: () => Promise<WorkflowProvider[]> = async () => ['claude', 'codex']) {
+  private readonly availableProviders: () => Promise<WorkflowProvider[]> = async () => ['claude', 'codex'],
+  private readonly onRefreshFailure: (failure: WorkflowRefreshFailure) => void = () => {}) {
   this.listener = recording.addLifecycleListener({ prepare: async () => {}, started: () => this.schedule(), stopped: () => this.clear(), cancelled: () => this.clear() });
  }
  async prepare(auth: AssessmentAuthentication, signal: AbortSignal): Promise<void> {
@@ -170,12 +176,28 @@ export class AssessmentWorkflowConsent implements AssessmentWorkflowLifecycle {
  private async refreshNow(): Promise<void> {
   const live = this.live; if (!live || !this.recording.isRecording) { return; }
   const generation = this.generation;
+  const requestedAt = process.hrtime.bigint(); const signal = AbortSignal.timeout(2500);
+  let stage: WorkflowRefreshFailure['stage'] = 'request';
+  const diagnose = (reason: WorkflowRefreshFailure['reason']) => {
+   try { this.onRefreshFailure({ stage, reason, elapsedMs: Math.max(0, Math.min(600000, Math.round(Number(process.hrtime.bigint() - requestedAt) / 1000000))) }); }
+   catch { /* Diagnostic callbacks cannot prevent capture from stopping. */ }
+  };
   try {
-   const requestedAt = process.hrtime.bigint(); const result = await this.client.recover(live.auth, live.ledger.bundle, AbortSignal.timeout(2500));
+   const result = await this.client.recover(live.auth, live.ledger.bundle, signal);
    if (generation !== this.generation) { return; }
+   stage = 'authorization';
    if (result.state !== 'active') { throw new AssessmentApiError('consent_required'); }
+   stage = 'local_confirmation';
    await this.confirmReceipts(result, requestedAt); live.confirmedAt = requestedAt;
-  } catch { if (generation === this.generation) { this.clear(); await this.queue.suspendDisclosureCapture(live.recordingId); if (this.recording.sessionId === live.recordingId) { this.recording.stop(); } this.notice('unavailable'); } }
+  } catch (error) { if (generation === this.generation) {
+   const reasons: WorkflowRefreshFailure['reason'][] = ['authentication', 'protocol', 'rejected', 'cancelled', 'unavailable', 'storage', 'consent_required'];
+   diagnose(stage === 'request' && signal.aborted ? 'timeout' : error instanceof AssessmentApiError && reasons.includes(error.code as WorkflowRefreshFailure['reason'])
+    ? error.code as WorkflowRefreshFailure['reason'] : stage === 'local_confirmation' ? 'storage' : 'unavailable');
+   this.clear();
+   try { await this.queue.suspendDisclosureCapture(live.recordingId); }
+   catch { stage = 'local_suspension'; diagnose('storage'); }
+   finally { if (this.recording.sessionId === live.recordingId) { this.recording.stop(); } this.notice('unavailable'); }
+  } }
   finally { if (generation === this.generation) { this.schedule(); } }
  }
  private async confirmReceipts(result: WorkflowReceipts, requestedAt: bigint): Promise<void> {

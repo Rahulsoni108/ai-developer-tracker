@@ -701,6 +701,8 @@ export async function activate(context: vscode.ExtensionContext) {
 				if (results[0].status === 'fulfilled' && results[0].value.stdout.includes('--no-daemon') && results[0].value.stdout.includes('--cd')) { available.push('codex'); }
 				if (results[1].status === 'fulfilled' && results[1].value.stdout.includes('--plugin-dir') && results[1].value.stdout.includes('--session-id')) { available.push('claude'); }
 				return available;
+			}, failure => {
+				output.appendLine(`Assessment permission refresh failed: stage=${failure.stage}; reason=${failure.reason}; elapsed_ms=${failure.elapsedMs}. Capture stopped; evidence preserved. No automatic restart.`);
 			});
 		activeNativeCodex = new NativeCodexCapture(recording, writer, activeWorkflow, state => {
 			if (state === 'initializing') { captureHealth.initializing('codex'); }

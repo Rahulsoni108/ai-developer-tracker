@@ -7,7 +7,7 @@ import { canonicalSha256 } from '../canonicalJson';
 import { RecordingController } from '../recording';
 import { AssessmentController } from '../assessmentController';
 import { AssessmentConnectionStore } from '../assessmentStorage';
-import { AssessmentWorkflowConsent, createWorkflowBundle } from '../assessmentWorkflowConsent';
+import { AssessmentWorkflowConsent, createWorkflowBundle, type WorkflowRefreshFailure } from '../assessmentWorkflowConsent';
 import { RailsWorkflowConsentClient } from '../railsWorkflowConsentClient';
 import { validWorkflowStartBundle, validWorkflowSourceBundle, type WorkflowPolicy } from '../assessmentWorkflowContract';
 import { validNativeSourceBundle, nativeIdentityDigest, NATIVE_SESSION_VERSION } from '../assessmentNativeSession';
@@ -48,6 +48,7 @@ suite('Explicit workflow consent integration', () => {
  let processing: Map<string,{ request: ProcessingRequest; receipt: Record<string,unknown> }>;
  let workspaceIds: string[]; let mutation: ((value: unknown) => unknown) | undefined;
  let nativeSupported: boolean; let nativeSources: { sourceSessionId: string; workspaceId: string }[];
+ let refreshFailures: WorkflowRefreshFailure[]; let refreshHttpStatus: number | undefined; let diagnosticThrows: boolean;
  const json = (data: unknown) => ({ status: 200, headers: {}, contentType: 'application/json', body: JSON.stringify({ data: mutation ? mutation(data) : data }) });
  function response(bundle: WorkflowStartBundle | WorkflowSourceBundle) {
   const localId = 'upload' in bundle ? bundle.intent.local_recording_session_id : bundle.disclosure.local_recording_session_id;
@@ -82,6 +83,7 @@ suite('Explicit workflow consent integration', () => {
  const transport: UploadTransport = { send: async request => {
   assert.equal(request.endpoint.origin, origin); assert.equal(request.token, auth.credential);
   const path = request.endpoint.pathname.split('/').at(-1)!; requests.push(path);
+  if (path === 'status' && refreshHttpStatus) { return { status: refreshHttpStatus, headers: {}, contentType: 'application/json', body: '{"error":"Synthetic denial"}' }; }
   if (path === fail) { throw new Error('Synthetic network failure'); }
   const body = request.body ? JSON.parse(request.body) : {};
   if (path === 'policy') { assert.equal(request.method, 'GET'); return json(policy()); }
@@ -106,13 +108,15 @@ suite('Explicit workflow consent integration', () => {
   root = await realpath(await mkdtemp(join(tmpdir(), 'workflow-'))); queue = await openTestWorkerQueue({ scheme: 'file', fsPath: root }, []);
   secrets = new Map(); memory = new Map(); accepted = true; dialogs = 0; oldUploadDialogs = 0; requests = []; initial = undefined;
   uploadId = randomUUID(); revoked = false; windowsClosed = false; disclosures = []; processing = new Map(); workspaceIds = [W]; mutation = undefined; fail = undefined; nativeSupported = false; nativeSources = [];
+  refreshFailures = []; refreshHttpStatus = undefined; diagnosticThrows = false;
   auth = { connection: { mode: 'rails', apiOrigin: origin, codingSessionId: '42', uploadEndpoint: origin + '/api/v2/coding_session/extension/events', credentialExpiresAt: END }, credential: 'adt_ext_' + 'a'.repeat(43) };
   status = { codingSessionId: '42', state: 'paired', serverTime: START, localRecordingSessionIds: [] };
   recording = new RecordingController({ text: '', tooltip: '', command: '', show() {}, dispose() {} }, current => workflow.confirmRecording(current));
   writer = new EventPersistence(queue, { write: async () => {}, flush: async () => {} });
   writer.attachRecording(recording, () => ({ approvedWorkspaceIds: [W], confirmedCodexSessions: nativeSources, codexContentConsent: nativeSources.length > 0 }));
   workflow = new AssessmentWorkflowConsent(recording, queue, { get: async key => secrets.get(key), store: async (key,value) => { secrets.set(key,value); } },
-   new RailsWorkflowConsentClient(transport), () => workspaceIds, async notice => { dialogs++; assert.ok(notice.includes('Synthetic Processor')); return accepted; }, async () => {});
+   new RailsWorkflowConsentClient(transport), () => workspaceIds, async notice => { dialogs++; assert.ok(notice.includes('Synthetic Processor')); return accepted; }, async () => {},
+   undefined, undefined, diagnostic => { refreshFailures.push(diagnostic); if (diagnosticThrows) { throw new Error('Synthetic diagnostic failure'); } });
   const api: AssessmentApiClient = { mode: 'rails', pair: async () => ({ ...auth, status }), getStatus: async () => status,
    startOrResume: async () => { throw new Error('Legacy start must not be called'); }, submit: async () => { throw new Error('Not a finalization test'); } };
   const store = new AssessmentConnectionStore({ get: <T>(key: string, fallback?: T) => (memory.get(key) ?? fallback) as T,
@@ -175,6 +179,57 @@ suite('Explicit workflow consent integration', () => {
   await controller.start(); const id = recording.sessionId!; fail = 'workflow_consents';
   await assert.rejects(workflow.revoke(auth, id)); assert.equal(recording.isRecording, false); assert.equal(workflow.permits(id, 'codex'), false);
   fail = undefined; await workflow.revoke(auth, id); assert.equal(revoked, true);
+ });
+ test('refresh authentication denial is distinguished from network failure without clearing evidence or association', async () => {
+  await controller.start(); const id = recording.sessionId!;
+  const before = await queue.getSessionEvidenceStatus([id]);
+  refreshHttpStatus = 401;
+  await (workflow as unknown as { refresh(): Promise<void> }).refresh();
+  assert.equal(recording.isRecording, false); assert.equal(workflow.permits(id, 'codex'), false);
+  assert.equal(controller.isAssociatedSession(id), true);
+  assert.deepEqual(await queue.getSessionEvidenceStatus([id]), before);
+  assert.equal(refreshFailures[0].stage, 'request'); assert.equal(refreshFailures[0].reason, 'authentication');
+  assert.equal(JSON.stringify(refreshFailures).includes(auth.credential), false);
+ });
+ test('refresh timeout remains fail closed and reports timeout rather than authentication', async () => {
+  await controller.start(); const original = AbortSignal.timeout;
+  try {
+   AbortSignal.timeout = () => AbortSignal.abort(new DOMException('Synthetic timeout', 'TimeoutError'));
+   await (workflow as unknown as { refresh(): Promise<void> }).refresh();
+  } finally { AbortSignal.timeout = original; }
+  assert.equal(recording.isRecording, false);
+  assert.equal(refreshFailures[0].reason, 'timeout'); assert.equal(refreshFailures[0].stage, 'request');
+ });
+ test('blocked consent and malformed refresh responses retain distinct safe reasons', async () => {
+  await controller.start(); revoked = true;
+  await (workflow as unknown as { refresh(): Promise<void> }).refresh();
+  assert.equal(recording.isRecording, false);
+  assert.equal(refreshFailures[0].stage, 'authorization'); assert.equal(refreshFailures[0].reason, 'consent_required');
+ });
+ test('refresh protocol failure stops capture without logging response content', async () => {
+  await controller.start(); mutation = () => ({ private: 'dummy-private-content' });
+  await (workflow as unknown as { refresh(): Promise<void> }).refresh();
+  assert.equal(recording.isRecording, false); assert.equal(refreshFailures[0].reason, 'protocol');
+  assert.equal(JSON.stringify(refreshFailures).includes('dummy-private-content'), false);
+ });
+ test('local confirmation failure stops capture and diagnostics cannot disclose exception text', async () => {
+  await controller.start(); const original = queue.confirmDisclosureConsent;
+  queue.confirmDisclosureConsent = async () => { throw new Error('dummy-private-confirmation-content'); };
+  try { await (workflow as unknown as { refresh(): Promise<void> }).refresh(); }
+  finally { queue.confirmDisclosureConsent = original; }
+  assert.equal(recording.isRecording, false);
+  assert.equal(refreshFailures[0].stage, 'local_confirmation'); assert.equal(refreshFailures[0].reason, 'storage');
+  assert.equal(JSON.stringify(refreshFailures).includes('dummy-private-confirmation-content'), false);
+ });
+ test('failed queue suspension and throwing diagnostics still stop recording', async () => {
+  await controller.start(); fail = 'status'; diagnosticThrows = true;
+  const original = queue.suspendDisclosureCapture;
+  queue.suspendDisclosureCapture = async () => { throw new Error('dummy-private-storage-content'); };
+  try { await (workflow as unknown as { refresh(): Promise<void> }).refresh(); }
+  finally { queue.suspendDisclosureCapture = original; }
+  assert.equal(recording.isRecording, false);
+  assert.deepEqual(refreshFailures.map(value => [value.stage, value.reason]), [['request', 'unavailable'], ['local_suspension', 'storage']]);
+  assert.equal(JSON.stringify(refreshFailures).includes('dummy-private-storage-content'), false);
  });
  test('missing capability, changed policy or offline preflight fails closed before timer start', async () => {
   fail = 'policy'; await controller.start(); assert.equal(initial, undefined); assert.equal(recording.isRecording, false);
