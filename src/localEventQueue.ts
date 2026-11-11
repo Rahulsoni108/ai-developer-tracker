@@ -4,7 +4,7 @@ import { assessmentArchiveKey, validAssessmentArchive, MAX_ASSESSMENT_ARCHIVES, 
 import { validFinalizationRequest, type AssessmentFinalizationRequest, type FinalizationScope } from './assessmentFinalization';
 import { createAssessmentEventApproval, type AssessmentApprovalBinding } from './assessmentEventApproval';
 import { createEvidenceApproval, verifyEvidenceApproval, validOrigin, type EvidenceApproval } from './evidenceApproval';
-import { consentCoversEvent, validConsentState, utcTime, type EvidenceConsentState } from './evidenceConsent';
+import { closedEvidenceConsent, evidenceDeliveryAllowed, consentCoversEvent, validConsentState, utcTime, type EvidenceConsentState } from './evidenceConsent';
 import type { UploadPrivacyContext } from './uploadPrivacyContext';
 import type { UploadRetryState, UploadPauseReason } from './uploadState';
 import { MAX_DELIVERY_BATCH_BYTES, type PreparedEventBatch, type DeliveryStatus } from './eventBatchManager';
@@ -376,6 +376,9 @@ export class LocalEventQueue {
 				if (proof && !this.isApprovalRevoked(validation.event.sessionId)) {
 					const scope = this.readEvidenceConsent(validation.event.sessionId);
 					if (scope) {
+						// A delayed collector must not leave a new unapproved row that
+						// permanently poisons reconciliation after the capture deadline.
+						if (Date.parse(validation.event.timestamp) >= Date.parse(scope.deadline)) { throw new LocalEventQueueError('Assessment capture deadline reached.'); }
 						proof.assessment = { codingSessionId: scope.codingSessionId, origin: scope.origin,
 							...(consentCoversEvent(scope, validation.event) ? { consentId: scope.receipt!.consent_id } : {}) };
 						if (proof.assessment.consentId) {
@@ -433,11 +436,10 @@ export class LocalEventQueue {
 		if (this.isArchivedRecording(current.sessionId) || this.isApprovalRevoked(current.sessionId)) { return undefined; }
 		const scope = this.readEvidenceConsent(current.sessionId); const receipt = scope?.receipt;
 		if (scope && this.isArchivedAssessment(scope.codingSessionId, scope.origin)) { return undefined; }
-		if (!scope || !receipt || scope.locallyRevoked || scope.pendingAction || !['active', 'stopped'].includes(receipt.state)
-			|| scope.captureClosed && receipt.state !== 'stopped' || scope.codingSessionId !== target.codingSessionId || scope.origin !== target.origin
+		if (!scope || !receipt || !evidenceDeliveryAllowed(scope, target.serverTime) || scope.codingSessionId !== target.codingSessionId || scope.origin !== target.origin
 			|| receipt.consent_id !== target.consentReceiptId || receipt.destination_origin !== target.origin
-			|| Date.parse(target.serverTime) < Date.parse(receipt.server_time) || Date.parse(target.serverTime) >= Date.parse(receipt.expires_at)
-			|| Date.parse(target.serverTime) >= Date.parse(scope.deadline) || Date.parse(current.timestamp) > Date.parse(target.serverTime)
+			|| Date.parse(current.timestamp) >= Date.parse(scope.deadline) || Date.parse(current.timestamp) >= Date.parse(receipt.expires_at)
+			|| Date.parse(current.timestamp) > Date.parse(target.serverTime)
 			|| Date.parse(current.timestamp) < Date.parse(receipt.evidence_window.starts_at) || Date.parse(current.timestamp) > Date.parse(receipt.evidence_window.ends_at)
 			|| !receipt.approved_workspace_ids.includes(current.workspaceId!) || !receipt.event_types.includes(current.eventType)) { return undefined; }
 		const row = this.database.prepare(`SELECT e.event_id, e.event_json, e.payload_format, e.session_id, a.approval_json
@@ -986,7 +988,7 @@ export class LocalEventQueue {
 						&& !this.database.prepare('SELECT 1 FROM queued_events WHERE session_id = ? LIMIT 1').get(id);
 					if (!session || !['completed', 'interrupted', 'incomplete'].includes(String(session.status)) && !emptyCancelled
 						|| !consent || consent.codingSessionId !== selection.codingSessionId || consent.origin !== selection.origin
-						|| !consent.captureClosed || consent.locallyRevoked || consent.pendingAction || consent.receipt?.state !== 'stopped'
+						|| !closedEvidenceConsent(consent)
 						|| this.isApprovalRevoked(id)) { throw new LocalEventQueueError('Recording cannot be reconciled.'); }
 					const hash = createHash('sha256'); hash.update('['); let count = 0;
 					for (const row of this.database.prepare(`SELECT e.event_id, e.event_json, e.payload_format, e.session_id, e.acknowledged, a.approval_json

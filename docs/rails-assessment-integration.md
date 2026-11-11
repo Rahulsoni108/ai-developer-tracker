@@ -235,3 +235,17 @@ R4.6 grant/status/revoke integration, encrypted receipt recovery and candidate c
 Recording, upload and disclosure choices remain separate. Raw disclosure is disabled:
 current v1 events/sidecars, flat acknowledgments and finalization contracts are unchanged.
 Joint capture-time approval and Rails content-release contracts remain required.
+
+## Submission-only recovery after the capture deadline
+
+Eligible started assessments now return `state: expired` with their original timing/bindings
+when the capture deadline elapses. This is not permission to restart capture. Stop & Submit
+can close original capture windows, deliver only their exact pre-deadline approved events,
+and validate a late finalization receipt. Closed upload receipts may have state `expired`;
+they do not grant new recording or disclosure scope. Credentials must still be current and
+unrevoked; there is no automatic credential renewal or unlimited delivery window.
+
+Deploy the updated Rails and extension together. Older extension builds fail closed on the
+new authenticated expired status. The finalization manifest, approval sidecars and flat
+acknowledgment contracts are unchanged. Recruiter results show the submission delay without
+interpreting it as additional working time.

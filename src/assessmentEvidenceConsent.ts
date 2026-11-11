@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { AssessmentApiError, type AssessmentAuthentication, type AssessmentServerStatus } from './assessmentApiClient';
-import { EVIDENCE_CONSENT_VERSION, type EvidenceConsentState } from './evidenceConsent';
+import { closedEvidenceConsent, EVIDENCE_CONSENT_VERSION, type EvidenceConsentState } from './evidenceConsent';
 import type { EvidenceConsentApi } from './railsEvidenceConsentClient';
 import type { TrackerEvent } from './eventSchema';
 import type { LocalEventQueue } from './localEventQueue';
@@ -60,7 +60,7 @@ export class AssessmentEvidenceConsent implements AssessmentConsentLifecycle {
 			let state = await this.queue.getEvidenceConsent(localSessionId); if (!state) { return; }
 			this.checkOwner(state, auth);
 			// A confirmed closed receipt is durable across restarts; never mutate a submitted assessment.
-			if (action === 'stop' && state.captureClosed && !state.locallyRevoked && !state.pendingAction && state.receipt?.state === 'stopped') { return; }
+			if (action === 'stop' && closedEvidenceConsent(state)) { return; }
 			state = { ...state, captureClosed: true, locallyRevoked: state.locallyRevoked || action === 'revoke',
 				pendingAction: state.locallyRevoked || action === 'revoke' ? 'revoke' : 'stop' };
 			await this.queue.setEvidenceConsent(state); // Survives network failure/restart; never pretend server success.

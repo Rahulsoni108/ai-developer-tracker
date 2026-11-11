@@ -16,6 +16,7 @@ export function formatAssessmentStatus(view: AssessmentView): string {
 			: 'Rails assessment connected. Submission requires durable evidence reconciliation and a verified server receipt.'
 			: 'Configure assessment.apiOrigin in user settings and reload to pair with Rails.';
 	const lines = [`Assessment: ${view.archiving ? 'archiving connection' : view.state.replace(/_/g, ' ')}`, backendStatus];
+	if (view.state === 'submission_pending' && view.deadline && view.serverTime && Date.parse(view.serverTime) >= Date.parse(view.deadline)) { lines.push('Capture deadline reached. New capture is stopped. Use Stop & Submit to deliver previously approved evidence; the server will mark a late submission. Valid authentication and upload consent are still required.'); }
 	if (view.state === 'recovery') { lines.push('Recovery required. Authentication failure does not prove the server assessment was deleted.'); }
 	if (view.archivedCount) {
 		lines.push(`Archived assessments retained locally: ${view.archivedCount}. Archiving does not submit an assessment.`);

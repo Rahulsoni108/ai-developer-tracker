@@ -113,8 +113,12 @@ The old count-only `/submit` mock proposal is **not** sent to Rails.
   including after the assessment deadline. Recovery additionally requires the existing
   encrypted snapshot and zero pending/missing evidence. No frozen snapshot is created
   retroactively from an unsolicited submitted status.
-- No first-finalization or upload grace exists. Rails remains authoritative for
-  deadline, consent, invitation and credential expiry/revocation. A lost response does
+- Rails accepts late first-finalization for a started, eligible assessment with
+  current authentication. Capture stops at the original deadline using conservative
+  server timing plus monotonic elapsed time. Closed consent may be capture-expired;
+  only exact, previously approved events strictly before the original window/deadline
+  can finish delivery. New grants, starts and post-deadline capture remain blocked.
+  Rails remains authoritative for consent/invitation revocation and credential expiry. A lost response does
   not prove success; 409 means reconciliation/conflict remains unresolved, 401/403
   retain evidence and block, and outages retain the same request for retry. Raw server
   messages, tokens, source paths and payloads never enter status/errors.
@@ -129,7 +133,7 @@ The old count-only `/submit` mock proposal is **not** sent to Rails.
   Existing separate consent, PrivacyFilter, authenticated exact-event approvals,
   workspace boundaries, encryption and TLS checks remain required.
 - Expired/revoked credentials, lost local connection/key data, unapproved historical
-  events or already-expired first submissions need operator recovery. This task does
+  events need operator recovery; this change never renews credentials. This task does
   not add credential replacement, deadline extension, finalization polling or results UI.
 
 ## Verification and manual development E2E
@@ -176,3 +180,14 @@ For a later live test, use only approved development data:
    already committed, status recovers the receipt without re-uploading or extending time.
 8. Check a manual development recording still works independently. Browser interviews
    and their timer are outside this extension-only change and require their own live check.
+
+## Late submission verification
+
+1. Use a synthetic VS Code assessment; authorize capture/upload and record a file event.
+2. Let its original deadline elapse. Capture must stop and status becomes submission pending.
+3. Run Stop & Submit (after reconnect/reload if needed). Approve upload again if requested.
+4. Rails must accept only pre-deadline, capture-approved evidence, reconcile the frozen
+   manifest and return the verified receipt. The original deadline/request ID stay unchanged.
+5. Recruiter results show Submitted late plus submission delay. Delay is not extra working time.
+6. Expired/revoked credentials or revoked upload consent still reject; preserve evidence
+   for supported recovery. Delivery is not unlimited: the existing credential expiry applies.

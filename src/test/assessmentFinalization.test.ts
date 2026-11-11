@@ -41,6 +41,21 @@ suite('Assessment frozen finalization manifests', function () {
 	});
 	teardown(async () => { await queue.close(); await rm(root, { recursive: true, force: true }); });
 
+	test('never approves newly captured evidence at or after the capture deadline', async () => {
+		await assert.rejects(queue.enqueueApproved({ ...event(), timestamp: end }, context()));
+		assert.equal(await queue.getPendingCount(), 0);
+	});
+
+	test('freezes expired but confirmed closed consent without changing captured events or approving historical rows', async () => {
+		const captured = event(); await queue.enqueueApproved(captured, context()); await closed();
+		consent = { ...consent, receipt: { ...consent.receipt!, state: 'expired', server_time: '2030-01-01T12:00:00.000Z' } };
+		await queue.setEvidenceConsent(consent); await queue.close(); queue = await openTestWorkerQueue(storage(), []);
+		const manifest = await queue.freezeFinalization(scope);
+		assert.equal(manifest.recordings[0].event_count, 1);
+		assert.equal(manifest.recordings[0].event_ids_sha256, canonicalSha256([captured.eventId]));
+		assert.deepEqual(await queue.getPending(10), [captured]);
+	});
+
 	test('matches the actual Rails sorted UUID vector and retains acknowledged tombstones', async () => {
 		const captured = event('22222222-2222-4222-8222-222222222222'); await queue.enqueueApproved(captured, context());
 		await queue.markAcknowledged([captured.eventId]); await closed();

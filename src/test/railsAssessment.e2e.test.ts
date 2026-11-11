@@ -34,7 +34,8 @@ const BASE = '/api/v2/coding_session/extension';
 const WORKSPACE = 'a'.repeat(64);
 const PAIR_CODE = 'ABCD-EFGH-JKLM-NPQR';
 const TOKEN = 'adt_ext_' + 'a'.repeat(43);
-const stamp = () => new Date().toISOString();
+let serverOffsetMs = 0;
+const stamp = () => new Date(Date.now() + serverOffsetMs).toISOString();
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 async function until(check: () => boolean | Promise<boolean>, label: string): Promise<void> {
 	const end = Date.now() + 5000;
@@ -59,7 +60,7 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 	const storage = () => ({ scheme: 'file', fsPath: join(root, 'queue') });
 	const metadata = () => state.get(ASSESSMENT_METADATA_KEY) as AssessmentMetadata;
 	const identity = async (): Promise<AssessmentAuthentication> => ({ connection: metadata().connection, credential: (await store.getCredential(metadata().credentialId))! });
-	const status = () => ({ ...fixture.status, coding_session_id: currentSessionId, server_time: stamp(), state: submission ? 'submitted' : startedAt ? 'active' : 'paired', ...(submission ? { submission } : {}),
+	const status = () => ({ ...fixture.status, coding_session_id: currentSessionId, server_time: stamp(), state: submission ? 'submitted' : startedAt ? Date.parse(deadline!) <= Date.parse(stamp()) ? 'expired' : 'active' : 'paired', ...(submission ? { submission } : {}),
 		local_recording_session_ids: [...serverBindings], ...(startedAt ? { started_at: startedAt, deadline } : {}) });
 	function json(response: ServerResponse, data: unknown, statusCode = 200): void {
 		response.writeHead(statusCode, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(data));
@@ -106,7 +107,7 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 	});
 	suiteTeardown(async () => { await rm(certificates, { recursive: true, force: true }); });
 	setup(async () => {
-		root = await mkdtemp(join(tmpdir(), 'rails-assessment-')); state = new Map(); secrets = new Map();
+		serverOffsetMs = 0; root = await mkdtemp(join(tmpdir(), 'rails-assessment-')); state = new Map(); secrets = new Map();
 		receipts = new Map(); disclosures = new Map(); requests = []; received = []; accepted = new Set(); serverBindings = []; starts = new Map();
 		startedAt = undefined; deadline = undefined; revoked = false; codeUsed = false; failStart = false; uploadMode = 'success'; controlMutation = undefined;
 		uploadConsent = true; recordingConsent = true; holdUpload = undefined; failRegistration = false;
@@ -132,10 +133,9 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 				if (finalizeMode === 'unavailable') { json(response, { error: 'Unavailable.' }, 503); return; }
 				if (finalized && JSON.stringify(finalized) !== JSON.stringify(body)) { json(response, { error: 'Conflict.' }, 409); return; }
 				if (!submission) {
-					if (Date.parse(deadline!) <= Date.now()) { json(response, { error: 'Expired.' }, 401); return; }
 					assert.deepEqual(body.recordings.map(row => row.local_recording_session_id).sort(), [...serverBindings].sort());
 					for (const row of body.recordings) {
-						const receipt = receipts.get(row.local_recording_session_id); assert.equal(receipt?.state, 'stopped');
+						const receipt = receipts.get(row.local_recording_session_id); assert.ok(receipt && ['stopped', 'expired'].includes(String(receipt.state))); assert.ok((receipt.evidence_window as Record<string, unknown>).stopped_at);
 						const ids = [...accepted].filter(id => received.some(batch => batch.events.some(event => event.eventId === id && event.sessionId === row.local_recording_session_id))).sort();
 						if (row.event_count !== ids.length || row.event_ids_sha256 !== canonicalSha256(ids)) { json(response, { error: 'Evidence pending.' }, 409); return; }
 					}
@@ -169,7 +169,8 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 						disclosures.set(body.request_id, receipt); disclosures.set(receipt.consent_id, receipt); }
 				} else if (!receipt || receipt.local_recording_session_id !== body.local_recording_session_id) { json(response, { error: 'Forbidden.' }, 403); return; }
 				if (request.method === 'DELETE') { receipt!.revoked_at ??= stamp(); receipt!.state = 'revoked'; }
-				receipt!.server_time = stamp(); receipt!.upload_scope_state = upload.state as DisclosureReceipt['upload_scope_state']; control(receipt); return;
+				receipt!.server_time = stamp(); if (!receipt!.revoked_at && Date.parse(stamp()) >= Date.parse(receipt!.expires_at)) { receipt!.state = 'expired'; }
+				receipt!.upload_scope_state = upload.state as DisclosureReceipt['upload_scope_state']; control(receipt); return;
 			}
 			if (path.startsWith(BASE + '/evidence_consents')) {
 				if (failRegistration) { json(response, { error: 'Temporarily unavailable.' }, 503); return; }
@@ -183,8 +184,8 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 				} else {
 					if (!receipt || receipt.consent_id !== body.consent_id) { json(response, { error: 'Forbidden.' }, 403); return; }
 					if (request.method === 'DELETE') { receipt.state = 'revoked'; receipt.revoked_at ??= stamp(); }
-					else if (receipt.state !== 'revoked') { receipt.state = 'stopped'; const window = receipt.evidence_window as Record<string, unknown>;
-						window.stopped_at ??= stamp(); window.ends_at = window.stopped_at; }
+					else if (receipt.state !== 'revoked') { receipt.state = Date.parse(stamp()) >= Date.parse(String(receipt.expires_at)) ? 'expired' : 'stopped'; const window = receipt.evidence_window as Record<string, unknown>;
+						window.stopped_at ??= new Date(Math.min(Date.parse(stamp()), Date.parse(String(receipt.expires_at)))).toISOString(); window.ends_at = window.stopped_at; }
 				}
 				receipt!.server_time = stamp(); control(receipt); return;
 			}
@@ -242,6 +243,21 @@ suite('Real Rails adapter and scoped assessment HTTPS pipeline', function () {
 			{ categories: ['code_changes'], workspaceIds: [WORKSPACE], sourceSessions: [] }, AbortSignal.timeout(2000)));
 		return { client, coordinator, grant };
 	}
+	test('late submission drains approved pending SQLite evidence after restart, preserving deadline and receipt identity', async () => {
+		await pairStart(); const disclosure = await grantCodeDisclosure(); await delivery.disable(); const captured = await captureFile(); disclosure.client.dispose();
+		const originalDeadline = deadline; const requestId = metadata().submitRequestId;
+		serverOffsetMs = 3600000 + 60000;
+		await controller.showStatus();
+		assert.equal(recording.isRecording, false); assert.equal(controller.view.state, 'submission_pending');
+		await stopPipeline(); await makePipeline();
+		await until(async () => { await controller.stopAndSubmit(); return controller.view.state === 'submitted'; }, 'late evidence reconciliation');
+		assert.equal(controller.view.state, 'submitted'); assert.ok(accepted.has(captured.eventId));
+		assert.equal(deadline, originalDeadline); assert.equal(submission?.request_id, requestId);
+		assert.equal(received.flatMap(batch => batch.eventApprovals).find(approval => approval.eventId === captured.eventId)?.approvalProtocolVersion, 2);
+		assert.ok(Date.parse(submission!.submitted_at) > Date.parse(originalDeadline!));
+		await controller.stopAndSubmit(); assert.equal(submission?.request_id, requestId);
+	});
+
 	test('protocol-2 capture uploads mixed immutable sidecars and reconciles finalization without exposing dummy secrets', async () => {
 		await pairStart(); await delivery.disable(); const legacy = await captureFile();
 		const { client } = await grantCodeDisclosure();

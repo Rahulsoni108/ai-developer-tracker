@@ -44,7 +44,7 @@ export function validServerStatus(value: AssessmentServerStatus, connection: Ass
 		&& utc(value.serverTime)
 		&& (value.submission === undefined ? connection.mode !== 'rails' || value.state !== 'submitted'
 			: value.state === 'submitted' && validSubmissionReceipt(value.submission) && utc(value.startedAt) && utc(value.deadline)
-				&& Date.parse(value.submission.submitted_at) >= Date.parse(value.startedAt) && Date.parse(value.submission.submitted_at) < Date.parse(value.deadline)
+				&& Date.parse(value.submission.submitted_at) >= Date.parse(value.startedAt)
 				&& Date.parse(value.submission.submitted_at) <= Date.parse(value.serverTime) && value.submission.recording_count === value.localRecordingSessionIds?.length)
 		&& Array.isArray(value.localRecordingSessionIds) && value.localRecordingSessionIds.length <= 32 && value.localRecordingSessionIds.every(isUuid)
 		&& new Set(value.localRecordingSessionIds).size === value.localRecordingSessionIds.length

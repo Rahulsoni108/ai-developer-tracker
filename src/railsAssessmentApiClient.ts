@@ -1,3 +1,4 @@
+import { evidenceDeliveryAllowed } from './evidenceConsent';
 import { RailsDisclosureConsentClient } from './railsDisclosureConsentClient';
 import type { DisclosureState } from './assessmentDisclosure';
 import { validFinalizationRequest, receiptMatches } from './assessmentFinalization';
@@ -82,16 +83,17 @@ export class RailsAssessmentApiClient implements AssessmentApiClient, EvidenceCo
 	async authorizeUpload(auth: AssessmentAuthentication, state: EvidenceConsentState, batch: PreparedEventBatch, signal: AbortSignal, expected?: AssessmentServerStatus): Promise<RailsUploadPermit> {
 		this.checkAuth(auth);
 		if (!validConsentState(state) || state.credentialDigest !== createHash('sha256').update(auth.credential).digest('hex') || state.codingSessionId !== auth.connection.codingSessionId || state.origin !== this.origin
-			|| state.locallyRevoked || state.pendingAction || !state.receipt || !['active', 'stopped'].includes(state.receipt.state)
-			|| state.captureClosed && state.receipt.state !== 'stopped' || !batch.events.length
+			|| state.locallyRevoked || state.pendingAction || !state.receipt || !evidenceDeliveryAllowed(state, state.receipt.server_time)
+			|| !batch.events.length
 			|| batch.events.some(event => event.sessionId !== state.request.local_recording_session_id || !state.receipt!.approved_workspace_ids.includes(event.workspaceId!)
 				|| !state.receipt!.event_types.includes(event.eventType))) { throw new AssessmentApiError('consent_required'); }
 		const status = await this.getStatus(auth, signal); const receipt = state.receipt;
 		if (expected && (status.startedAt !== expected.startedAt || status.deadline !== expected.deadline || Date.parse(status.serverTime) < Date.parse(expected.serverTime)
 			|| status.localRecordingSessionIds.some(id => !expected.localRecordingSessionIds.includes(id)))) { throw new AssessmentApiError('protocol'); }
-		if (status.state !== 'active' || status.deadline !== state.deadline || !status.localRecordingSessionIds.includes(state.request.local_recording_session_id)
-			|| Date.parse(status.serverTime) < Date.parse(receipt.server_time) || Date.parse(status.serverTime) >= Date.parse(receipt.expires_at)
+		if (!['active', 'expired'].includes(status.state) || !evidenceDeliveryAllowed(state, status.serverTime) || status.state === 'expired' && !state.captureClosed || status.deadline !== state.deadline || !status.localRecordingSessionIds.includes(state.request.local_recording_session_id)
+			|| Date.parse(status.serverTime) < Date.parse(receipt.server_time)
 			|| batch.events.some(event => Date.parse(event.timestamp) < Date.parse(receipt.evidence_window.starts_at)
+				|| Date.parse(event.timestamp) >= Date.parse(status.deadline!) || Date.parse(event.timestamp) >= Date.parse(receipt.expires_at)
 				|| Date.parse(event.timestamp) > Math.min(Date.parse(status.serverTime), Date.parse(receipt.evidence_window.ends_at)))) { throw new AssessmentApiError('consent_required'); }
 		const permit: RailsUploadPermit = Object.freeze({ contract: 'rails-assessment-events.v1' });
 		permits.set(permit, { binding: { codingSessionId: status.codingSessionId, origin: this.origin, consentReceiptId: receipt.consent_id, serverTime: status.serverTime },
@@ -106,13 +108,14 @@ export class RailsAssessmentApiClient implements AssessmentApiClient, EvidenceCo
 	}
 	private status(value: unknown, connection: AssessmentConnection): AssessmentServerStatus {
 		if (!exactObject(value, ['coding_session_id', 'state', 'server_time', 'local_recording_session_ids'], ['started_at', 'deadline', 'submission'])
-			|| !['paired', 'active', 'submitted'].includes(value.state as string) || !utcTime(value.server_time)
+			|| !['paired', 'active', 'expired', 'submitted'].includes(value.state as string) || !utcTime(value.server_time)
 			|| value.started_at !== undefined && !utcTime(value.started_at) || value.deadline !== undefined && !utcTime(value.deadline)) { throw new AssessmentApiError('protocol'); }
 		const status = { ...(value.submission === undefined ? {} : { submission: value.submission }), codingSessionId: value.coding_session_id, state: value.state, serverTime: value.server_time,
 			localRecordingSessionIds: value.local_recording_session_ids, ...(value.started_at === undefined ? {} : { startedAt: value.started_at }),
 			...(value.deadline === undefined ? {} : { deadline: value.deadline }) } as AssessmentServerStatus;
 		if (!validServerStatus(status, connection) || status.state === 'paired' && (status.localRecordingSessionIds.length || status.startedAt !== undefined || status.deadline !== undefined)
 			|| status.state === 'active' && Date.parse(status.serverTime) >= Date.parse(status.deadline!)
+			|| status.state === 'expired' && (!status.startedAt || !status.deadline || Date.parse(status.serverTime) < Date.parse(status.deadline))
 			|| Date.parse(status.serverTime) >= Date.parse(connection.credentialExpiresAt!)) { throw new AssessmentApiError('protocol'); }
 		return status;
 	}

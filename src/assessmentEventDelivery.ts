@@ -1,3 +1,4 @@
+import { evidenceDeliveryAllowed } from './evidenceConsent';
 import type { AssessmentMetadata, AssessmentStore } from './assessmentStorage';
 import { validConnection } from './assessmentStorage';
 import { AssessmentApiError, type AssessmentAuthentication } from './assessmentApiClient';
@@ -75,7 +76,7 @@ export class AssessmentEventDelivery implements AssessmentDeliveryLifecycle {
 				if (!current() || !binding || !activeSession || (await auth()).credential !== token) { return false; }
 				const scope = await this.queue.getEvidenceConsent(activeSession);
 				return !!scope && !scope.locallyRevoked && !scope.pendingAction && scope.receipt?.consent_id === binding.consentReceiptId
-					&& ['active', 'stopped'].includes(scope.receipt.state) && (!scope.captureClosed || scope.receipt.state === 'stopped');
+					&& evidenceDeliveryAllowed(scope, binding.serverTime);
 			},
 			onStatus: status => { if (current() && status !== this.outcome) { this.outcome = status; this.onStatus(status); } }
 		}, this.transport?.());

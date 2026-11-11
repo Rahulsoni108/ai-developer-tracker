@@ -84,6 +84,18 @@ suite('Assessment lifecycle foundation', () => {
 		assert.ok(views.some(view => view.state === 'starting')); assert.equal(controller.allowsDevelopmentUpload(recording.sessionId!), false);
 		assert.equal(controller.allowsDevelopmentUpload(randomUUID()), true);
 	});
+	test('stops capture at the server deadline using a local monotonic timer without resetting it', async () => {
+		await paired(); const start = mock.startOrResume.bind(mock);
+		mock.startOrResume = async (...args) => ({ ...await start(...args), deadline: new Date(serverTime + 40).toISOString() });
+		await controller.start(); const deadline = metadata().serverStatus.deadline;
+		await new Promise<void>((resolve, reject) => {
+			const timeout = setTimeout(() => reject(new Error('Capture did not stop at deadline')), 1000);
+			const listener = recording.addLifecycleListener({ prepare: async () => {}, started: () => {}, cancelled: () => {}, stopped: () => { clearTimeout(timeout); listener.dispose(); resolve(); } });
+		});
+		assert.equal(recording.isRecording, false); assert.equal(controller.view.state, 'submission_pending');
+		assert.equal(metadata().serverStatus.deadline, deadline); assert.equal(submits, 0);
+	});
+
 	test('network start failure and missing authentication never activate recording', async () => {
 		await paired(); mock.startOrResume = async () => { throw new Error('PRIVATE_NETWORK_DETAIL'); }; await controller.start();
 		assert.equal(recording.isRecording, false); assert.equal(controller.view.state, 'recovery');

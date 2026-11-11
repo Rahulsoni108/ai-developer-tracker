@@ -98,5 +98,20 @@ export function consentCoversEvent(state: EvidenceConsentState, event: TrackerEv
 	return !state.locallyRevoked && !state.captureClosed && !state.pendingAction && receipt?.state === 'active'
 		&& receipt.local_recording_session_id === event.sessionId && receipt.approved_workspace_ids.includes(event.workspaceId!)
 		&& receipt.event_types.includes(event.eventType) && Date.parse(event.timestamp) >= Date.parse(receipt.evidence_window.starts_at)
-		&& Date.parse(event.timestamp) <= Date.parse(receipt.evidence_window.ends_at);
+		&& Date.parse(event.timestamp) <= Date.parse(receipt.evidence_window.ends_at)
+		&& Date.parse(event.timestamp) < Math.min(Date.parse(receipt.expires_at), Date.parse(state.deadline));
+}
+
+/** Closed capture is not renewed: only its original approved evidence may finish delivery.
+ * The caller must also authenticate current Rails status/credential before transmission. */
+export function closedEvidenceConsent(state: EvidenceConsentState): state is EvidenceConsentState & { receipt: EvidenceConsentReceipt } {
+	return state.captureClosed && !state.locallyRevoked && !state.pendingAction && !!state.receipt
+		&& ['stopped', 'expired'].includes(state.receipt.state) && !!state.receipt.evidence_window.stopped_at && !state.receipt.revoked_at;
+}
+export function evidenceDeliveryAllowed(state: EvidenceConsentState, serverTime: string): boolean {
+	const receipt = state.receipt;
+	if (!receipt || state.locallyRevoked || state.pendingAction || !utcTime(serverTime)
+		|| Date.parse(serverTime) < Date.parse(receipt.server_time)) { return false; }
+	return closedEvidenceConsent(state) || !state.captureClosed && receipt.state === 'active'
+		&& Date.parse(serverTime) < Date.parse(receipt.expires_at) && Date.parse(serverTime) < Date.parse(state.deadline);
 }

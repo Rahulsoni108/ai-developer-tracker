@@ -48,6 +48,9 @@ export class AssessmentController {
 	private request?: AbortController;
 	private starting = false;
 	private submitting = false;
+	private captureDeadlineTimer?: ReturnType<typeof setTimeout>;
+	private statusReceivedAt = process.hrtime.bigint();
+	private readonly responseRequestedAt = new WeakMap<object, bigint>();
 	private archiving = false;
 	private archiveWork?: Promise<void>;
 	private archiveIndex: AssessmentArchiveIndex = { archives: [] };
@@ -86,11 +89,12 @@ export class AssessmentController {
 				await this.save('starting');
 				if (this.evidenceConsents && !(this.workflow && this.api.mode === 'rails')) { this.startStep('evidence_consent'); await this.call(signal => this.evidenceConsents!.approve(this.auth!, id, status, signal)); }
 				if (!current() || this.disposed || generation !== this.generation) { throw new AssessmentApiError('cancelled'); }
+				if (Date.parse(status.deadline!) - Date.parse(status.serverTime) <= Number(process.hrtime.bigint() - this.statusReceivedAt) / 1000000) { throw new AssessmentApiError('session_ended'); }
 			},
-			started: () => {}, cancelled: id => {
+			started: () => { this.scheduleCaptureDeadline(); }, cancelled: id => {
 				if (!this.archiving && this.evidenceConsents && this.auth && this.isAssociatedSession(id)) { this.closeStoppedConsent(id); }
 			},
-			stopped: id => { if (this.isAssociatedSession(id) && !this.disposed) { this.set('submission_pending');
+			stopped: id => { if (this.isAssociatedSession(id) && !this.disposed) { clearTimeout(this.captureDeadlineTimer); this.set('submission_pending');
 				if (!this.archiving && this.evidenceConsents && this.auth) { this.closeStoppedConsent(id); }
 			} }
 		});
@@ -235,7 +239,7 @@ export class AssessmentController {
 				if (this.metadata.serverStatus.state === 'submitted') {
 					this.submissionStep('validate_receipt', 'submitted'); return; // Verified recovery receipt, no consent mutations/uploads.
 				}
-				if (this.metadata.serverStatus.state !== 'active') { throw new AssessmentApiError('session_ended'); }
+				if (!['active', 'expired'].includes(this.metadata.serverStatus.state)) { throw new AssessmentApiError('session_ended'); }
 				this.submissionStep('close_windows');
 				for (const id of this.metadata.localRecordingSessionIds) {
 					if (this.evidenceConsents) { await this.closeStoppedConsent(id); }
@@ -372,7 +376,7 @@ export class AssessmentController {
 		try { this.onSubmissionDiagnostic({ ...this.lastSubmission }); } catch { /* Safe diagnostics cannot change submission. */ }
 	}
 	private async enableDelivery(): Promise<void> {
-		if (this.archiving || this.disposed || !this.delivery || !this.metadata || !this.consent || this.metadata.serverStatus.state !== 'active' || this.metadata.connection.mode !== 'rails') { return; }
+		if (this.archiving || this.disposed || !this.delivery || !this.metadata || !this.consent || !['active', 'expired'].includes(this.metadata.serverStatus.state) || this.metadata.connection.mode !== 'rails') { return; }
 		try { await this.delivery.enable(this.metadata, () => this.consent && !this.disposed); }
 		catch { this.set(this.phase, 'evidence_pending'); } // Network delivery cannot stop or block local collectors.
 	}
@@ -453,7 +457,7 @@ export class AssessmentController {
 			}
 		}
 		if (status.state === 'active' && Date.parse(status.deadline!) <= Date.parse(status.serverTime)) { throw new AssessmentApiError('session_ended'); }
-		const phase = status.state === 'submitted' ? 'submitted' : ['stopping', 'submission_pending'].includes(this.metadata!.phase)
+		const phase = status.state === 'submitted' ? 'submitted' : status.state === 'expired' ? 'submission_pending' : ['stopping', 'submission_pending'].includes(this.metadata!.phase)
 			? 'submission_pending' : status.state === 'paired' ? 'paired' : this.recording.isRecording && this.isAssociatedSession(this.recording.sessionId!) ? 'active' : 'recovery';
 		const reason = ['expired', 'revoked'].includes(status.state) ? 'session_ended'
 			: phase === 'submission_pending' && !this.submitting ? this.reason ?? 'recovery_required' : undefined;
@@ -468,6 +472,21 @@ export class AssessmentController {
 			|| metadata.connection.mode === 'rails' && status.state === 'submitted' && status.submission?.request_id !== metadata.submitRequestId
 			|| metadata.serverStatus.submission && (!status.submission || Object.entries(metadata.serverStatus.submission).some(([key, value]) => status.submission![key as keyof typeof status.submission] !== value))) { throw new AssessmentApiError('protocol'); }
 		metadata.serverStatus = structuredClone(status);
+		this.statusReceivedAt = this.responseRequestedAt.get(status) ?? process.hrtime.bigint(); this.scheduleCaptureDeadline();
+	}
+	private scheduleCaptureDeadline(): void {
+		clearTimeout(this.captureDeadlineTimer);
+		const status = this.metadata?.serverStatus; const id = this.recording.sessionId;
+		if (this.disposed || !status?.deadline || !this.recording.isRecording || !id || !this.isAssociatedSession(id)) { return; }
+		// Rails timing plus monotonic elapsed time; changing the local clock cannot extend capture.
+		const remaining = Date.parse(status.deadline) - Date.parse(status.serverTime)
+			- Number(process.hrtime.bigint() - this.statusReceivedAt) / 1000000;
+		this.captureDeadlineTimer = setTimeout(() => {
+			if (!this.disposed && this.recording.isRecording && this.recording.sessionId === id && this.isAssociatedSession(id)) {
+				this.recording.stop(); this.set('submission_pending', 'session_ended');
+			}
+		}, Math.max(0, remaining));
+		this.captureDeadlineTimer.unref?.();
 	}
 	private async freeze(existingOnly = false): Promise<AssessmentFinalizationRequest> {
 		if (!this.metadata || !this.evidence.freezeFinalization) { throw new AssessmentApiError('recovery_required'); }
@@ -534,13 +553,15 @@ export class AssessmentController {
 	}
 	private async call<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
 		if (this.disposed) { throw new AssessmentApiError('cancelled'); }
-		const controller = new AbortController(); this.request = controller;
+		const controller = new AbortController(); this.request = controller; const requestedAt = process.hrtime.bigint();
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		try {
-			return await Promise.race([operation(controller.signal), new Promise<never>((_, reject) => {
+			const response = await Promise.race([operation(controller.signal), new Promise<never>((_, reject) => {
 				controller.signal.addEventListener('abort', () => reject(new AssessmentApiError('cancelled')), { once: true });
 				timer = setTimeout(() => { reject(new AssessmentApiError('unavailable')); controller.abort(); }, this.requestTimeoutMs);
 			})]);
+			if (response && typeof response === 'object') { this.responseRequestedAt.set(response, requestedAt); }
+			return response;
 		} finally { clearTimeout(timer); if (this.request === controller) { this.request = undefined; } }
 	}
 	private run(action: () => Promise<void>): Promise<void> {
@@ -563,6 +584,7 @@ export class AssessmentController {
 		this.phase = phase; this.reason = reason; try { this.onChange(this.view); } catch { /* Fixed safe view only. */ }
 	}
 	async dispose(): Promise<void> {
+		clearTimeout(this.captureDeadlineTimer);
 		this.disposed = true; ++this.generation; this.request?.abort(); if (this.starting) { this.recording.stop(); }
 		if (!this.archiving && this.evidenceConsents && this.recording.isRecording && this.isAssociatedSession(this.recording.sessionId!)) {
 			const id = this.recording.sessionId!; this.recording.stop();
