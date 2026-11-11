@@ -31,6 +31,8 @@ export interface AssessmentView {
 	uploadConsent: boolean; uploadStatus?: string;
 	lastStart?: AssessmentStartDiagnostic; archiving?: boolean; archivedCount?: number; archivedUnconfirmedCount?: number;
 	lastSubmission?: AssessmentSubmissionDiagnostic;
+	/** Process-local work only. A retained submission intent is not a running operation. */
+	submissionInProgress?: boolean;
 }
 
 /** Assessment workflow only. RecordingController remains the sole recording-state owner. */
@@ -41,6 +43,7 @@ export class AssessmentController {
 	private pendingEvents?: number;
 	private lastStart?: AssessmentStartDiagnostic;
 	private lastSubmission?: AssessmentSubmissionDiagnostic;
+	private readonly viewListeners = new Set<(view: AssessmentView) => void>();
 	private consent = false;
 	private initialized = false;
 	private disposed = false;
@@ -102,11 +105,15 @@ export class AssessmentController {
 	private auth?: AssessmentAuthentication;
 	get mode(): AssessmentApiClient['mode'] { return this.api.mode; }
 	get workflowStartPending(): boolean { return this.starting && !!this.workflow && this.api.mode === 'rails'; }
+	observeView(listener: (view: AssessmentView) => void): { dispose(): void } {
+		this.viewListeners.add(listener);
+		return { dispose: () => { this.viewListeners.delete(listener); } };
+	}
 	get view(): AssessmentView {
 		const status = this.metadata?.serverStatus;
 		const mode = this.metadata?.connection.mode ?? (this.api.mode === 'unavailable' ? undefined : this.api.mode);
 		return { state: this.phase, ...(this.lastStart ? { lastStart: { ...this.lastStart } } : {}), ...(this.archiving ? { archiving: true } : {}),
-			...(this.lastSubmission ? { lastSubmission: { ...this.lastSubmission } } : {}),
+			...(this.lastSubmission ? { lastSubmission: { ...this.lastSubmission } } : {}), ...(this.submitting ? { submissionInProgress: true } : {}),
 			...(this.archiveIndex.archives.length ? { archivedCount: this.archiveIndex.archives.length, archivedUnconfirmedCount: this.archiveIndex.archives.filter(item => !item.submissionConfirmed).length } : {}), ...(mode ? { mode } : {}), ...(this.reason ? { reason: this.reason } : {}),
 			...(status ? { serverTime: status.serverTime, ...(status.deadline ? { deadline: status.deadline,
 				remainingMsAtLastCheck: Math.max(0, Date.parse(status.deadline) - Date.parse(status.serverTime)) } : {}) } : {}),
@@ -280,7 +287,7 @@ export class AssessmentController {
 			} catch (error) {
 				this.submissionStep(this.lastSubmission!.step, 'failed', error instanceof AssessmentApiError ? error.code : 'unavailable');
 				throw error;
-			} finally { this.submitting = false; }
+			} finally { this.submitting = false; this.notifyView(); }
 
 		}));
 	}
@@ -374,6 +381,7 @@ export class AssessmentController {
 	private submissionStep(step: AssessmentSubmissionDiagnostic['step'], status: AssessmentSubmissionDiagnostic['status'] = 'running', reason?: AssessmentFailure): void {
 		this.lastSubmission = { step, status, ...(reason ? { reason } : {}) };
 		try { this.onSubmissionDiagnostic({ ...this.lastSubmission }); } catch { /* Safe diagnostics cannot change submission. */ }
+		this.notifyView();
 	}
 	private async enableDelivery(): Promise<void> {
 		if (this.archiving || this.disposed || !this.delivery || !this.metadata || !this.consent || !['active', 'expired'].includes(this.metadata.serverStatus.state) || this.metadata.connection.mode !== 'rails') { return; }
@@ -381,6 +389,7 @@ export class AssessmentController {
 		catch { this.set(this.phase, 'evidence_pending'); } // Network delivery cannot stop or block local collectors.
 	}
 	showStatus(): Promise<void> {
+		if (this.submitting) { this.notifyView(); return Promise.resolve(); }
 		if (this.starting && this.lastStart?.status === 'running') { this.set(this.phase, this.reason); return Promise.resolve(); }
 		if (this.archiving) { return this.archiveWork ?? Promise.resolve(); }
 		return this.run(async () => {
@@ -581,7 +590,12 @@ export class AssessmentController {
 		this.busy = operation; return operation;
 	}
 	private set(phase: AssessmentState, reason?: AssessmentFailure): void {
-		this.phase = phase; this.reason = reason; try { this.onChange(this.view); } catch { /* Fixed safe view only. */ }
+		this.phase = phase; this.reason = reason; this.notifyView();
+	}
+	private notifyView(): void {
+		for (const listener of [this.onChange, ...this.viewListeners]) {
+			try { listener(this.view); } catch { /* Presentation cannot change authorization or submission. */ }
+		}
 	}
 	async dispose(): Promise<void> {
 		clearTimeout(this.captureDeadlineTimer);
@@ -590,6 +604,6 @@ export class AssessmentController {
 			const id = this.recording.sessionId!; this.recording.stop();
 			try { await this.closeStoppedConsent(id); } catch { /* Durable close intent remains pending; never claim remote success. */ }
 		}
-		await this.archiveWork; await this.busy; await this.consentWork; this.consent = false; await this.delivery?.disable(); this.lifecycle.dispose(); this.auth = undefined;
+		await this.archiveWork; await this.busy; await this.consentWork; this.consent = false; await this.delivery?.disable(); this.lifecycle.dispose(); this.auth = undefined; this.viewListeners.clear();
 	}
 }

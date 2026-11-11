@@ -191,6 +191,15 @@ The event summary decrypts/validates inside the storage worker and returns only 
 7. The extension records approved workspace and AI activity through privacy filtering and encrypted storage.
 8. The candidate clicks **Stop & Submit Assessment**. Capture stops and flushes; durable event acknowledgments and server finalization are required before success. Network failure leaves submission pending.
 
+**Submission progress and recovery:** Stop & Submit displays the current step in a progress
+notification and the status bar, ending with confirmation only after the Rails receipt is
+verified. Keep VS Code open while it runs. If an attempt cannot finish, follow the specific
+network, upload-permission, authentication or local-storage instructions. **Retry Stop &
+Submit** always requires your explicit action and preserves the same submission request
+and evidence manifests. After reload, an incomplete submission is shown as needing recovery;
+it is not assumed to be running. A zero pending-event count alone does not mean submitted.
+See [progress and recovery verification](docs/assessment-finalization.md#manual-progress-and-recovery-ux-verification).
+
 **Manual recording conflict:** If `recording_busy` identifies an active/preparing manual recording, run **Stop Recording (Without Submitting)** and wait for local writes to drain, then run **Start Assessment**. Manual evidence is retained and never adopted by the assessment. The manual/status-bar start command now offers an explicit assessment workflow choice when Rails is paired.
 
 If Start Assessment stops after recording confirmation, inspect **Output → AI Developer Tracker** and **Show Assessment Status** for the last start prerequisite. The workflow notice is followed by workspace/storage/baseline preparation and atomic Rails authorization with independently validated purpose requests. Unsupported workflow APIs or processor/tool preflight fail before timer start. See [safe start diagnostics and retry steps](docs/assessment-start-diagnostics.md).

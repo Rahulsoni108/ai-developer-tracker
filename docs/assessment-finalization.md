@@ -51,8 +51,23 @@ codes only, for example `Assessment submission: failed; step: freeze_manifest; c
 It never includes event content, identifiers, credentials, paths or exception messages.
 Show Assessment Status preserves a failed attempt's reason; an idle pending submission
 is marked as requiring recovery, rather than claiming an operation is still running.
-Stop & Submit also reports a pending result directly. Retry uses the same durable request
-ID and manifests. After reloading, approve upload consent again if asked. Do not archive,
+Stop & Submit shows a non-cancellable progress notification with the actual current
+operation: stopping capture, saving local evidence, closing recording windows, freezing
+the manifest, uploading, checking durable acknowledgments, finalizing and validating/saving
+the receipt. It does not invent a percentage or treat a zero pending count as submission.
+The status bar and Show Assessment Status use the same progress. Success appears only
+after the controller confirms submission; mock completion is explicitly a simulation.
+
+An idle pending submission (including after reload) displays **submission needs recovery**.
+Network, consent and pending-evidence messages offer **Retry Stop & Submit**, which starts
+another attempt only after an explicit click. Duplicate command invocations share one
+operation. Authentication failures offer **Show Assessment Status** and explain that access
+must be restored; storage/receipt failures require fixing the prerequisite or support.
+Closing a progress notification does not cancel or roll back submission. Keep VS Code open
+until the attempt finishes. The progress UI holds no evidence, receipt contents or credentials.
+
+Retry uses the same durable request ID and manifests. After reloading, approve upload
+consent again if asked. Do not archive,
 erase local storage or change evidence to clear a submission error. These diagnostics do
 not authorize uploads, change reconciliation or establish that finalization succeeded.
 
@@ -191,3 +206,20 @@ For a later live test, use only approved development data:
 5. Recruiter results show Submitted late plus submission delay. Delay is not extra working time.
 6. Expired/revoked credentials or revoked upload consent still reject; preserve evidence
    for supported recovery. Delivery is not unlimited: the existing credential expiry applies.
+
+## Manual progress and recovery UX verification
+
+1. Reload the extension with a synthetic paired assessment. Start it with explicit consent,
+   record a dummy event, then run **Stop & Submit Assessment**.
+2. Observe the progress notification and status bar. Expect real operation names, then
+   **Assessment successfully submitted** only after a verified server receipt. A second
+   command click during the attempt must not create a second submission flow.
+3. With a separate synthetic assessment, disconnect the network during delivery/finalization.
+   Expect a safe message explaining the failed step, retained evidence and a retry action.
+   Dismiss it: no extra submission attempt should start. Restore connectivity and explicitly
+   select **Retry Stop & Submit** (or run the palette command). Approve uploads if asked.
+4. Reload an incomplete submission. Status must say recovery is needed, not that an old
+   operation is still running. Retry must preserve the original request/manifests/deadline.
+5. For authentication/storage/receipt failures, expect access/storage/support instructions
+   and **Show Assessment Status**. Do not clear evidence, re-pair or bypass verification.
+6. Check a manual recording remains independent and archived recordings stay isolated.

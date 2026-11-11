@@ -1,6 +1,7 @@
 import { describeAssessmentStart } from './assessmentStartDiagnostics';
 import * as vscode from 'vscode';
 import type { AssessmentController, AssessmentView } from './assessmentController';
+import { createSubmissionCommand, describeSubmission, formatAssessmentStatusBar } from './assessmentSubmissionProgress';
 
 export const ARCHIVE_ASSESSMENT_COMMAND = 'ai-developer-tracker.archiveAssessmentConnection';
 export const PAIR_ASSESSMENT_COMMAND = 'ai-developer-tracker.pairAssessment';
@@ -13,9 +14,10 @@ export const ASSESSMENT_STATUS_COMMAND = 'ai-developer-tracker.showAssessmentSta
 export function formatAssessmentStatus(view: AssessmentView): string {
 	const backendStatus = view.mode === 'mock' ? 'LOCAL MOCK ONLY — no Rails backend connected.'
 		: view.mode === 'rails' ? view.state === 'unpaired' ? 'Rails assessment API configured. Use Pair Assessment to connect.'
-			: 'Rails assessment connected. Submission requires durable evidence reconciliation and a verified server receipt.'
+			: view.state === 'submitted' ? 'Rails assessment connected. Server submission confirmed.'
+				: 'Rails assessment connected. Submission requires durable evidence reconciliation and a verified server receipt.'
 			: 'Configure assessment.apiOrigin in user settings and reload to pair with Rails.';
-	const lines = [`Assessment: ${view.archiving ? 'archiving connection' : view.state.replace(/_/g, ' ')}`, backendStatus];
+	const lines = [formatAssessmentStatusBar(view), backendStatus];
 	if (view.state === 'submission_pending' && view.deadline && view.serverTime && Date.parse(view.serverTime) >= Date.parse(view.deadline)) { lines.push('Capture deadline reached. New capture is stopped. Use Stop & Submit to deliver previously approved evidence; the server will mark a late submission. Valid authentication and upload consent are still required.'); }
 	if (view.state === 'recovery') { lines.push('Recovery required. Authentication failure does not prove the server assessment was deleted.'); }
 	if (view.archivedCount) {
@@ -30,12 +32,18 @@ export function formatAssessmentStatus(view: AssessmentView): string {
 	if (view.deadline) { lines.push(`Server deadline: ${view.deadline}`, `Last server time: ${view.serverTime}`, 'Timing is the last server snapshot; offline time is unverified.'); }
 	if (view.pendingEvents !== undefined) { lines.push(`Pending assessment events: ${view.pendingEvents}`); }
 	lines.push(`Assessment upload consent: ${view.uploadConsent ? 'granted for this run' : 'required'}`);
-	if (view.state === 'submission_pending') { lines.push(view.reason ? 'Submission is not complete and requires recovery. Use Stop & Submit again to retry the same submission; pending evidence remains encrypted.' : 'Submission is not complete; submission is in progress. Success requires a verified Rails receipt.'); }
-	if (view.state === 'submitted') { lines.push(view.mode === 'mock' ? 'Local mock submission completed (simulation).' : 'Assessment successfully submitted to the server. Assessment capture and uploads are stopped.'); }
+	if (view.submissionInProgress || ['stopping', 'submission_pending', 'submitted'].includes(view.state) || view.lastSubmission?.status === 'failed') { lines.push(describeSubmission(view).message); }
 	return lines.join('\n');
 }
 
 export function registerAssessmentCommands(controller: AssessmentController, mockEnabled: boolean, beforeSubmit: () => Promise<void> = async () => {}): vscode.Disposable[] {
+	const submit = createSubmissionCommand(controller, beforeSubmit, {
+		withProgress: async task => vscode.window.withProgress({ location: vscode.ProgressLocation.Notification,
+			title: 'Assessment: Stop & Submit', cancellable: false }, progress => task(message => progress.report({ message }))),
+		warn: async (message, actions) => vscode.window.showWarningMessage(message, ...actions),
+		info: async message => { await vscode.window.showInformationMessage(message); },
+		showStatus: async () => { await vscode.commands.executeCommand(ASSESSMENT_STATUS_COMMAND); }
+	});
 	return [
 		vscode.commands.registerCommand(ARCHIVE_ASSESSMENT_COMMAND, async () => {
 			let accepted = false;
@@ -63,11 +71,7 @@ export function registerAssessmentCommands(controller: AssessmentController, moc
 			await controller.start(); const diagnostic = controller.view.lastStart;
 			if (diagnostic?.status === 'failed') { void vscode.window.showWarningMessage(describeAssessmentStart(diagnostic) + ' See Output → AI Developer Tracker for the prerequisite sequence.'); }
 		}),
-		vscode.commands.registerCommand(SUBMIT_ASSESSMENT_COMMAND, async () => {
-			await beforeSubmit(); await controller.stopAndSubmit();
-			const view = controller.view;
-			if (view.state === 'submission_pending') { void vscode.window.showWarningMessage(formatAssessmentStatus(view)); }
-		}),
+		vscode.commands.registerCommand(SUBMIT_ASSESSMENT_COMMAND, submit),
 		vscode.commands.registerCommand(ASSESSMENT_STATUS_COMMAND, async () => {
 			await controller.showStatus(); const view = controller.view;
 			void vscode.window.showInformationMessage(formatAssessmentStatus(view)); return view;

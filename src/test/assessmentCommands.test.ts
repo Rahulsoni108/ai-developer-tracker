@@ -21,7 +21,7 @@ suite('Assessment VS Code commands', () => {
 	test('status text makes pending submission and mock timing limitations explicit without connection identifiers', () => {
 		const text = formatAssessmentStatus({ state: 'submission_pending', mode: 'mock', uploadConsent: false, pendingEvents: 2,
 			serverTime: '2030-01-01T00:00:00Z', deadline: '2030-01-01T01:00:00Z' });
-		assert.ok(text.includes('LOCAL MOCK ONLY')); assert.ok(text.includes('Submission is not complete'));
+		assert.ok(text.includes('LOCAL MOCK ONLY')); assert.ok(text.includes('Submission is not confirmed'));
 		assert.ok(text.includes('offline time is unverified')); assert.equal(text.includes('codingSessionId'), false);
 	});
 	test('status distinguishes configured but unpaired Rails from missing configuration', () => {
@@ -36,7 +36,16 @@ suite('Assessment VS Code commands', () => {
 		const text = formatAssessmentStatus({ state: 'submission_pending', mode: 'rails', uploadConsent: false, reason: 'recovery_required',
 			lastSubmission: { step: 'freeze_manifest', status: 'failed', reason: 'recovery_required' } });
 		assert.ok(text.includes('Last submission attempt: failed; step: freeze_manifest; code: recovery_required.'));
-		assert.ok(text.includes('Use Stop & Submit again')); assert.equal(text.includes('submission is in progress'), false);
+		assert.ok(text.includes('Retry Stop & Submit')); assert.equal(text.includes('submission is in progress'), false);
+	});
+	test('status distinguishes live submission, idle recovery and confirmed completion', () => {
+		const pending: AssessmentView = { state: 'submission_pending', mode: 'rails', uploadConsent: true,
+			lastSubmission: { step: 'drain_uploads', status: 'running' } };
+		assert.match(formatAssessmentStatus(pending), /^Assessment: submission needs recovery/);
+		assert.match(formatAssessmentStatus({ ...pending, submissionInProgress: true }), /^Assessment: submitting — uploading approved evidence/);
+		const submitted = formatAssessmentStatus({ state: 'submitted', mode: 'rails', uploadConsent: false });
+		assert.match(submitted, /Server submission confirmed/); assert.match(submitted, /receipt was verified/);
+		assert.equal(submitted.includes('Submission requires durable'), false);
 	});
 	test('archive status distinguishes retained unconfirmed evidence from active/submitted state without stale timing', () => {
 		const text = formatAssessmentStatus({ state: 'unpaired', mode: 'rails', uploadConsent: false, archivedCount: 1, archivedUnconfirmedCount: 1 });

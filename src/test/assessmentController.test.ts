@@ -113,6 +113,35 @@ suite('Assessment lifecycle foundation', () => {
 		await controller.stopAndSubmit(); assert.equal(controller.view.state, 'submitted'); assert.equal(submits, 1);
 		assert.ok(views.some(view => view.state === 'stopping')); await controller.stopAndSubmit(); assert.equal(submits, 1);
 	});
+	test('publishes submission progress while real work is pending, then clears the running flag on completion', async () => {
+		await paired(); await controller.start(); const requestId = metadata().submitRequestId;
+		let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+		let saving!: () => void; const entered = new Promise<void>(resolve => { saving = resolve; });
+		const original = evidence.flushStopped;
+		evidence.flushStopped = async id => { saving(); await gate; await original(id); };
+		const progress: AssessmentView[] = []; const subscription = controller.observeView(view => progress.push(view));
+		const work = controller.stopAndSubmit(); await entered;
+		assert.equal(controller.view.submissionInProgress, true); assert.equal(controller.view.lastSubmission?.step, 'flush_capture');
+		assert.equal(controller.view.state, 'submission_pending'); assert.equal(submits, 0);
+		// Status is readable immediately without sharing/waiting for the blocked submission or making new server calls.
+		try { await controller.showStatus(); assert.equal(controller.view.lastSubmission?.step, 'flush_capture'); }
+		finally { release(); }
+		await work;
+		assert.ok(progress.some(view => view.submissionInProgress && view.lastSubmission?.step === 'reconcile_evidence'));
+		assert.equal(progress.at(-1)?.submissionInProgress, undefined); assert.equal(progress.at(-1)?.state, 'submitted');
+		assert.equal(metadata().submitRequestId, requestId);
+		subscription.dispose(); const count = progress.length; await controller.showStatus(); assert.equal(progress.length, count);
+	});
+	test('progress observers cannot change submission; failure is idle and retry preserves the original request', async () => {
+		await paired(); await controller.start(); const requestId = metadata().submitRequestId;
+		const subscription = controller.observeView(() => { throw new Error('PRIVATE_OBSERVER_DATA'); });
+		failFlush = true; await controller.stopAndSubmit();
+		assert.equal(controller.view.submissionInProgress, undefined); assert.equal(controller.view.lastSubmission?.status, 'failed');
+		assert.equal(controller.view.reason, 'storage'); assert.equal(recording.isRecording, false); assert.equal(submits, 0);
+		failFlush = false; await controller.stopAndSubmit(); subscription.dispose();
+		assert.equal(controller.view.state, 'submitted'); assert.equal(metadata().submitRequestId, requestId);
+		assert.equal(JSON.stringify(views).includes('PRIVATE_OBSERVER_DATA'), false);
+	});
 	test('local queue failure preserves pending submission and prevents finalization', async () => {
 		await paired(); await controller.start(); failFlush = true; await controller.stopAndSubmit();
 		assert.equal(controller.view.state, 'submission_pending'); assert.equal(controller.view.reason, 'storage'); assert.equal(submits, 0);
