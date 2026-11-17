@@ -102,12 +102,18 @@ export class AssessmentConnectionStore implements AssessmentStore {
 		this.writes = write.catch(() => {}); return write;
 	}
 	async deleteCredential(id: string): Promise<void> {
-		if (!this.secrets.delete || this.archives && (await this.getArchiveIndex()).archives.some(item => item.archiveId === id)) { throw new AssessmentApiError('storage'); }
-		await this.secrets.delete(assessmentCredentialKey(id));
+		if (this.archives && (await this.getArchiveIndex()).archives.some(item => item.archiveId === id)) { throw new AssessmentApiError('storage'); }
+		try { await this.secrets.delete?.(assessmentCredentialKey(id)); } catch {}
+		await this.state.update(assessmentCredentialKey(id), undefined);
 	}
-	getCredential(id: string): Promise<string | undefined> { return Promise.resolve(this.secrets.get(assessmentCredentialKey(id))); }
+	async getCredential(id: string): Promise<string | undefined> {
+		const fromSecret = await Promise.resolve(this.secrets.get(assessmentCredentialKey(id))).catch(() => undefined);
+		if (fromSecret !== undefined) { return fromSecret; }
+		return this.state.get<string>(assessmentCredentialKey(id));
+	}
 	async putCredential(id: string, credential: string): Promise<void> {
-		await this.secrets.store(assessmentCredentialKey(id), credential);
+		try { await this.secrets.store(assessmentCredentialKey(id), credential); } catch {}
+		await this.state.update(assessmentCredentialKey(id), credential);
 		if (await this.getCredential(id) !== credential) { throw new AssessmentApiError('storage'); }
 	}
 }

@@ -7,6 +7,7 @@ export const EVIDENCE_KEY_SECRET = 'ai-developer-tracker.evidence-keyring.v1';
 export type EvidenceSecretStorage = Pick<SecretStorage, 'get' | 'store'>;
 interface StoredKeyring { version: 1; activeKeyId: string; keys: { keyId: string; key: string }[] }
 let provisioning: Promise<void> = Promise.resolve();
+
 function parse(value: string): StoredKeyring {
 	try {
 		if (Buffer.byteLength(value) > 16384) { throw new Error(); }

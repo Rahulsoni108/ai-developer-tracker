@@ -1,6 +1,12 @@
 {
   "name": "ai-developer-tracker",
   "displayName": "AI Developer Tracker",
+  "publisher": "superdriven",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/superdriven/ai-developer-tracker"
+  },
+  "extensionKind": ["workspace"],
   "description": "Track developer coding activity, AI interactions, and code changes during AI-assisted coding sessions.",
   "version": "0.0.1",
   "engines": {
@@ -10,9 +16,10 @@
     "Other"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "*"
   ],
   "main": "./out/extension.js",
+  "browser": "./out/extension.js",
   "contributes": {
     "configuration": {
       "title": "AI Developer Tracker Diff Capture",

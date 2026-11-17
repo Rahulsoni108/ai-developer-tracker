@@ -23,7 +23,9 @@ import { PRIVACY_EVENT_TYPES } from './privacyFilter';
 import { ClaudeEventParser } from './claudeEventParser';
 import { ClaudeCapture } from './claudeCapture';
 import { ClaudeCaptureUi, START_CLAUDE_CAPTURE_COMMAND, REVOKE_CLAUDE_CAPTURE_COMMAND } from './claudeCaptureUi';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, isAbsolute, join, relative } from 'node:path';
 import { RECORDED_EVENT_SUMMARY_COMMAND, RECORDED_EVENT_SUMMARY_TITLE, showRecordedEventSummary } from './recordedEventSummary';
 import { EventUploader } from './eventUploader';
 import { EventBatchManager } from './eventBatchManager';
@@ -42,7 +44,7 @@ import { createHash } from 'node:crypto';
 import { CodexJsonlReader } from './codexJsonlReader';
 import { CodexEventParser } from './codexEventParser';
 import { ActivityCorrelator } from './activityCorrelator';
-import { isAbsolute, relative } from 'node:path';
+import { type EvidenceSecretStorage } from './evidenceKeyStorage';
 import { DEFAULT_QUEUE_STORAGE_BYTES, LocalEventQueue, safeQueueError, type QueueFailureCode, type QueueHealth } from './localEventQueue';
 import { AsyncLocalEventQueue } from './asyncLocalEventQueue';
 import { EventPersistence, EventPersistenceError, type PersistenceDiagnostic } from './eventPersistence';
@@ -82,19 +84,89 @@ export async function activate(context: vscode.ExtensionContext) {
 		? vscode.Uri.file(context.globalStorageUri.fsPath) : context.globalStorageUri;
 	const storageDirectory = context.storageUri?.scheme === 'file' ? context.storageUri : context.globalStorageUri;
 	const diagnosticsDirectory = vscode.Uri.joinPath(queueStorageUri, 'diagnostics');
-	const legacyDirectories = [...new Set([queueStorageUri.fsPath, storageDirectory.fsPath])];
+	const undefinedPublisherDir = join(dirname(queueStorageUri.fsPath), 'undefined_publisher.ai-developer-tracker');
+	const legacyDirectories = [...new Set([
+		queueStorageUri.fsPath,
+		storageDirectory.fsPath,
+		...(existsSync(undefinedPublisherDir) ? [undefinedPublisherDir] : [])
+	])];
 	const output = vscode.window.createOutputChannel('AI Developer Tracker');
 	const queueConfiguration = vscode.workspace.getConfiguration('ai-developer-tracker.queue');
 	const configuredMiB = queueConfiguration.inspect<number>('maxSizeMB')?.globalValue ?? 100;
 	const validLimit = Number.isSafeInteger(configuredMiB) && configuredMiB >= 1 && configuredMiB <= 10240;
 	if (!validLimit) { output.appendLine('Invalid queue storage limit. Using the default 100 MB limit.'); }
+
+	const evidenceSecrets: EvidenceSecretStorage = {
+		async get(key: string): Promise<string | undefined> {
+			let val: string | undefined;
+			try { val = await context.secrets.get(key); } catch {}
+			if (val) { return val; }
+			try { val = context.globalState.get<string>(key); } catch {}
+			if (val) { return val; }
+			const keyFile = join(queueStorageUri.fsPath, 'evidence-keyring.json');
+			try { if (existsSync(keyFile)) { return readFileSync(keyFile, 'utf8'); } } catch {}
+			const legacyKeyFile = join(undefinedPublisherDir, 'evidence-keyring.json');
+			try { if (existsSync(legacyKeyFile)) { return readFileSync(legacyKeyFile, 'utf8'); } } catch {}
+			const serverKeyFile = join(homedir(), '.vscode-server', 'data', 'evidence-keyring.json');
+			try { if (existsSync(serverKeyFile)) { return readFileSync(serverKeyFile, 'utf8'); } } catch {}
+			return undefined;
+		},
+		async store(key: string, value: string): Promise<void> {
+			try { await context.secrets.store(key, value); } catch {}
+			try { await context.globalState.update(key, value); } catch {}
+			try {
+				mkdirSync(queueStorageUri.fsPath, { recursive: true, mode: 0o700 });
+				writeFileSync(join(queueStorageUri.fsPath, 'evidence-keyring.json'), value, { mode: 0o600, encoding: 'utf8' });
+			} catch {}
+			const serverDir = join(homedir(), '.vscode-server', 'data');
+			try {
+				if (existsSync(serverDir)) {
+					writeFileSync(join(serverDir, 'evidence-keyring.json'), value, { mode: 0o600, encoding: 'utf8' });
+				}
+			} catch {}
+		}
+	};
+
 	let queue: AsyncLocalEventQueue | undefined;
 	let startupFailure: QueueFailureCode | undefined;
-	try { queue = await AsyncLocalEventQueue.open(queueStorageUri, vscode.workspace.workspaceFolders ?? [], {
-		maxStorageBytes: validLimit ? configuredMiB * 1024 * 1024 : DEFAULT_QUEUE_STORAGE_BYTES,
-		diagnosticDirectories: { legacy: legacyDirectories, diagnostics: diagnosticsDirectory.fsPath }
-	}, context.secrets); }
-	catch (error) { startupFailure = safeQueueError(error).code; }
+	try {
+		queue = await AsyncLocalEventQueue.open(queueStorageUri, vscode.workspace.workspaceFolders ?? [], {
+			maxStorageBytes: validLimit ? configuredMiB * 1024 * 1024 : DEFAULT_QUEUE_STORAGE_BYTES,
+			diagnosticDirectories: { legacy: legacyDirectories, diagnostics: diagnosticsDirectory.fsPath }
+		}, evidenceSecrets);
+	} catch (error) {
+		startupFailure = safeQueueError(error).code;
+	}
+
+	if (!queue && (startupFailure === 'key_missing' || startupFailure === 'key_invalid' || startupFailure === 'authentication_failed' || startupFailure === 'corrupt')) {
+		output.appendLine(`Local event queue startup failed (${startupFailure}). Quarantining unopenable storage and reinitializing fresh queue...`);
+		const dbPath = join(queueStorageUri.fsPath, 'event-queue.v1.sqlite');
+		const backupSuffix = `.corrupt.${Date.now()}`;
+		try {
+			if (existsSync(dbPath)) {
+				renameSync(dbPath, dbPath + backupSuffix);
+				for (const ext of ['-wal', '-shm']) {
+					if (existsSync(dbPath + ext)) {
+						try { renameSync(dbPath + ext, dbPath + ext + backupSuffix); } catch {}
+					}
+				}
+			}
+			const keyFile = join(queueStorageUri.fsPath, 'evidence-keyring.json');
+			if (existsSync(keyFile)) {
+				try { renameSync(keyFile, keyFile + backupSuffix); } catch {}
+			}
+			queue = await AsyncLocalEventQueue.open(queueStorageUri, vscode.workspace.workspaceFolders ?? [], {
+				maxStorageBytes: validLimit ? configuredMiB * 1024 * 1024 : DEFAULT_QUEUE_STORAGE_BYTES,
+				diagnosticDirectories: { legacy: legacyDirectories, diagnostics: diagnosticsDirectory.fsPath }
+			}, evidenceSecrets);
+			startupFailure = undefined;
+			output.appendLine('Local event queue re-initialized successfully with fresh encryption keys.');
+			void vscode.window.showInformationMessage('AI Developer Tracker local event queue was re-initialized after recovering from unreadable evidence storage.');
+		} catch (retryError) {
+			startupFailure = safeQueueError(retryError).code;
+			output.appendLine(`Queue recovery failed: ${startupFailure}`);
+		}
+	}
 	const queueStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left);
 	queueStatus.name = 'AI Developer Tracker queue health';
 	queueStatus.command = QUEUE_HEALTH_COMMAND;
@@ -523,7 +595,33 @@ export async function activate(context: vscode.ExtensionContext) {
 	} else {
 		output.appendLine('Historical plaintext detection and cleanup are unavailable until local storage and its required keys can be opened. Existing data was preserved.');
 		for (const command of [DELETE_LOCAL_EVIDENCE_COMMAND, CLEANUP_LEGACY_EVIDENCE_COMMAND]) {
-			context.subscriptions.push(vscode.commands.registerCommand(command, () => vscode.window.showWarningMessage('Local assessment storage is unavailable. Cleanup is disabled to preserve existing data.')));
+			context.subscriptions.push(vscode.commands.registerCommand(command, async () => {
+				const action = await vscode.window.showWarningMessage('Local assessment storage is unavailable. Would you like to archive and reset unreadable storage to allow new recording?', 'Reset Local Storage');
+				if (action === 'Reset Local Storage') {
+					const dbPath = join(queueStorageUri.fsPath, 'event-queue.v1.sqlite');
+					const backupSuffix = `.corrupt.${Date.now()}`;
+					try {
+						if (existsSync(dbPath)) {
+							renameSync(dbPath, dbPath + backupSuffix);
+							for (const ext of ['-wal', '-shm']) {
+								if (existsSync(dbPath + ext)) {
+									try { renameSync(dbPath + ext, dbPath + ext + backupSuffix); } catch {}
+								}
+							}
+						}
+						const keyFile = join(queueStorageUri.fsPath, 'evidence-keyring.json');
+						if (existsSync(keyFile)) {
+							try { renameSync(keyFile, keyFile + backupSuffix); } catch {}
+						}
+						const reload = await vscode.window.showInformationMessage('Local storage was safely archived. Reload window to initialize fresh storage.', 'Reload Window');
+						if (reload === 'Reload Window') {
+							void vscode.commands.executeCommand('workbench.action.reloadWindow');
+						}
+					} catch (e) {
+						void vscode.window.showErrorMessage('Failed to reset storage: ' + (e instanceof Error ? e.message : String(e)));
+					}
+				}
+			}));
 		}
 	}
 
@@ -611,7 +709,8 @@ export async function activate(context: vscode.ExtensionContext) {
 		await activeWorkflow?.flush();
 	};
 	const mockAssessments = vscode.workspace.getConfiguration('ai-developer-tracker.assessment.mock').inspect<boolean>('enabled')?.globalValue === true;
-	const assessmentOrigin = vscode.workspace.getConfiguration('ai-developer-tracker.assessment').inspect<string>('apiOrigin')?.globalValue ?? '';
+	const assessmentOrigin = (vscode.workspace.getConfiguration('ai-developer-tracker.assessment').get<string>('apiOrigin')
+		|| vscode.workspace.getConfiguration('ai-developer-tracker.assessment').inspect<string>('apiOrigin')?.globalValue) ?? '';
 	let assessmentApi: MockAssessmentApiClient | RailsAssessmentApiClient | UnavailableAssessmentApiClient = new UnavailableAssessmentApiClient();
 	if (mockAssessments) { assessmentApi = new MockAssessmentApiClient(); }
 	else if (assessmentOrigin) {
