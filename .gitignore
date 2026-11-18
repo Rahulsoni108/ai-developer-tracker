@@ -4,8 +4,11 @@ node_modules
 .vscode-test/
 *.vsix
 
-# Local tracking and planning
-CURSOR_INTEGRATION_PLAN.md
+# Local planning and AI workspace
+.planning/
+.plans/
+.ai/
+*.plan.md
 
 # Graphify generated output
 graphify-out/
