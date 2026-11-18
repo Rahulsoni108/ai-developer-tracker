@@ -23,6 +23,7 @@ import { PRIVACY_EVENT_TYPES } from './privacyFilter';
 import { ClaudeEventParser } from './claudeEventParser';
 import { ClaudeCapture } from './claudeCapture';
 import { ClaudeCaptureUi, START_CLAUDE_CAPTURE_COMMAND, REVOKE_CLAUDE_CAPTURE_COMMAND } from './claudeCaptureUi';
+import { CursorCapture } from './cursorCapture';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative } from 'node:path';
@@ -539,6 +540,27 @@ export async function activate(context: vscode.ExtensionContext) {
 			await claudeUi.start();
 		}),
 		vscode.commands.registerCommand(REVOKE_CLAUDE_CAPTURE_COMMAND, () => claudeUi.revoke()));
+
+	const primaryWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+	if (primaryWorkspace) {
+		const cursorCapture = new CursorCapture(recording, writer, {
+			workspacePath: primaryWorkspace,
+			appName: vscode.env.appName,
+			onDiagnostic: (diagnostic, details) => {
+				output.appendLine('Cursor capture diagnostic: ' + diagnostic + (details ? ' ' + JSON.stringify(details) : ''));
+			},
+			onStateChange: state => {
+				if (state === 'ready') {
+					captureHealth.readerReady('cursor', [primaryWorkspace]);
+				} else if (state === 'interrupted') {
+					captureHealth.interrupted('cursor');
+				} else if (state === 'initializing') {
+					captureHealth.initializing('cursor');
+				}
+			}
+		});
+		context.subscriptions.push({ dispose: () => cursorCapture.dispose() });
+	}
 
 	if (queue) {
 		const notices: Record<LocalDataNotice, string> = {
