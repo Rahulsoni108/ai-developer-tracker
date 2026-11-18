@@ -272,7 +272,7 @@ export async function activate(context: vscode.ExtensionContext) {
 	activePersistence = writer;
 	const aiCaptureStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left);
 	aiCaptureStatus.name = 'Assessment AI capture'; aiCaptureStatus.command = AI_CAPTURE_STATUS_COMMAND;
-	const captureHealth = new AssessmentAiCaptureHealth(recording, id => activeAssessment?.isAssociatedSession(id) ?? false,
+	const captureHealth = new AssessmentAiCaptureHealth(recording, id => activeAssessment ? (activeAssessment.view.state === 'unpaired' || activeAssessment.isAssociatedSession(id)) : true,
 		view => {
 			aiCaptureStatus.text = `AI capture: ${view.state.replace(/_/g, ' ')} | ${view.prompts} prompts / ${view.responses} responses`;
 			aiCaptureStatus.tooltip = describeAiCaptureHealth(view);
