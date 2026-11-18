@@ -24,6 +24,7 @@ import { ClaudeEventParser } from './claudeEventParser';
 import { ClaudeCapture } from './claudeCapture';
 import { ClaudeCaptureUi, START_CLAUDE_CAPTURE_COMMAND, REVOKE_CLAUDE_CAPTURE_COMMAND } from './claudeCaptureUi';
 import { CursorCapture } from './cursorCapture';
+import { CopilotCapture } from './copilotCapture';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative } from 'node:path';
@@ -559,7 +560,25 @@ export async function activate(context: vscode.ExtensionContext) {
 				}
 			}
 		});
-		context.subscriptions.push({ dispose: () => cursorCapture.dispose() });
+		const copilotCapture = new CopilotCapture(recording, writer, {
+			workspacePath: primaryWorkspace,
+			onDiagnostic: (diagnostic, details) => {
+				output.appendLine('Copilot capture diagnostic: ' + diagnostic + (details ? ' ' + JSON.stringify(details) : ''));
+			},
+			onStateChange: state => {
+				if (state === 'ready') {
+					captureHealth.readerReady('copilot', [primaryWorkspace]);
+				} else if (state === 'interrupted') {
+					captureHealth.interrupted('copilot');
+				} else if (state === 'initializing') {
+					captureHealth.initializing('copilot');
+				}
+			}
+		});
+		context.subscriptions.push(
+			{ dispose: () => cursorCapture.dispose() },
+			{ dispose: () => copilotCapture.dispose() }
+		);
 	}
 
 	if (queue) {
