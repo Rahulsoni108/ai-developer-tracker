@@ -7,7 +7,7 @@ export const EVENT_LOG_FILENAME = 'events.v1.jsonl';
 // converted, relabeled, or appended to by the v1 recording pipeline.
 export const LEGACY_EVENT_LOG_FILENAME = 'file-activity.jsonl';
 
-export type EventSource = 'vscode' | 'codex' | 'claude';
+export type EventSource = 'vscode' | 'codex' | 'claude' | 'cursor';
 export type Attribution = 'ai_confirmed' | 'human_confirmed' | 'unknown';
 export type FileEventType = 'file.created' | 'file.modified' | 'file.saved' | 'file.deleted';
 
@@ -89,7 +89,15 @@ export interface ClaudeSourceRecord {
 	byteLength: number;
 	recordType: 'claude_hook' | 'claude_transcript';
 }
-export type AiSourceRecord = CodexSourceRecord | ClaudeSourceRecord;
+export interface CursorSourceRecord {
+	sourceFileReference: string;
+	recordIndex: number;
+	generation: number;
+	byteOffset: number;
+	byteLength: number;
+	recordType: 'cursor_generation' | 'cursor_prompt';
+}
+export type AiSourceRecord = CodexSourceRecord | ClaudeSourceRecord | CursorSourceRecord;
 export interface CodexMessagePayload {
 	text: string;
 	sourceRecord: AiSourceRecord;
@@ -131,6 +139,10 @@ export type ClaudeActivityEvent = (
 	| CommonEvent<'ai.tool.started' | 'ai.tool.completed' | 'ai.tool.failed' | 'ai.tool.incomplete', CodexToolPayload>
 	| CommonEvent<'ai.session.started' | 'ai.session.ended', { sourceRecord: ClaudeSourceRecord; status: 'started' | 'resumed' | 'ended' }>
 ) & { source: 'claude'; sourceSessionId: string; workspaceId: string };
+export type CursorActivityEvent = (
+	CommonEvent<'ai.prompt.submitted' | 'ai.response.completed', CodexMessagePayload>
+	| CommonEvent<'ai.tool.started' | 'ai.tool.completed' | 'ai.tool.failed' | 'ai.tool.incomplete', CodexToolPayload>
+) & { source: 'cursor'; sourceSessionId: string; workspaceId: string };
 export const RELATIONSHIP_EXPLANATIONS = ['applied_change_matches_diff', 'explicit_path_window', 'timestamp_only',
 	'missing_tool_result', 'missing_tool_start', 'tool_unsuccessful', 'editor_checkpoint', 'overlapping_tools',
 	'outside_execution_window', 'source_reference_conflict', 'read_only_tool', 'unverified_timestamps', 'change_evidence_mismatch', 'bounded_history'] as const;
@@ -160,7 +172,7 @@ export interface RelationshipEvent extends CommonEvent<'activity.relationship.cr
 	workspaceId: string;
 	attribution: 'unknown';
 }
-export type TrackerEvent = FileActivityEvent | CodeChangeEvent | CodexActivityEvent | ClaudeActivityEvent | RelationshipEvent;
+export type TrackerEvent = FileActivityEvent | CodeChangeEvent | CodexActivityEvent | ClaudeActivityEvent | CursorActivityEvent | RelationshipEvent;
 
 export function createRelationshipEvent(input: Omit<RelationshipEvent, 'schemaVersion' | 'eventId' | 'timestamp' | 'source' | 'attribution'>
 	& { timestamp?: Date }): RelationshipEvent {
@@ -178,6 +190,12 @@ export function createClaudeEvent(input: Omit<ClaudeActivityEvent, 'schemaVersio
 	& { timestamp?: Date }): ClaudeActivityEvent {
 	return { ...input, schemaVersion: SCHEMA_VERSION, eventId: randomUUID(), source: 'claude',
 		timestamp: (input.timestamp ?? new Date()).toISOString() } as ClaudeActivityEvent;
+}
+
+export function createCursorEvent(input: Omit<CursorActivityEvent, 'schemaVersion' | 'eventId' | 'timestamp' | 'source'>
+	& { timestamp?: Date }): CursorActivityEvent {
+	return { ...input, schemaVersion: SCHEMA_VERSION, eventId: randomUUID(), source: 'cursor',
+		timestamp: (input.timestamp ?? new Date()).toISOString() } as CursorActivityEvent;
 }
 
 export function createChangeEvent(input: (
@@ -275,7 +293,8 @@ function validCodexPayload(type: string, payload: Record<string, unknown>): bool
 	if (!sourceRecord || Object.keys(sourceRecord).some(key => !['sourceFileReference', 'recordIndex', 'generation', 'byteOffset', 'byteLength', 'recordType'].includes(key))
 		|| typeof sourceRecord.sourceFileReference !== 'string'
 		|| !(/^codex-file:[a-f0-9]{64}$/.test(sourceRecord.sourceFileReference) && ['response_item', 'event_msg'].includes(sourceRecord.recordType as string)
-			|| /^claude-file:[a-f0-9]{64}$/.test(sourceRecord.sourceFileReference) && ['claude_hook', 'claude_transcript'].includes(sourceRecord.recordType as string))
+			|| /^claude-file:[a-f0-9]{64}$/.test(sourceRecord.sourceFileReference) && ['claude_hook', 'claude_transcript'].includes(sourceRecord.recordType as string)
+			|| /^cursor-file:[a-f0-9]{64}$/.test(sourceRecord.sourceFileReference) && ['cursor_generation', 'cursor_prompt'].includes(sourceRecord.recordType as string))
 		|| !Number.isSafeInteger(sourceRecord.recordIndex) || (sourceRecord.recordIndex as number) < 1
 		|| !Number.isSafeInteger(sourceRecord.generation) || (sourceRecord.generation as number) < 0
 		|| !Number.isSafeInteger(sourceRecord.byteOffset) || (sourceRecord.byteOffset as number) < 0
@@ -399,7 +418,7 @@ export function validateEvent(value: unknown): EventValidationResult {
 		if (!isUtcTimestamp(input.timestamp)) {
 			errors.push('timestamp must be canonical UTC ISO 8601');
 		}
-		if (!['vscode', 'codex', 'claude'].includes(input.source as string)) {
+		if (!['vscode', 'codex', 'claude', 'cursor'].includes(input.source as string)) {
 			errors.push('Unsupported or missing source');
 		}
 		const isLifecycle = ['ai.session.started', 'ai.session.ended'].includes(input.eventType as string);
@@ -430,8 +449,8 @@ export function validateEvent(value: unknown): EventValidationResult {
 				|| !validCodexPayload('ai.prompt.submitted', { text: 'lifecycle', sourceRecord: record })
 				|| !String(record?.sourceFileReference).startsWith('claude-file:')) { errors.push('Invalid Claude session event'); }
 		} else if (isCodex) {
-			if (!['codex', 'claude'].includes(input.source as string) || !isIdentifier(input.sourceSessionId) || !payload || !validCodexPayload(input.eventType as string, payload)
-				|| !String((payload?.sourceRecord as Record<string, unknown>)?.sourceFileReference).startsWith(input.source === 'claude' ? 'claude-file:' : 'codex-file:')) {
+			if (!['codex', 'claude', 'cursor'].includes(input.source as string) || !isIdentifier(input.sourceSessionId) || !payload || !validCodexPayload(input.eventType as string, payload)
+				|| !String((payload?.sourceRecord as Record<string, unknown>)?.sourceFileReference).startsWith(input.source === 'claude' ? 'claude-file:' : input.source === 'cursor' ? 'cursor-file:' : 'codex-file:')) {
 				errors.push('Invalid Codex event source, sourceSessionId, or payload');
 			}
 		} else if (!payload || Object.keys(payload).some(key => !allowedPayloadFields.includes(key)) || !isRelativePath(payload.relativePath)) {

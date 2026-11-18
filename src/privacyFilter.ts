@@ -24,6 +24,8 @@ export interface PrivacyContext {
 	codexContentConsent: boolean;
 	confirmedClaudeSessions?: readonly { sourceSessionId: string; workspaceId: string }[];
 	claudeContentConsent?: boolean;
+	confirmedCursorSessions?: readonly { sourceSessionId: string; workspaceId: string }[];
+	cursorContentConsent?: boolean;
 	/** Optional snapshot-based guard, for example eligible files indexed by FileTracker. */
 	isApprovedRelativePath?: (relativePath: string, workspaceId: string) => boolean;
 	/** Required to verify absolute structured tool paths; must not execute tool input. */
@@ -124,7 +126,7 @@ export class PrivacyFilter {
 			const validation = validateEvent(snapshot);
 			if (!validation.valid) { throw new Rejection('malformed_event'); }
 			const input = validation.event;
-			if (input.source !== 'vscode' && input.source !== 'codex' && input.source !== 'claude' || input.eventType.startsWith('file.') && input.source !== 'vscode') { throw new Rejection('unsupported_source'); }
+			if (input.source !== 'vscode' && input.source !== 'codex' && input.source !== 'claude' && input.source !== 'cursor' || input.eventType.startsWith('file.') && input.source !== 'vscode') { throw new Rejection('unsupported_source'); }
 			this.checkBoundaries(input, context);
 			const reasons = new Set<PrivacyReasonCode>();
 			for (const [key, value] of Object.entries(snapshot)) {
@@ -169,12 +171,13 @@ export class PrivacyFilter {
 		if (!context.approvedWorkspaceIds.includes(event.workspaceId!)) { throw new Rejection('workspace_not_approved'); }
 		const relationshipPayload = 'evidence' in event.payload ? event.payload : undefined;
 		const relationshipReference = relationshipPayload?.evidence.find(entry => entry.eventId === relationshipPayload.sourceEventId && entry.sourceRecord)?.sourceRecord?.sourceFileReference;
+		const cursor = event.source === 'cursor' || relationshipReference?.startsWith('cursor-file:');
 		const claude = event.source === 'claude' || relationshipReference?.startsWith('claude-file:');
-		const confirmed = claude ? context.confirmedClaudeSessions ?? [] : context.confirmedCodexSessions;
+		const confirmed = cursor ? context.confirmedCursorSessions ?? [] : claude ? context.confirmedClaudeSessions ?? [] : context.confirmedCodexSessions;
 		if (event.sourceSessionId && !confirmed.some(session => session.sourceSessionId === event.sourceSessionId
 			&& session.workspaceId === event.workspaceId)) { throw new Rejection('source_session_not_confirmed'); }
-		if ((event.source === 'claude' || event.source === 'codex' || event.eventType.startsWith('activity.'))
-			&& !(claude ? context.claudeContentConsent : context.codexContentConsent)) { throw new Rejection('content_consent_missing'); }
+		if ((event.source === 'claude' || event.source === 'codex' || event.source === 'cursor' || event.eventType.startsWith('activity.'))
+			&& !(cursor ? context.cursorContentConsent : claude ? context.claudeContentConsent : context.codexContentConsent)) { throw new Rejection('content_consent_missing'); }
 	}
 
 	private clone(value: unknown, work: Budget, depth: number, ancestors: Set<object>, allowUndefined: boolean): unknown {
