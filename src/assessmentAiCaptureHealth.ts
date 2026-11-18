@@ -12,7 +12,7 @@ export function stopAssessmentCaptureForWorkspaceChange(recording: RecordingCont
 	if (!recording.isRecording || !recording.sessionId || !isAssessment(recording.sessionId)) { return false; }
 	recording.stop(); return true;
 }
-type Provider = 'codex' | 'claude' | 'cursor';
+type Provider = 'codex' | 'claude' | 'cursor' | 'copilot';
 type ReaderState = 'initializing' | 'ready' | 'interrupted';
 export interface AiCaptureHealthView {
 	state: 'not_connected' | 'initializing' | 'ready' | 'interrupted' | 'stopped';
@@ -69,7 +69,7 @@ export class AssessmentAiCaptureHealth {
 	}
 	observe(event: Readonly<TrackerEvent>): void {
 		if (!this.recordingId || event.sessionId !== this.recordingId || !this.isAssessment(event.sessionId)
-			|| !['codex', 'claude', 'cursor'].includes(event.source) || !event.sourceSessionId || !event.eventType.startsWith('ai.')) { return; }
+			|| !['codex', 'claude', 'cursor', 'copilot'].includes(event.source) || !event.sourceSessionId || !event.eventType.startsWith('ai.')) { return; }
 		const provider = event.source as Provider;
 		// A successful, filtered, scoped write proves activity reached SQLite, not just that a terminal opened.
 		if (event.eventType !== 'ai.session.ended' && this.active && (this.readers.get(provider) !== 'interrupted' || event.eventType === 'ai.session.started')) { this.readerReady(provider, [event.sourceSessionId]); }
