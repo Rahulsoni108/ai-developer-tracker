@@ -23,6 +23,8 @@ import { PRIVACY_EVENT_TYPES } from './privacyFilter';
 import { ClaudeEventParser } from './claudeEventParser';
 import { ClaudeCapture } from './claudeCapture';
 import { ClaudeCaptureUi, START_CLAUDE_CAPTURE_COMMAND, REVOKE_CLAUDE_CAPTURE_COMMAND } from './claudeCaptureUi';
+import { CursorCapture } from './cursorCapture';
+import { CopilotCapture } from './copilotCapture';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative } from 'node:path';
@@ -270,7 +272,7 @@ export async function activate(context: vscode.ExtensionContext) {
 	activePersistence = writer;
 	const aiCaptureStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left);
 	aiCaptureStatus.name = 'Assessment AI capture'; aiCaptureStatus.command = AI_CAPTURE_STATUS_COMMAND;
-	const captureHealth = new AssessmentAiCaptureHealth(recording, id => activeAssessment?.isAssociatedSession(id) ?? false,
+	const captureHealth = new AssessmentAiCaptureHealth(recording, id => activeAssessment ? (activeAssessment.view.state === 'unpaired' || activeAssessment.isAssociatedSession(id)) : true,
 		view => {
 			aiCaptureStatus.text = `AI capture: ${view.state.replace(/_/g, ' ')} | ${view.prompts} prompts / ${view.responses} responses`;
 			aiCaptureStatus.tooltip = describeAiCaptureHealth(view);
@@ -539,6 +541,45 @@ export async function activate(context: vscode.ExtensionContext) {
 			await claudeUi.start();
 		}),
 		vscode.commands.registerCommand(REVOKE_CLAUDE_CAPTURE_COMMAND, () => claudeUi.revoke()));
+
+	const primaryWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+	if (primaryWorkspace) {
+		const cursorCapture = new CursorCapture(recording, writer, {
+			workspacePath: primaryWorkspace,
+			appName: vscode.env.appName,
+			onDiagnostic: (diagnostic, details) => {
+				output.appendLine('Cursor capture diagnostic: ' + diagnostic + (details ? ' ' + JSON.stringify(details) : ''));
+			},
+			onStateChange: state => {
+				if (state === 'ready') {
+					captureHealth.readerReady('cursor', [primaryWorkspace]);
+				} else if (state === 'interrupted') {
+					captureHealth.interrupted('cursor');
+				} else if (state === 'initializing') {
+					captureHealth.initializing('cursor');
+				}
+			}
+		});
+		const copilotCapture = new CopilotCapture(recording, writer, {
+			workspacePath: primaryWorkspace,
+			onDiagnostic: (diagnostic, details) => {
+				output.appendLine('Copilot capture diagnostic: ' + diagnostic + (details ? ' ' + JSON.stringify(details) : ''));
+			},
+			onStateChange: state => {
+				if (state === 'ready') {
+					captureHealth.readerReady('copilot', [primaryWorkspace]);
+				} else if (state === 'interrupted') {
+					captureHealth.interrupted('copilot');
+				} else if (state === 'initializing') {
+					captureHealth.initializing('copilot');
+				}
+			}
+		});
+		context.subscriptions.push(
+			{ dispose: () => cursorCapture.dispose() },
+			{ dispose: () => copilotCapture.dispose() }
+		);
+	}
 
 	if (queue) {
 		const notices: Record<LocalDataNotice, string> = {

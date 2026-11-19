@@ -6,11 +6,13 @@
     "type": "git",
     "url": "https://github.com/superdriven/ai-developer-tracker"
   },
-  "extensionKind": ["workspace"],
+  "extensionKind": [
+    "workspace"
+  ],
   "description": "Track developer coding activity, AI interactions, and code changes during AI-assisted coding sessions.",
   "version": "0.0.1",
   "engines": {
-    "vscode": "^1.140.0"
+    "vscode": "^1.125.0"
   },
   "categories": [
     "Other"
@@ -24,79 +26,230 @@
     "configuration": {
       "title": "AI Developer Tracker Diff Capture",
       "properties": {
-        "ai-developer-tracker.assessment.apiOrigin": {"type": "string", "default": "", "scope": "machine", "restricted": true, "description": "Trusted Rails HTTPS origin implementing R4.2D, for example https://assessment.example.com. Empty disables pairing. Only user settings are read. No credentials, paths, queries or fragments. Reload after changes; separate recording and upload consent remain required."},
-        "ai-developer-tracker.assessment.mock.enabled": {"type": "boolean", "default": false, "scope": "machine", "restricted": true, "description": "Development only: enable an explicit local assessment mock after reload. No Rails calls or assessment event uploads. Never use for real interviews. Only user settings are read; the mock server does not survive reload."},
-        "ai-developer-tracker.upload.endpoint": {"type": "string", "default": "", "description": "HTTPS event endpoint. Empty disables uploads. Only user settings are used; changes revoke upload consent. Credentials, query strings and fragments are prohibited.", "scope": "machine", "restricted": true},
-        "ai-developer-tracker.upload.enabled": {"type": "boolean", "default": false, "description": "Upload status mirror. Settings cannot authorize uploads. Use Enable Uploads for separate explicit consent; reload always disables uploads. Set false to revoke consent.", "scope": "machine", "restricted": true},
-        "ai-developer-tracker.upload.maxEvents": {"type": "integer", "default": 100, "minimum": 1, "maximum": 1000, "description": "Maximum events per upload batch. Changes disable uploads and require fresh consent.", "scope": "machine", "restricted": true},
-        "ai-developer-tracker.upload.maxBytes": {"type": "integer", "default": 1048576, "minimum": 1024, "maximum": 4194304, "description": "Maximum serialized upload request bytes. Changes disable uploads and require fresh consent.", "scope": "machine", "restricted": true},
-        "ai-developer-tracker.upload.timeoutMs": {"type": "integer", "default": 30000, "minimum": 10, "maximum": 120000, "description": "Upload operation timeout in milliseconds. Changes disable uploads and require fresh consent.", "scope": "machine", "restricted": true},
+        "ai-developer-tracker.assessment.apiOrigin": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "restricted": true,
+          "description": "Trusted Rails HTTPS origin implementing R4.2D, for example https://assessment.example.com. Empty disables pairing. Only user settings are read. No credentials, paths, queries or fragments. Reload after changes; separate recording and upload consent remain required."
+        },
+        "ai-developer-tracker.assessment.mock.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "restricted": true,
+          "description": "Development only: enable an explicit local assessment mock after reload. No Rails calls or assessment event uploads. Never use for real interviews. Only user settings are read; the mock server does not survive reload."
+        },
+        "ai-developer-tracker.upload.endpoint": {
+          "type": "string",
+          "default": "",
+          "description": "HTTPS event endpoint. Empty disables uploads. Only user settings are used; changes revoke upload consent. Credentials, query strings and fragments are prohibited.",
+          "scope": "machine",
+          "restricted": true
+        },
+        "ai-developer-tracker.upload.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Upload status mirror. Settings cannot authorize uploads. Use Enable Uploads for separate explicit consent; reload always disables uploads. Set false to revoke consent.",
+          "scope": "machine",
+          "restricted": true
+        },
+        "ai-developer-tracker.upload.maxEvents": {
+          "type": "integer",
+          "default": 100,
+          "minimum": 1,
+          "maximum": 1000,
+          "description": "Maximum events per upload batch. Changes disable uploads and require fresh consent.",
+          "scope": "machine",
+          "restricted": true
+        },
+        "ai-developer-tracker.upload.maxBytes": {
+          "type": "integer",
+          "default": 1048576,
+          "minimum": 1024,
+          "maximum": 4194304,
+          "description": "Maximum serialized upload request bytes. Changes disable uploads and require fresh consent.",
+          "scope": "machine",
+          "restricted": true
+        },
+        "ai-developer-tracker.upload.timeoutMs": {
+          "type": "integer",
+          "default": 30000,
+          "minimum": 10,
+          "maximum": 120000,
+          "description": "Upload operation timeout in milliseconds. Changes disable uploads and require fresh consent.",
+          "scope": "machine",
+          "restricted": true
+        },
         "ai-developer-tracker.retention.days": {
-          "type": "integer", "default": 30, "minimum": 0, "maximum": 3650, "scope": "machine", "restricted": true,
+          "type": "integer",
+          "default": 30,
+          "minimum": 0,
+          "maximum": 3650,
+          "scope": "machine",
+          "restricted": true,
           "description": "Days to retain closed, fully acknowledged recording sessions and metadata-only diagnostics. Pending evidence and historical plaintext logs are never automatically deleted. Set 0 to disable expiration. Only user settings are used."
         },
         "ai-developer-tracker.queue.maxSizeMB": {
-          "type": "integer", "default": 100, "minimum": 1, "maximum": 10240, "scope": "machine", "restricted": true,
+          "type": "integer",
+          "default": 100,
+          "minimum": 1,
+          "maximum": 10240,
+          "scope": "machine",
+          "restricted": true,
           "description": "Maximum SQLite queue storage in MB (1 MB = 1048576 bytes), including journal sidecars. Warns at 80%; stops collection when an event cannot safely fit. Existing events are never automatically deleted. Reload the extension to apply changes."
         },
         "ai-developer-tracker.codex.enabled": {
-          "type": "boolean", "default": true, "scope": "machine", "restricted": true,
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "restricted": true,
           "description": "Discover local Codex session metadata during recording. Association always requires confirmation. Reload the extension to apply changes."
         },
         "ai-developer-tracker.codex.sessionsDirectory": {
-          "type": "string", "default": "", "scope": "machine", "restricted": true,
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "restricted": true,
           "description": "Absolute local Codex sessions directory for testing or custom installations. Empty uses ~/.codex/sessions. Workspace settings cannot redirect discovery. Reload the extension to apply changes."
         },
         "ai-developer-tracker.diff.maxFileBytes": {
-          "type": "integer", "default": 262144, "minimum": 1, "maximum": 1048576,
+          "type": "integer",
+          "default": 262144,
+          "minimum": 1,
+          "maximum": 1048576,
           "description": "Maximum UTF-8 file size to capture. Larger files produce reconstruction gaps. Reload the extension to apply changes."
         },
         "ai-developer-tracker.diff.maxDiffBytes": {
-          "type": "integer", "default": 524288, "minimum": 1, "maximum": 2097152,
+          "type": "integer",
+          "default": 524288,
+          "minimum": 1,
+          "maximum": 2097152,
           "description": "Maximum unified patch size in bytes. Reload the extension to apply changes."
         },
         "ai-developer-tracker.diff.maxMemoryBytes": {
-          "type": "integer", "default": 33554432, "minimum": 1, "maximum": 134217728,
+          "type": "integer",
+          "default": 33554432,
+          "minimum": 1,
+          "maximum": 134217728,
           "description": "Maximum retained baseline content in memory. Reload the extension to apply changes."
         },
         "ai-developer-tracker.diff.debounceMs": {
-          "type": "integer", "default": 300, "minimum": 1, "maximum": 2000,
+          "type": "integer",
+          "default": 300,
+          "minimum": 1,
+          "maximum": 2000,
           "description": "Idle delay before an editor diff checkpoint. Reload the extension to apply changes."
         },
         "ai-developer-tracker.diff.maxCheckpointMs": {
-          "type": "integer", "default": 2000, "minimum": 2000, "maximum": 10000,
+          "type": "integer",
+          "default": 2000,
+          "minimum": 2000,
+          "maximum": 10000,
           "description": "Maximum grouping interval during continuous typing. Reload the extension to apply changes."
         },
         "ai-developer-tracker.diff.diffTimeoutMs": {
-          "type": "integer", "default": 100, "minimum": 1, "maximum": 250,
+          "type": "integer",
+          "default": 100,
+          "minimum": 1,
+          "maximum": 250,
           "description": "Computation time budget per asynchronous diff. Reload the extension to apply changes."
         }
       }
     },
     "commands": [
-      { "command": "ai-developer-tracker.connectCurrentAiChat", "title": "AI Developer Tracker: Connect Current AI Chat" },
-      { "command": "ai-developer-tracker.showAssessmentAiCaptureStatus", "title": "AI Developer Tracker: Show Assessment AI Capture Status" },
-      { "command": "ai-developer-tracker.launchAssessmentAiSession", "title": "AI Developer Tracker: Launch Assessment AI Session" },
-      { "command": "ai-developer-tracker.revokeAssessmentWorkflowConsent", "title": "AI Developer Tracker: Revoke Assessment Workflow Consent" },
-      {"command": "ai-developer-tracker.archiveAssessmentConnection", "title": "AI Developer Tracker: Archive Assessment Connection"},
-      {"command": "ai-developer-tracker.pairAssessment", "title": "AI Developer Tracker: Pair Assessment"},
-      {"command": "ai-developer-tracker.startAssessment", "title": "AI Developer Tracker: Start Assessment"},
-      {"command": "ai-developer-tracker.stopAndSubmitAssessment", "title": "AI Developer Tracker: Stop & Submit Assessment"},
-      {"command": "ai-developer-tracker.showAssessmentStatus", "title": "AI Developer Tracker: Show Assessment Status"},
-      {"command": "ai-developer-tracker.configureAssessmentDisclosure", "title": "AI Developer Tracker: Configure Assessment Disclosure Consent"},
-      {"command": "ai-developer-tracker.showAssessmentDisclosure", "title": "AI Developer Tracker: Show Assessment Disclosure Consent"},
-      {"command": "ai-developer-tracker.revokeAssessmentDisclosure", "title": "AI Developer Tracker: Revoke Assessment Disclosure Consent"},
-      {"command": "ai-developer-tracker.configureAssessmentAiProcessingConsent", "title": "AI Developer Tracker: Configure Assessment AI Processing Consent"},
-      {"command": "ai-developer-tracker.showAssessmentAiProcessingConsent", "title": "AI Developer Tracker: Show Assessment AI Processing Consent"},
-      {"command": "ai-developer-tracker.revokeAssessmentAiProcessingConsent", "title": "AI Developer Tracker: Revoke Assessment AI Processing Consent"},
-      {"command": "ai-developer-tracker.startClaudeCapture", "title": "AI Developer Tracker: Start Claude Code Capture"},
-      {"command": "ai-developer-tracker.revokeClaudeCapture", "title": "AI Developer Tracker: Revoke Claude Code Capture"},
-      {"command": "ai-developer-tracker.showRecordedEventSummary", "title": "AI Developer Tracker: Show Recorded Event Summary"},
-      {"command": "ai-developer-tracker.configureUploadEndpoint", "title": "AI Developer Tracker: Configure Upload Endpoint"},
-      {"command": "ai-developer-tracker.configureUploadAuthentication", "title": "AI Developer Tracker: Configure Upload Authentication"},
-      {"command": "ai-developer-tracker.enableUploads", "title": "AI Developer Tracker: Enable Uploads"},
-      {"command": "ai-developer-tracker.disableUploads", "title": "AI Developer Tracker: Disable Uploads"},
-      {"command": "ai-developer-tracker.showUploadStatus", "title": "AI Developer Tracker: Show Upload Status"},
+      {
+        "command": "ai-developer-tracker.connectCurrentAiChat",
+        "title": "AI Developer Tracker: Connect Current AI Chat"
+      },
+      {
+        "command": "ai-developer-tracker.showAssessmentAiCaptureStatus",
+        "title": "AI Developer Tracker: Show Assessment AI Capture Status"
+      },
+      {
+        "command": "ai-developer-tracker.launchAssessmentAiSession",
+        "title": "AI Developer Tracker: Launch Assessment AI Session"
+      },
+      {
+        "command": "ai-developer-tracker.revokeAssessmentWorkflowConsent",
+        "title": "AI Developer Tracker: Revoke Assessment Workflow Consent"
+      },
+      {
+        "command": "ai-developer-tracker.archiveAssessmentConnection",
+        "title": "AI Developer Tracker: Archive Assessment Connection"
+      },
+      {
+        "command": "ai-developer-tracker.pairAssessment",
+        "title": "AI Developer Tracker: Pair Assessment"
+      },
+      {
+        "command": "ai-developer-tracker.startAssessment",
+        "title": "AI Developer Tracker: Start Assessment"
+      },
+      {
+        "command": "ai-developer-tracker.stopAndSubmitAssessment",
+        "title": "AI Developer Tracker: Stop & Submit Assessment"
+      },
+      {
+        "command": "ai-developer-tracker.showAssessmentStatus",
+        "title": "AI Developer Tracker: Show Assessment Status"
+      },
+      {
+        "command": "ai-developer-tracker.configureAssessmentDisclosure",
+        "title": "AI Developer Tracker: Configure Assessment Disclosure Consent"
+      },
+      {
+        "command": "ai-developer-tracker.showAssessmentDisclosure",
+        "title": "AI Developer Tracker: Show Assessment Disclosure Consent"
+      },
+      {
+        "command": "ai-developer-tracker.revokeAssessmentDisclosure",
+        "title": "AI Developer Tracker: Revoke Assessment Disclosure Consent"
+      },
+      {
+        "command": "ai-developer-tracker.configureAssessmentAiProcessingConsent",
+        "title": "AI Developer Tracker: Configure Assessment AI Processing Consent"
+      },
+      {
+        "command": "ai-developer-tracker.showAssessmentAiProcessingConsent",
+        "title": "AI Developer Tracker: Show Assessment AI Processing Consent"
+      },
+      {
+        "command": "ai-developer-tracker.revokeAssessmentAiProcessingConsent",
+        "title": "AI Developer Tracker: Revoke Assessment AI Processing Consent"
+      },
+      {
+        "command": "ai-developer-tracker.startClaudeCapture",
+        "title": "AI Developer Tracker: Start Claude Code Capture"
+      },
+      {
+        "command": "ai-developer-tracker.revokeClaudeCapture",
+        "title": "AI Developer Tracker: Revoke Claude Code Capture"
+      },
+      {
+        "command": "ai-developer-tracker.showRecordedEventSummary",
+        "title": "AI Developer Tracker: Show Recorded Event Summary"
+      },
+      {
+        "command": "ai-developer-tracker.configureUploadEndpoint",
+        "title": "AI Developer Tracker: Configure Upload Endpoint"
+      },
+      {
+        "command": "ai-developer-tracker.configureUploadAuthentication",
+        "title": "AI Developer Tracker: Configure Upload Authentication"
+      },
+      {
+        "command": "ai-developer-tracker.enableUploads",
+        "title": "AI Developer Tracker: Enable Uploads"
+      },
+      {
+        "command": "ai-developer-tracker.disableUploads",
+        "title": "AI Developer Tracker: Disable Uploads"
+      },
+      {
+        "command": "ai-developer-tracker.showUploadStatus",
+        "title": "AI Developer Tracker: Show Upload Status"
+      },
       {
         "command": "ai-developer-tracker.deleteLocalEvidence",
         "title": "AI Developer Tracker: Delete Local Assessment Evidence"
@@ -109,8 +262,14 @@
         "command": "ai-developer-tracker.showQueueHealth",
         "title": "AI Developer Tracker: Show Local Queue Health"
       },
-      { "command": "ai-developer-tracker.enableAssessmentUploads", "title": "AI Developer Tracker: Enable Assessment Uploads" },
-      { "command": "ai-developer-tracker.revokeAssessmentCredential", "title": "AI Developer Tracker: Revoke Assessment Credential" },
+      {
+        "command": "ai-developer-tracker.enableAssessmentUploads",
+        "title": "AI Developer Tracker: Enable Assessment Uploads"
+      },
+      {
+        "command": "ai-developer-tracker.revokeAssessmentCredential",
+        "title": "AI Developer Tracker: Revoke Assessment Credential"
+      },
       {
         "command": "ai-developer-tracker.startRecording",
         "title": "AI Developer Tracker: Start Recording (Manual / Development)"
@@ -136,7 +295,7 @@
   "devDependencies": {
     "@types/mocha": "^10.0.10",
     "@types/node": "24.x",
-    "@types/vscode": "^1.140.0",
+    "@types/vscode": "^1.125.0",
     "@vscode/test-cli": "^0.0.15",
     "@vscode/test-electron": "^3.0.0",
     "eslint": "^10.5.0",

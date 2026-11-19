@@ -1,5 +1,9 @@
 .vscode/**
 .vscode-test/**
+.planning/**
+.plans/**
+.ai/**
+*.plan.md
 src/**
 out/test/**
 .gitignore
